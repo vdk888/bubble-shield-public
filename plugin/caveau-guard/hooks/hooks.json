@@ -1,9 +1,19 @@
 {
-  "description": "Caveau guard — block reads of protected client folders until anonymised; tripwire raw PII pasted/uploaded into the chat.",
+  "description": "Caveau guard — block reads of protected client folders until anonymised; tripwire raw PII pasted/uploaded into the chat. SessionStart self-installs the guard into user settings so it also fires in Cowork (where plugin hooks are excluded by --setting-sources=user).",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/install_user_hooks.py"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Read|Edit|Write|Glob|Grep|Bash|NotebookEdit",
+        "matcher": "Read|Edit|Write|Glob|Grep|Bash|NotebookEdit|mcp__workspace__bash",
         "hooks": [
           {
             "type": "command",

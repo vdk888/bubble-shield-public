@@ -5,6 +5,18 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.3.0 — 2026-06-03
+
+- **Cowork enforcement fix.** In Cowork the agent runs in a VM spawned with
+  `--setting-sources=user`, so plugin-bundled hooks (`hooks/hooks.json`) are
+  silently ignored — only the VM's user `settings.json` is honoured (Anthropic
+  issue #16288). Added a **SessionStart** hook (`scripts/install_user_hooks.py`)
+  which DOES fire from a plugin and writes the guard (PreToolUse) + tripwire
+  (UserPromptSubmit) into the VM's `~/.claude/settings.json` at session start.
+  Idempotent; preserves other hooks; harmless no-op on the CLI.
+- The guard now also matches Cowork's shell tool `mcp__workspace__bash` (not just
+  `Bash`), and reads the command from `command`/`script`/`code`.
+
 ## 1.2.1 — 2026-06-02
 
 - **Encrypted vaults now work with zero install too.** Re-implemented vault

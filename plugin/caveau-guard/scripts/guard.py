@@ -288,11 +288,15 @@ def main() -> None:
         return False, ""
 
     # --- Bash: scan the command string for any protected path mention ---
-    if tool_name == "Bash":
+    # Cowork runs shell via `mcp__workspace__bash` (not `Bash`); treat both. The
+    # command may be under `command` (CLI Bash) or `script`/`code` (some MCP bash).
+    if tool_name in ("Bash", "mcp__workspace__bash") or tool_name.endswith("__bash"):
         if not block_bash:
             _allow()
             return
-        command = (tool_input.get("command") or "")
+        command = (tool_input.get("command")
+                   or tool_input.get("script")
+                   or tool_input.get("code") or "")
         home = os.path.expanduser("~")
         # Protected roots to scan for: global config folders + any marker folders
         # we can discover. We can't walk up from a "candidate file" for Bash (the
