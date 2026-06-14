@@ -5,6 +5,16 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.8.1 — 2026-06-14
+
+- **`caveau_enable_global` MCP tool — truly-global "anonymise everywhere", one
+  click, no Terminal.** Sets `posttool_enabled` in the host config
+  (~/.config/caveau/caveau-guard.json) from inside Cowork — the host-side MCP
+  server reaches the path the agent's VM shell can't. on/off/status; MERGES into
+  the existing config (preserves protected_folders etc., never clobbers). Closes
+  the last "needs you / needs Terminal" gap for machine-wide coverage. Tests:
+  caveau_mcp 18/18 (incl. merge-preserves-keys).
+
 ## 1.8.0 — 2026-06-14
 
 - **Three new MCP tools — "PII from anywhere" + write-back, no Terminal.**

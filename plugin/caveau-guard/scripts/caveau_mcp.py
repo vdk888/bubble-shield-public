@@ -126,6 +126,26 @@ TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "caveau_enable_global",
+        "description": (
+            "Turn the TRULY GLOBAL 'anonymise PII everywhere' switch on or off — the "
+            "machine-wide setting that can't be reached from a folder marker. Use "
+            "this when the user wants ambient anonymisation to apply automatically "
+            "EVERYWHERE on their machine, not just in folders they mark. It writes "
+            "the host config (~/.config/caveau/caveau-guard.json) for them — no "
+            "Terminal. action='on' enables, 'off' disables, 'status' reports the "
+            "current value. Existing settings (protected folders, etc.) are "
+            "preserved."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["on", "off", "status"],
+                           "description": "'on'/'off' to set the global switch, 'status' to read it."}
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 
@@ -270,6 +290,40 @@ def _setup_status() -> dict:
     return {"state": state, "message": msgs.get(state, state)}
 
 
+# ---- global "anonymise everywhere" switch (host-side config) ---------------
+
+GLOBAL_CONFIG = Path(os.path.expanduser("~/.config/caveau/caveau-guard.json"))
+
+
+def _enable_global(action: str) -> dict:
+    """Set/read posttool_enabled in the host global config, MERGING (never
+    clobbering protected_folders etc.). Runs host-side via the MCP server, so it
+    works from Cowork where the agent's own shell can't reach ~/.config."""
+    cfg = {}
+    if GLOBAL_CONFIG.is_file():
+        try:
+            cfg = json.loads(GLOBAL_CONFIG.read_text(encoding="utf-8")) or {}
+        except Exception:
+            cfg = {}
+    if action == "status":
+        on = bool(cfg.get("posttool_enabled", False))
+        return {"state": "on" if on else "off",
+                "message": ("La protection globale « partout » est ACTIVE."
+                            if on else "La protection globale « partout » est INACTIVE.")}
+    cfg.setdefault("protected_folders", cfg.get("protected_folders", []))
+    cfg["posttool_enabled"] = (action == "on")
+    GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    GLOBAL_CONFIG.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    if action == "on":
+        return {"state": "on",
+                "message": "Protection « partout » ACTIVÉE pour toute la machine. "
+                           "Désormais, tout ce que l'assistant lit est anonymisé "
+                           "automatiquement, où que ce soit — sans marquer de dossier."}
+    return {"state": "off",
+            "message": "Protection « partout » désactivée. Les dossiers marqués "
+                       "restent protégés."}
+
+
 # ---- minimal JSON-RPC / MCP plumbing (stdio) -------------------------------
 
 def _send(obj: dict) -> None:
@@ -327,6 +381,9 @@ def _handle(req: dict) -> None:
             elif name == "caveau_setup_ml":
                 action = args.get("action", "status")
                 r = _setup_start() if action == "start" else _setup_status()
+                ok(f"[{r['state']}] {r['message']}")
+            elif name == "caveau_enable_global":
+                r = _enable_global(args.get("action", "status"))
                 ok(f"[{r['state']}] {r['message']}")
             else:
                 _error(id_, -32601, f"unknown tool: {name}")

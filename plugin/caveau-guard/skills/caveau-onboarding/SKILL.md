@@ -170,11 +170,17 @@ e-mails", "active la détection intelligente"):
    machine; nothing is sent anywhere. (On the CLI you can instead run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/caveau_setup_ml.py"` directly — same
    result. The MCP tool is the no-Terminal path for Cowork.)
-3. **Turn the feature on** — add `"posttool_enabled": true` to the client's
-   Caveau config (the global `~/.config/caveau/caveau-guard.json`, or — in Cowork
-   — to the relevant folder marker). Without this flag the pack stays dormant even
-   once installed (opt-in by design). For data the assistant reads explicitly you
-   don't even need the flag — see the tools below.
+3. **Turn the feature on.** Two scopes:
+   - **Truly global (one click, recommended for "everywhere"):** call the
+     **`caveau_enable_global`** tool with `action: "on"`. It writes the host
+     config for them (no Terminal, works from Cowork) so ambient anonymisation
+     applies to *anything* the assistant reads, machine-wide. `action: "off"`
+     disables, `action: "status"` reads it. Existing protected folders are kept.
+   - **Per-folder:** add `"posttool_enabled": true` to a folder marker (covers
+     just that folder + subtree).
+   Without either, the pack stays dormant once installed (opt-in by design). For
+   data the assistant reads *explicitly* you don't even need the flag — see the
+   tools below.
 4. **Confirm it's live** in plain words:
    > « C'est prêt. Désormais, quand l'assistant lit un document, un e-mail, un
    > tableur, il anonymise automatiquement les informations sensibles avant de les
@@ -213,6 +219,8 @@ hand — they keep the real values out of your context and in the local vault:
   only a success confirmation, **never the real content** — so you build a
   complete, real document blind to the client's identity.
 - **`caveau_setup_ml`(action)** — install/check the accuracy pack (above).
+- **`caveau_enable_global`(action)** — turn the machine-wide "anonymise
+  everywhere" switch on/off/status (writes the host config, no Terminal).
 
 Typical full workflow: `caveau_read` (or `caveau_anonymize_text`) the input →
 reason and draft using tokens → `caveau_write` the final document. The client
