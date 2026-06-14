@@ -88,14 +88,22 @@ into it. To **stop** protecting a folder: delete its marker.
 > also works and composes with markers. Most clients use Cowork — prefer the
 > marker. Full field reference for both in `references/configure.md`.
 
-### 2. Anonymise a dossier (one command)
+### 2. Read / anonymise a dossier
 
-When the user wants the assistant to work on a real dossier, use the companion
-skill **`caveau-anonymize`** — it handles PDFs and Word docs automatically and
-writes anonymised copies into a `clean/` sub-folder. You don't need to re-explain
-the mechanics here; just invoke that skill and work on the cloaked copies.
+When the user wants the assistant to work on a real client file:
 
-If they prefer a visual, show them the **before/after artifact** (next).
+- **One file (the quick path):** read it through the **`caveau_read`** tool —
+  it returns the file's contents already anonymised (`⟦…⟧` tokens), so the real
+  data never reaches the model. This is the default way to open a single
+  protected file, and the path that works in Cowork (a plain read of a protected
+  file is blocked by design). Then work on what it returns; de-anonymise the
+  final answer locally.
+- **A whole dossier (batch):** use the companion skill **`caveau-anonymize`** —
+  it handles PDFs and Word docs automatically and writes anonymised copies into a
+  `clean/` sub-folder. Invoke that skill and work on the cloaked copies.
+
+Either way the real values stay in a local vault and the answer is restored at
+the end. If they prefer a visual, show them the **before/after artifact** (next).
 
 ### 3. Show the visual (before/after + masquer/conserver)
 
@@ -202,8 +210,9 @@ pitch, the "is it really safe?" answer, the demo walk-through).
 
 ## When something looks wrong
 
-- "The assistant says it can't read my file" → that's the guard working. Run
-  `caveau-anonymize` on the folder, then work on the `clean/` copies.
+- "The assistant says it can't read my file" → that's the guard working. Read it
+  through the **`caveau_read`** tool (returns it anonymised), or run
+  `caveau-anonymize` on the whole folder and work on the `clean/` copies.
 - "Nothing is being blocked" → the folder probably has no `.caveau-guard.json`
   marker (step 1), or the plugin was just installed and the session still needs a
   one-time `/reload-plugins`. Check that the marker file exists inside the client

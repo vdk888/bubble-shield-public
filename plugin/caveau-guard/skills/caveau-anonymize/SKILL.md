@@ -11,7 +11,33 @@ sanctioned path: anonymise locally first, then work on the cloaked copy.
 ## When you were just blocked
 
 If a tool call was denied with a `🔒 Caveau` message, do NOT try to bypass it
-(no `cat`, no copying the file elsewhere, no reading via Bash). Instead:
+(no `cat`, no copying the file elsewhere, no reading via Bash).
+
+### Fastest path — read it through `caveau_read` (one file)
+
+The plugin ships an MCP tool **`caveau_read`** (namespaced, e.g.
+`mcp__plugin_caveau-guard_caveau__caveau_read`, or just call it `caveau_read`).
+Give it the blocked file's path and it returns the file's contents **already
+anonymised** (`⟦NOM_0001⟧`-style tokens) — the real names/IBANs/e-mails never
+enter your context. This is the preferred way to read a single protected file,
+**especially in Cowork**, where it's the mechanism that actually works (a normal
+Read of a protected file is blocked by design; `caveau_read` is the sanctioned
+read).
+
+```
+caveau_read(path="~/Dossiers-clients/dossier-dupont/contrat.pdf")
+→ returns the cloaked text; work on THAT.
+```
+
+It handles .pdf/.docx/.txt/.md/.csv/.json, uses the same vault as the rest of
+Caveau (so tokens are consistent and reversible), and **fails closed** (returns
+an error, never raw text, if it can't anonymise). When your answer still carries
+`⟦…⟧` tokens, de-anonymise it locally (see "De-anonymise the answer" below).
+
+### Whole-folder path — anonymise a batch into `clean/`
+
+For a whole dossier (many files at once), or when you want anonymised copies on
+disk, use the batch flow instead:
 
 1. Tell the user the file is in a protected folder and offer to anonymise it.
 2. Run the anonymisation below into a `clean/` sub-folder.
