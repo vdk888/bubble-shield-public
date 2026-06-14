@@ -5,6 +5,29 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.8.0 — 2026-06-14
+
+- **Three new MCP tools — "PII from anywhere" + write-back, no Terminal.**
+  - `caveau_anonymize_text(text)` — anonymise any text that isn't a file (an
+    e-mail body, a message, an API result). The mail path: fetch → anonymise the
+    body → reason over tokens. Closes the gap that `caveau_read` (files only)
+    left.
+  - `caveau_write(path, content)` — the write-back direction: the agent drafts a
+    document using ⟦…⟧ tokens, calls this with the output path; Caveau restores
+    the real values LOCALLY and writes the file, returning only a success line —
+    NEVER the de-anonymised content. So a finished client document with real PII
+    is produced without the agent ever seeing the real values. Fail-closed
+    (errors if no vault; never writes raw on failure).
+  - `caveau_setup_ml(action=start|status)` — installs/checks the ML accuracy pack
+    from INSIDE Cowork with no Terminal: the host-side MCP server spawns the
+    bootstrap detached and reports progress, since the agent's own shell is
+    VM-only. start is idempotent (no reinstall if present).
+- Onboarding skill updated: the four tools, the no-Terminal ML setup flow, and
+  the read-in → tokens → write-out workflow.
+- Tests: caveau_mcp 12/12 (incl. write hides real PII from the response while the
+  file gets it; fail-closed without a vault); guard 14/14, marker 11/11,
+  tripwire 18/18, posttool 11/11, extract OK. plugin validate ✔.
+
 ## 1.7.0 — 2026-06-14
 
 - **`caveau_read` MCP tool — the Cowork workaround for ambient anonymisation.**

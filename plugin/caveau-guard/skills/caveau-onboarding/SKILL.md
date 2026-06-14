@@ -161,18 +161,20 @@ e-mails", "active la détection intelligente"):
    > document directement dans la conversation, il est déjà sous les yeux de
    > l'assistant avant que Caveau n'agisse — travaillez toujours depuis vos
    > fichiers, jamais par copier-coller. »
-2. **Set it up FOR them** — run the bootstrap (don't hand them a command):
-   ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/caveau_setup_ml.py"
-   ```
-   It creates a small dedicated environment, downloads the on-device model, and
-   installs an auto-start so the detector is ready at every login. Watch for the
-   final `✅ ML pack ready` line. First run needs a network connection and a few
-   minutes; after that it's automatic and offline.
+2. **Set it up FOR them — no Terminal.** Call the **`caveau_setup_ml`** tool with
+   `action: "start"`. It launches the one-time install in the background
+   (downloads the on-device model, a few hundred MB) and returns immediately.
+   Then poll **`caveau_setup_ml`** with `action: "status"` every ~20 seconds until
+   it reports `ready`, and keep the user company while it runs ("J'installe la
+   détection avancée, ça prend quelques minutes…"). This runs entirely on their
+   machine; nothing is sent anywhere. (On the CLI you can instead run
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/caveau_setup_ml.py"` directly — same
+   result. The MCP tool is the no-Terminal path for Cowork.)
 3. **Turn the feature on** — add `"posttool_enabled": true` to the client's
    Caveau config (the global `~/.config/caveau/caveau-guard.json`, or — in Cowork
    — to the relevant folder marker). Without this flag the pack stays dormant even
-   once installed (opt-in by design).
+   once installed (opt-in by design). For data the assistant reads explicitly you
+   don't even need the flag — see the tools below.
 4. **Confirm it's live** in plain words:
    > « C'est prêt. Désormais, quand l'assistant lit un document, un e-mail, un
    > tableur, il anonymise automatiquement les informations sensibles avant de les
@@ -190,6 +192,31 @@ e-mails", "active la détection intelligente"):
 - The masquer/conserver table (above) governs this layer too — same toggles.
 
 Troubleshooting + the full mechanics are in `references/accuracy-pack.md`.
+
+## The Caveau tools you call (read in / write out)
+
+Four tools ship with the plugin. Reach for them instead of doing PII-handling by
+hand — they keep the real values out of your context and in the local vault:
+
+- **`caveau_read`(path)** — read a client *file* anonymised (the default for any
+  file that may hold PII; the guard blocks the raw Read).
+- **`caveau_anonymize_text`(text)** — anonymise any *text that isn't a file*: the
+  body of an **e-mail** you fetched, a message, an API result. Whenever you're
+  about to read or quote client data that came from somewhere other than a marked
+  folder — **e-mails especially** — pass it through this first. This is how
+  "protect PII from anywhere" works for mail: fetch the message, then immediately
+  `caveau_anonymize_text` its body before you reason over it.
+- **`caveau_write`(path, content)** — produce a **finished client document with
+  the REAL names** without ever seeing them. Draft the letter/summary/note using
+  the `⟦…⟧` tokens, then call `caveau_write` with your token draft + the output
+  path. Caveau restores the real values locally and writes the file; it returns
+  only a success confirmation, **never the real content** — so you build a
+  complete, real document blind to the client's identity.
+- **`caveau_setup_ml`(action)** — install/check the accuracy pack (above).
+
+Typical full workflow: `caveau_read` (or `caveau_anonymize_text`) the input →
+reason and draft using tokens → `caveau_write` the final document. The client
+gets real, usable output; you never touched a real name.
 
 ## How to talk to the client — tone
 
