@@ -286,19 +286,22 @@ def main() -> None:
         _noop()
 
     cfg = _load_config()
+    tool_name = event.get("tool_name", "")
+
+    # MAIL CONTAINMENT (shape-validated). Runs INDEPENDENTLY of posttool_enabled:
+    # mail PII is high-risk and reaches context the moment the connector returns,
+    # so containment is ON BY DEFAULT (mail_containment defaults to true; set it
+    # false to fall back to the PreToolUse steer only). For mail connector
+    # results, anonymise in place PRESERVING the shape; bail to pass-through on
+    # ANY mismatch/error (fail-safe → never crashes the connector).
+    if _is_mail_tool(tool_name) and cfg.get("mail_containment", True):
+        _try_mail_containment(event, cfg)
+        return  # always exits (rewrite or _noop)
+
+    # Everything below is the AMBIENT ML rewrite, which IS opt-in.
     if not cfg.get("posttool_enabled", False):
         _noop()  # OPT-IN: off by default
 
-    tool_name = event.get("tool_name", "")
-
-    # MAIL CONTAINMENT (shape-validated, opt-in via mail_containment). For mail
-    # connector results, attempt an in-place anonymise that PRESERVES the shape;
-    # bail to pass-through on any mismatch. Separate from the simple-text path
-    # below because mail results are structured.
-    if _is_mail_tool(tool_name) and cfg.get("mail_containment", False):
-        _try_mail_containment(event, cfg)
-        # _try_mail_containment always exits (rewrite or _noop)
-        return
     # Scope: which tools to scrub (default = ingestion tools, not Claude's own writes)
     matcher_substrs = cfg.get("posttool_tools")  # optional explicit allow-list
     if matcher_substrs and not any(s in tool_name for s in matcher_substrs):

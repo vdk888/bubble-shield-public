@@ -5,6 +5,16 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.11.0 — 2026-06-14
+
+- **Mail containment is now ON BY DEFAULT.** `mail_containment` defaults true and
+  runs INDEPENDENTLY of `posttool_enabled`. Mail PII reaches context the instant
+  the connector returns and is high-risk, so protection-on is the honest default
+  for a privacy product. The fail-safe (pass-through on any shape mismatch, never
+  crashes the connector) is what makes default-on safe despite the
+  undocumented-shape dependency. Set `mail_containment:false` to fall back to the
+  PreToolUse steer only. Tests: posttool 19/19, guard 21/21.
+
 ## 1.10.0 — 2026-06-14
 
 - **Mail containment (opt-in `mail_containment`) — true protection with a safety
