@@ -5,6 +5,20 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.8.2 — 2026-06-14 (fix)
+
+- **Fix: PostToolUse hook no longer breaks MCP connectors (Gmail).** The hook
+  matches `mcp__.*` and rewrote any result containing PII via a flat
+  `updatedToolOutput {type:text,text}`. For connectors returning STRUCTURED
+  results (e.g. Gmail `{threads:[...]}`) that replaced the array/object shape
+  with a string → the connector's own handler threw `H.reduce is not a function`
+  on every call (reproduced + root-caused from a live Cowork session; Gmail
+  worked in a plain chat with no Caveau). Now the hook only rewrites SIMPLE text
+  results (bare string / `{type,text}` / pure text-block list) and leaves any
+  structured result UNTOUCHED. PII inside structured MCP results is handled by
+  the explicit `caveau_anonymize_text` / `caveau_read` tools, not the ambient
+  rewrite. Regression guards added (structured + mixed). posttool 13/13.
+
 ## 1.8.1 — 2026-06-14
 
 - **`caveau_enable_global` MCP tool — truly-global "anonymise everywhere", one

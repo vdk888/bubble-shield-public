@@ -97,22 +97,41 @@ def _load_config() -> dict:
     return {}
 
 
-def _extract_text(tool_response) -> str:
-    """Pull printable text out of the various tool_response shapes."""
+# Keys whose value is the plain-text payload of a simple tool result.
+_TEXT_KEYS = ("text", "content", "stdout", "output", "body", "result")
+
+
+def _extract_text(tool_response):
+    """Pull printable text AND decide if the response is a SAFE-to-rewrite plain
+    text shape. Returns (text, safe).
+
+    safe is True only when the response IS the text (a bare string, a {type,text}
+    block, or a dict whose payload is purely a text string/text-block list).
+
+    safe is False for STRUCTURED results — a dict/array carrying its own schema
+    (e.g. Gmail's {threads:[...]}). Rewriting those with a flat string would
+    destroy the shape the connector expects and break it
+    (the 'H.reduce is not a function' bug). For structured results we leave the
+    output untouched; PII inside them is handled by the explicit
+    caveau_anonymize_text / caveau_read tools, not the ambient rewrite."""
     if isinstance(tool_response, str):
-        return tool_response
+        return tool_response, True
     if isinstance(tool_response, dict):
-        for k in ("text", "content", "stdout", "output", "body", "result"):
+        # a plain {type:'text', text:'...'} block, or {text:'...'} alone → safe
+        for k in _TEXT_KEYS:
             v = tool_response.get(k)
             if isinstance(v, str) and v:
-                return v
-        # content may be a list of blocks
+                # safe only if there's no OTHER structured payload alongside the text
+                others = [kk for kk, vv in tool_response.items()
+                          if kk not in _TEXT_KEYS and kk != "type"
+                          and not (vv is None or isinstance(vv, (str, int, float, bool)))]
+                return v, (len(others) == 0)
+        # content may be a list of pure text blocks → safe; anything else → not
         c = tool_response.get("content")
         if isinstance(c, list):
-            return "\n".join(
-                b.get("text", "") for b in c
-                if isinstance(b, dict) and b.get("type") == "text")
-    return ""
+            if all(isinstance(b, dict) and b.get("type") == "text" for b in c) and c:
+                return "\n".join(b.get("text", "") for b in c), True
+    return "", False
 
 
 def _daemon_up() -> bool:
@@ -197,8 +216,13 @@ def main() -> None:
     if matcher_substrs and not any(s in tool_name for s in matcher_substrs):
         _noop()
 
-    text = _extract_text(event.get("tool_response", ""))
-    if not text or len(text) > 200_000:   # skip empties + absurdly large blobs
+    text, safe = _extract_text(event.get("tool_response", ""))
+    # Only rewrite SIMPLE text results. A structured result (e.g. an MCP
+    # connector returning {threads:[...]}) must be left untouched — replacing it
+    # with a flat string destroys the shape the connector expects and breaks it
+    # ('H.reduce is not a function'). PII inside structured results is covered by
+    # the explicit caveau_anonymize_text / caveau_read tools.
+    if not safe or not text or len(text) > 200_000:
         _noop()
 
     # CHEAP GATE: only do real work if validated PII is present.
