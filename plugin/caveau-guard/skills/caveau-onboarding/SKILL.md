@@ -229,15 +229,17 @@ gets real, usable output; you never touched a real name.
 ## E-mails — the mail-guard (enforced)
 
 Mail lives behind a third-party connector Caveau can't fetch itself, so it can't
-transparently anonymise it. Instead, the guard **blocks raw mail-connector reads**
-(Gmail `search_threads`/`get_thread`/`list_messages`…) and tells you to pipe the
-fetched text through `caveau_anonymize_text` before using it. So when a mail read
-is denied with a 🔒 message: fetch the message, then **always** run its text
-through `caveau_anonymize_text`, and reason only over the anonymised version.
-Never summarise or quote a raw e-mail body. (Honest scope: this is a strong
-steer, not the hard containment the folder guard gives — the raw mail still
-transits the tool result once before you anonymise it. The reliable rule for the
-user: don't act on raw mail; route it through Caveau. Opt-out: `mail_guard:false`.)
+transparently anonymise it. When the agent reads mail (Gmail
+`search_threads`/`get_thread`/`list_messages`…), the guard **lets the fetch
+through but injects a forceful instruction**: anonymise the fetched message text
+via `caveau_anonymize_text` BEFORE reading, summarising, quoting, or acting on
+it, then work only on the anonymised version (⟦…⟧). So: when you fetch mail,
+ALWAYS run its text through `caveau_anonymize_text` first; never reproduce a raw
+identifying value. (We allow-and-steer rather than block, because blocking the
+fetch is a catch-22 — the fetch is the only way to GET the text to anonymise.
+Honest scope: a strong steer, NOT the hard containment the folder guard gives —
+raw mail transits the tool result once before you anonymise it. Opt-out:
+`mail_guard:false`.)
 
 ## How to talk to the client — tone
 

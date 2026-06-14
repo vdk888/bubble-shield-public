@@ -5,6 +5,19 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.9.1 — 2026-06-14 (fix)
+
+- **Fix: mail-guard no longer creates a catch-22.** 1.9.0 DENIED raw mail reads
+  and told the agent to "fetch then anonymise" — but a PreToolUse deny means the
+  fetch never runs, so the agent retried the same blocked call forever and mail
+  became UNUSABLE (live-caught: the agent correctly refused to route around it).
+  The fetch IS the only way to get the mail text to anonymise, so blocking it is
+  self-contradictory. Now the guard ALLOWS the mail read but returns
+  `additionalContext` (PreToolUse supports allow + context) forcefully instructing
+  the model to run the fetched text through `caveau_anonymize_text` before using
+  it. Mail flows; strong steer; still honest-scope (a steer, not hard
+  containment — raw mail transits the result once). guard 21/21.
+
 ## 1.9.0 — 2026-06-14
 
 - **Mail-guard — enforced anonymisation for e-mail (PreToolUse).** Live test

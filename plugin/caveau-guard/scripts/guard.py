@@ -69,6 +69,23 @@ def _deny(reason: str) -> None:
     _decide("deny", reason)
 
 
+def _allow_with_context(context: str) -> None:
+    """Allow the tool to run, but inject a steering instruction the model sees
+    alongside the result (PreToolUse supports allow + additionalContext). Used
+    by the mail-guard: blocking the fetch is a catch-22 (the fetch is the only
+    way to GET the mail to anonymise), so instead we let it through and forcefully
+    instruct the model to anonymise the fetched text before using it."""
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "Caveau mail-guard: allowed with anonymise-first instruction.",
+            "additionalContext": context,
+        }
+    }))
+    sys.exit(0)
+
+
 def _allow(reason: str = "") -> None:
     # No decision needed for the normal case: exit 0 with no JSON lets the
     # normal permission flow proceed. We only emit explicit "allow" when we
@@ -266,15 +283,18 @@ def main() -> None:
             or "mail" in tl or "gmail" in tl or "imap" in tl
             or any(p in tl for p in extra)))
         if is_mail:
-            _deny(
-                "🔒 Caveau — ne traite pas les e-mails bruts directement. "
-                "Le contenu d'un e-mail peut contenir des données identifiantes "
-                "d'un client (nom, e-mail, IBAN…).\n"
-                "→ Après avoir récupéré le(s) message(s), fais IMPÉRATIVEMENT "
-                "passer leur texte par l'outil `caveau_anonymize_text` AVANT de "
-                "les lire, résumer ou citer. Travaille ensuite uniquement sur la "
-                "version anonymisée (jetons ⟦…⟧).\n"
-                "[Caveau mail-guard: " + tool_name + "]")
+            # ALLOW the fetch (blocking it is a catch-22 — the fetch is the only
+            # way to obtain the mail text to anonymise), but inject a forceful
+            # anonymise-first instruction the model sees with the result.
+            _allow_with_context(
+                "⚠️ Caveau mail-guard : ce résultat contient des e-mails BRUTS, "
+                "qui peuvent renfermer des données identifiantes d'un client "
+                "(nom, e-mail, IBAN, téléphone…). Avant de lire, résumer, citer "
+                "ou agir sur ce contenu, tu DOIS d'abord faire passer le texte de "
+                "chaque message par l'outil `caveau_anonymize_text`, puis ne "
+                "travailler que sur la version anonymisée (jetons ⟦…⟧). Ne "
+                "reproduis JAMAIS une valeur identifiante brute dans ta réponse. "
+                "[mail-guard: " + tool_name + "]")
             return
 
     def _ext_exempt(p: Path, exts: tuple) -> bool:
