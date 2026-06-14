@@ -1,12 +1,12 @@
 {
-  "description": "Caveau guard — block reads of protected client folders until anonymised; tripwire raw PII pasted/uploaded into the chat. SessionStart self-installs the guard into user settings so it also fires in Cowork (where plugin hooks are excluded by --setting-sources=user).",
+  "description": "Caveau guard — block reads of protected client folders until anonymised; tripwire raw PII pasted/uploaded into the chat. SessionStart self-installs the guard into the Cowork VM's user settings so it fires there; the installer is GATED to the Cowork sandbox (HOME=/sessions/* or CLAUDE_CODE_IS_COWORK) and no-ops on the host machine, so it can never spill onto a real Mac.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/install_user_hooks.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/install_user_hooks.py\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/guard.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.py\""
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/tripwire.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/tripwire.py\""
           }
         ]
       }

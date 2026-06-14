@@ -5,6 +5,25 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.5.0 — 2026-06-14
+
+- **Cowork-only gate on the self-installer — no more host-Mac spill.** The
+  SessionStart `install_user_hooks.py` previously wrote the PreToolUse guard +
+  UserPromptSubmit tripwire into `$HOME/.claude/settings.json` unconditionally.
+  On a real Mac that shared file is read by every CLI session, cron, and the
+  Desktop app — so the guard spilled off-Cowork and could block unrelated
+  Bash/Read calls (it broke a scheduled task on 2026-06-07). It also survived a
+  plugin uninstall, so it kept firing after removal.
+- The installer now runs ONLY inside the Cowork sandbox VM, detected by
+  `HOME` starting with `/sessions/` (the confirmed Cowork VM home), or
+  `CLAUDE_CODE_IS_COWORK=1`, or `CLAUDE_CODE_ENTRYPOINT=local-agent`. On the host
+  Mac none of these hold → the installer no-ops and writes NOTHING (not even the
+  stable script dir). Verified: live Cowork probe (HOME=/sessions/<name>) +
+  anthropics/claude-code#40495. Fail-safe direction: if Cowork can't be
+  positively confirmed, it does not install.
+- Guard enforcement itself is unchanged and still fires in Cowork (live-verified
+  2026-06-14: a marked Dropbox folder blocked a raw Read with the 🔒 message).
+
 ## 1.4.0 — 2026-06-03
 
 - **Visual tool for Cowork — the before/after as an artifact.** The local webapp

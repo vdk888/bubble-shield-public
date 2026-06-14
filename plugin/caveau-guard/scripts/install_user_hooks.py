@@ -98,9 +98,46 @@ GUARD_CMD = _wrapped_cmd("guard.py")
 TRIP_CMD = _wrapped_cmd("tripwire.py")
 
 
+def _in_cowork_vm() -> bool:
+    """True ONLY when we are genuinely inside the Cowork (local-agent) sandbox VM.
+
+    WHY THIS GATE EXISTS (incident: repeated host-Mac self-lock)
+    -----------------------------------------------------------
+    This installer writes a PreToolUse guard + UserPromptSubmit tripwire into
+    `$HOME/.claude/settings.json`. That file is SHARED by every Claude on the
+    host Mac — CLI sessions, crons, the Desktop app. When this installer ran on
+    the real Mac it spilled the guard into the host's user settings, where it
+    could (and did) block every Bash/Read for unrelated sessions and scheduled
+    tasks. The guard must arm in Cowork and NOWHERE ELSE.
+
+    We confirmed (live Cowork probe, 2026-06-14 + anthropics/claude-code#40495)
+    the reliable Cowork-VM signals:
+      - HOME is `/sessions/<name>`  (host Mac HOME is `/Users/...` or `/root`
+        only in older layouts — never `/sessions/`). This is the primary gate:
+        a real Mac can never have HOME under /sessions/.
+      - CLAUDE_CODE_IS_COWORK == "1"        (set in the host-loop/hook context)
+      - CLAUDE_CODE_ENTRYPOINT == "local-agent"
+
+    We treat ANY of these as "in Cowork". On the host Mac none of them hold, so
+    the installer no-ops → the host settings.json is NEVER touched. Fail-safe
+    direction: if we cannot positively confirm Cowork, we DO NOT install
+    (better an unarmed guard than a bricked Mac — the plugin's own hooks.json
+    still provides protection where the platform honours it).
+    """
+    home = os.environ.get("HOME", "")
+    if home.startswith("/sessions/"):
+        return True
+    if os.environ.get("CLAUDE_CODE_IS_COWORK") == "1":
+        return True
+    if os.environ.get("CLAUDE_CODE_ENTRYPOINT") == "local-agent":
+        return True
+    return False
+
+
 def _user_settings_path() -> Path:
-    # $HOME inside the Cowork VM is /root; on the CLI it's the real home. Either
-    # way, user-scope settings is $HOME/.claude/settings.json.
+    # Inside the Cowork VM, $HOME is `/sessions/<name>`; user-scope settings is
+    # $HOME/.claude/settings.json. (We only ever reach here when _in_cowork_vm()
+    # is true, so this never resolves to the host Mac's home.)
     home = os.environ.get("HOME") or os.path.expanduser("~")
     return Path(home) / ".claude" / "settings.json"
 
@@ -126,6 +163,15 @@ def main() -> None:
         sys.stdin.read()  # drain event JSON; we don't need it
     except Exception:
         pass
+
+    # COWORK-ONLY GATE — the whole point of this installer is to arm the guard
+    # inside the Cowork VM. On the host Mac (or anywhere we can't positively
+    # confirm Cowork) we must NOT write into the shared user settings.json, or
+    # we spill the guard onto the machine and risk bricking unrelated sessions
+    # and crons. So: if we're not in Cowork, do nothing at all. We do NOT even
+    # copy the scripts to STABLE_DIR — leaving zero footprint on the host.
+    if not _in_cowork_vm():
+        sys.exit(0)
 
     try:
         # 1) copy the hook scripts to a stable, never-purged location FIRST, so
