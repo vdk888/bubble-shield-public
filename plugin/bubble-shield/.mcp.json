@@ -1,0 +1,6 @@
+{
+  "bubble_shield": {
+    "command": "python3",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/bubble_shield_mcp.py"]
+  }
+}

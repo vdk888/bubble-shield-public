@@ -3,4 +3,4 @@ __pycache__/
 .DS_Store
 # never ship a real firm-identity config (only the .example)
 **/deployment_allowlist.json
-**/caveau-guard.json
+**/bubble-shield.json

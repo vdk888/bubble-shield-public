@@ -1,7 +1,0 @@
-# never ship a deployment's real config (may name real client folders)
-config/caveau-guard.json
-__pycache__/
-*.pyc
-
-# never ship a real deployment firm-identity config (only the .example)
-vendor/caveau/deployment_allowlist.json
