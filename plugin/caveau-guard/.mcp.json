@@ -1,6 +1,0 @@
-{
-  "caveau": {
-    "command": "python3",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/caveau_mcp.py"]
-  }
-}

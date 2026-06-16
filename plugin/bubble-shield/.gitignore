@@ -1,0 +1,7 @@
+# never ship a deployment's real config (may name real client folders)
+config/bubble-shield.json
+__pycache__/
+*.pyc
+
+# never ship a real deployment firm-identity config (only the .example)
+vendor/bubble_shield/deployment_allowlist.json

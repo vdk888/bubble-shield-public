@@ -1,24 +1,24 @@
 {
-  "name": "bubble-caveau",
+  "name": "bubble-shield",
   "owner": {
     "name": "Bubble Invest",
     "email": "rd@bubbleinvest.com"
   },
   "metadata": {
-    "description": "Fail-closed PII guard for Cowork \u2014 Caveau local anonymiser enforcement",
+    "description": "Fail-closed PII guard for Cowork \u2014 Bubble Shield local anonymiser enforcement",
     "version": "1.11.1"
   },
   "plugins": [
     {
-      "name": "caveau-guard",
-      "source": "./plugin/caveau-guard",
-      "description": "PreToolUse guard that blocks reads of protected client folders until the data is anonymised through Caveau. 100% local, reversible, fail-closed (RGPD art. 25 & 32).",
+      "name": "bubble-shield",
+      "source": "./plugin/bubble-shield",
+      "description": "PreToolUse guard that blocks reads of protected client folders until the data is anonymised through Bubble Shield. 100% local, reversible, fail-closed (RGPD art. 25 & 32).",
       "version": "1.11.1",
       "author": {
         "name": "Bubble Invest",
         "email": "rd@bubbleinvest.com"
       },
-      "homepage": "https://bubbleinvest.com/caveau",
+      "homepage": "https://bubbleinvest.com/bubble_shield",
       "license": "MIT",
       "keywords": [
         "pii",

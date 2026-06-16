@@ -1,4 +1,4 @@
-# Caveau Guard
+# Bubble Shield Guard
 
 **A privacy guard for Claude Cowork / Claude Code.** It stops the AI from reading
 your raw client files until the identifying data has been replaced with anonymous
@@ -14,10 +14,10 @@ documents in an AI assistant. 100 % local, no network, no account, no telemetry.
 3. Paste:
 
    ```
-   vdk888/caveau-guard-public
+   vdk888/bubble-shield-public
    ```
 
-4. Install **caveau-guard** and toggle it on.
+4. Install **bubble-shield** and toggle it on.
 5. Run **`/reload-plugins`** (or restart Cowork).
 
 That’s it — no GitHub account needed (this is a public repository), and it runs
@@ -26,16 +26,16 @@ That’s it — no GitHub account needed (this is a public repository), and it r
 ### Claude Code (CLI) alternative
 
 ```
-/plugin marketplace add vdk888/caveau-guard-public
-/plugin install caveau-guard@bubble-caveau
+/plugin marketplace add vdk888/bubble-shield-public
+/plugin install bubble-shield@bubble-shield
 ```
 
 ## How it works
 
 - **The guard** (a `PreToolUse` hook) blocks Claude from reading any file inside a
-  folder you’ve marked as protected — drop a `.caveau-guard.json` marker into a
+  folder you’ve marked as protected — drop a `.bubble-shield.json` marker into a
   client folder and everything in it becomes the *coffre*.
-- **The anonymiser** (the bundled `/caveau-guard:caveau-anonymize` skill) turns a
+- **The anonymiser** (the bundled `/bubble-shield:bubble-shield-anonymize` skill) turns a
   dossier into anonymised copies the AI can safely work on, then de-anonymises
   the answer locally.
 - **The tripwire** (a `UserPromptSubmit` hook) nudges you if raw client data is
@@ -45,7 +45,7 @@ Everything is **self-contained** — the engine and a pure-python PDF reader are
 bundled, so there is nothing to `pip install`. PDFs, Word (`.docx`), and plain
 text all work out of the box, offline.
 
-New here? Just ask Claude *“how does Caveau work / help me set it up”* — the
+New here? Just ask Claude *“how does Bubble Shield work / help me set it up”* — the
 bundled onboarding skill walks you through it in plain language.
 
 ## Privacy & RGPD
