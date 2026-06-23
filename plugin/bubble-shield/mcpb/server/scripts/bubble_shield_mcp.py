@@ -211,9 +211,20 @@ def _vault_path() -> Path:
     return VAULT_DIR / f"{mission}.vault.json"
 
 
+_DEGRADED_WARNING = (
+    "⚠️ Détection dégradée (regex seul, NER hors-ligne) — des données identifiantes "
+    "en texte libre (noms, lieux de naissance, numéros de pièce) peuvent ne PAS être "
+    "masquées. Relancez bubble_shield_setup_ml(action='status') pour vérifier l'état "
+    "du pack ML, ou redémarrez la session pour réarmer le daemon NER.\n\n"
+)
+
+
 def _engine(text_for_daemon: str = ""):
     """Build the shared engine: regex core + (daemon NER if up) + policy + the
-    consistent per-session vault. Reused by every anonymise path."""
+    consistent per-session vault. Reused by every anonymise path.
+
+    Returns (engine, vault_path, daemon_up: bool). The third value lets callers
+    surface a degraded-mode warning when the daemon is down (regex-only)."""
     sys.path.insert(0, str(_vendor()))
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield import AnonymizationEngine, Vault
@@ -221,11 +232,13 @@ def _engine(text_for_daemon: str = ""):
     from bubble_shield import custom_recognizers as _cr
 
     detectors = []
+    daemon_up = False
     try:
         import posttool_anonymize as _pt
         d = _pt._daemon_detector(text_for_daemon)     # None if daemon down → regex only
         if d:
             detectors.append(d)
+            daemon_up = True
     except Exception:
         pass
 
@@ -235,7 +248,7 @@ def _engine(text_for_daemon: str = ""):
         match_filter=_policy.make_match_filter(_policy.load_policy()))
     vpath = _vault_path()
     engine.vault = Vault.load(str(vpath)) if vpath.is_file() else Vault(mission=os.environ.get("BUBBLE_SHIELD_SESSION", "mcp-session"))
-    return engine, vpath
+    return engine, vpath, daemon_up
 
 
 # ---- custom-field config management (Phase 1) ------------------------------
@@ -284,14 +297,21 @@ def _guard_check(value: str, kind: str, confirm: bool = False) -> dict:
 
 
 def _anonymise_text(text: str) -> str:
-    """Anonymise a block of text. Used by bubble_shield_anonymize_text and bubble_shield_read."""
-    engine, vpath = _engine(text)
+    """Anonymise a block of text. Used by bubble_shield_anonymize_text and bubble_shield_read.
+
+    When the NER daemon is down the output is REGEX-ONLY — free-text PII such as
+    names, birthplace, ID numbers may not be caught. A loud degraded-mode warning
+    is prepended to the result so the agent and user know protection is partial."""
+    engine, vpath, daemon_up = _engine(text)
     res = engine.anonymize(text)
     engine.vault.save(str(vpath))
+    # Degraded-mode warning: prepend when NER daemon is offline (regex-only).
+    # Never present regex-only output as fully clean.
+    degraded = "" if daemon_up else _DEGRADED_WARNING
     note = "" if res.safe_to_send else (
         "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
         "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
-    return res.anonymized + note
+    return degraded + res.anonymized + note
 
 
 def _anonymise_file(path: str) -> str:
@@ -311,7 +331,7 @@ def _deanonymise_to_file(path: str, content: str) -> dict:
     CRITICAL: returns only a summary (path + counts) — NEVER the de-anonymised
     text — so the agent never sees the real PII it just produced. Raises if the
     vault is missing (can't restore without it)."""
-    engine, vpath = _engine()
+    engine, vpath, _daemon_up = _engine()
     if not vpath.is_file():
         raise RuntimeError("aucun coffre (vault) pour cette session — "
                            "lis d'abord des données via bubble_shield_read/anonymize_text")

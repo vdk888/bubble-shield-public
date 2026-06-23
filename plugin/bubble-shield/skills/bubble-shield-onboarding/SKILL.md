@@ -137,6 +137,57 @@ They can flip any toggle and save; it sticks and applies to the next
 anonymisation. Frame it as *their* risk call, and gently warn before they keep an
 "identifiant" item in clear.
 
+## "I want to hide a NEW kind of field" — add a custom field (Cowork-native, works now)
+
+When the user says *"this isn't being masked"*, *"hide my dossier numbers too"*,
+*"also mask the contract reference"*, *"add a field"*, or you notice a recurring
+identifier the default detection misses — you can add it **yourself, in Cowork**,
+via the **`bubble_shield_add_field`** MCP tool. (This is the real, working path —
+unlike the masquer/conserver artifact, whose checkboxes don't persist in Cowork.)
+
+**Do it FOR them — don't make them write a regex. Your job is to turn their
+plain-language example into the right rule.**
+
+1. **Ask for an EXAMPLE of the field, not a definition.** Say:
+   > « Donnez-moi un exemple de la donnée à masquer, tel qu'elle apparaît dans vos
+   > documents (vous pouvez maquiller les chiffres) — par ex. un numéro de dossier
+   > "DOS-2024-0481", une référence contrat, un identifiant interne. »
+   Get the **shape**: prefix letters? how many digits? separators (`-`, `/`, space)?
+   fixed or variable length? Where it appears (a form label like "N° dossier :").
+
+2. **Derive a REGEX TEMPLATE from the shape — NEVER the literal value.** The tool's
+   guard-rail REFUSES a concrete PII instance; you must pass category descriptors
+   (`\d`, `[A-Z]`, `{4}`). Examples:
+   - "DOS-2024-0481" (DOS- + year + 4 digits) → `DOS-\d{4}-\d{4}`
+   - "FR + 11 digits SIREN-style" → `\d{9}` with `validator: "luhn"` if it checksums
+   - A contract ref "C/2026/00123" → `C/\d{4}/\d{5}`
+
+3. **Call `bubble_shield_add_field`:**
+   - `kind: "regex"` + `entity_type` (UPPER_SNAKE, e.g. `DOSSIER_CODE`) + `label`
+     (FR human label, e.g. "Numéro de dossier") + `pattern` (the TEMPLATE) +
+     `validator` (`none` unless it has a real checksum: `luhn`/`iban`/`isin`/`mod97`).
+   - For a NAME-like field regex can't capture (job title, a product name) → use
+     `kind: "gliner_label"` + `gliner_label` as a category PHRASE (e.g.
+     `"employer name"`, `"internal project codename"`). Needs the accuracy pack on.
+   - To KEEP something in clear (the firm's OWN identifier, never a client's) →
+     `kind: "keep"` + `keep_kind` (`phrase`/`email_domain`/`phone`) + `keep_value`
+     + `confirm: true`.
+
+4. **Verify it took** with `bubble_shield_list_fields`, then **re-read the document**
+   through `bubble_shield_read` and confirm the field is now `⟦…⟧`. Show the user
+   the before/after on that field so they SEE it worked.
+
+5. **To remove one:** `bubble_shield_remove_field`.
+
+**Guard-rail to respect (it protects them):** the tool rejects a pattern that is a
+real PII value rather than a descriptor — if it refuses, you gave it a literal;
+re-derive the template from the *shape*. Never store a real client value as a
+"field".
+
+> Plain-language framing for the user: « Je vais apprendre à Bubble Shield à
+> reconnaître ce type d'information à partir de sa *forme* (pas de la vraie valeur),
+> pour qu'il le masque automatiquement la prochaine fois. »
+
 ## The accuracy pack — "protéger les données PARTOUT, pas seulement un dossier" (optional, opt-in)
 
 By default Bubble Shield protects the **folders you mark**. Some advisors want more: have

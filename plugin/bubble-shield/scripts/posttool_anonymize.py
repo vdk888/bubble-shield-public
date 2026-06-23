@@ -150,15 +150,36 @@ def _daemon_up() -> bool:
         return False
 
 
+def _nerd_script() -> Path | None:
+    """Resolve the daemon script path. Tries candidates in priority order:
+    1. _HERE/bubble_shield_nerd.py   — flat stable-install layout (~/.claude/bubble-shield/)
+    2. PLUGIN_ROOT/scripts/bubble_shield_nerd.py — plugin/dev layout (scripts/ sub-dir)
+    3. ~/.claude/bubble-shield/bubble_shield_nerd.py — explicit stable-dir fallback
+       (handles Cowork host-session stale-path scenarios where PLUGIN_ROOT points
+       at a session dir that has already been cleaned up)
+    Returns the first existing Path, or None if none found."""
+    _stable = Path.home() / ".claude" / "bubble-shield" / "bubble_shield_nerd.py"
+    for cand in (
+        _HERE / "bubble_shield_nerd.py",
+        PLUGIN_ROOT / "scripts" / "bubble_shield_nerd.py",
+        _stable,
+    ):
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _try_spawn_daemon() -> None:
     """If the ML pack is installed but the daemon isn't running, start it
     detached (safety net for the LaunchAgent). Best-effort, never blocks: we
     spawn and return immediately; the model warms in the background, so THIS
     call still falls back to regex, but the NEXT tool result gets ML."""
     manifest = BUBBLE_SHIELD_HOME / "ml.json"
-    nerd = next((c for c in (PLUGIN_ROOT/"scripts"/"bubble_shield_nerd.py", _HERE/"bubble_shield_nerd.py") if c.is_file()), PLUGIN_ROOT/"scripts"/"bubble_shield_nerd.py")
-    if not manifest.is_file() or not nerd.is_file():
+    if not manifest.is_file():
         return  # ML pack not installed → nothing to start
+    nerd = _nerd_script()
+    if nerd is None:
+        return  # can't find daemon script → nothing to spawn
     try:
         man = json.loads(manifest.read_text(encoding="utf-8"))
         vpy = man.get("venv_python")
