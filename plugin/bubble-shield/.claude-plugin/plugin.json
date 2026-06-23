@@ -1,9 +1,11 @@
 {
   "name": "bubble-shield",
   "description": "Fail-closed PII guard for Cowork — blocks Claude from reading protected client folders until the data is run through Bubble Shield's local, reversible anonymiser.",
-  "version": "1.13.1",
+  "version": "1.14.1",
+  "mcpServers": "./mcpb/bubble-shield.mcpb",
   "author": {
-    "name": "Bubble Invest"
+    "name": "Bubble Invest",
+    "email": "bubbleinvest.ai@gmail.com"
   },
   "homepage": "https://bubbleinvest.com/bubble-shield",
   "license": "MIT",
@@ -17,6 +19,5 @@
     "cowork",
     "finance",
     "cgp"
-  ],
-  "mcpServers": "./mcpb/bubble-shield.mcpb"
+  ]
 }

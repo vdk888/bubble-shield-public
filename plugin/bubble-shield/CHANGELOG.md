@@ -5,6 +5,108 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.14.1 — 2026-06-23 (fix #257-b: DOB leak via Né(e) le + placeholder guard)
+
+- **BLOCKER (PR #3 reviewer): birthdate `03/05/1980` leaked in clear** in the
+  form pattern `Né(e) le : DD/MM/YYYY`. Root cause: the core `DATE_NAISSANCE`
+  recognizer regex `n[ée]e?\s+le` did NOT match `Né(e) le` because the literal
+  parenthetical `(e)` breaks the `e?` alternation. The 1.14.0 release added
+  Nom/Lieu/Pièce recognizers but left the DOB recognizer un-fixed, and
+  `test_257_form_layout.py` had no assertion for birthdate masking — so the bug
+  was missed by the green test run.
+- **Fix — `recognizers.py` (Option A):** extended the `DATE_NAISSANCE` recognizer
+  alternation from `n[ée]e?\s+le` to `n[eé](?:e|\(e\))?\s+le` so that `Né(e) le`,
+  `né(e) le`, `née le`, `né le`, and `nee le` all match. The fix is in the core
+  regex (daemon-independent) and fires in both daemon DOWN and UP paths. No
+  existing DATE_NAISSANCE tests regress. (file: `bubble_shield/recognizers.py`,
+  recognizer at line ~170 in the RECOGNIZERS list.)
+- **Advisory fix — placeholder guard in `structured_ext.py`:** form label
+  recognizers now skip placeholder/empty-marker values (`(vide)`, `N/A`, `néant`,
+  `non renseigné`, etc.) that appear in unfilled template fields. Previously
+  `Prénom : (vide)` produced a false NOM match that could corrupt the vault and
+  mask template boilerplate. Guard is applied in `form_nom_matches` and
+  `form_lieu_naissance_matches`. New `_PLACEHOLDER_VALUES` frozenset + `_is_placeholder()`
+  helper added.
+- **`test_257_form_layout.py` — new assertions (was missing, now explicit):**
+  - Part A (daemon DOWN): `"03/05/1980" not in output` — the blocker assertion.
+  - Part B (daemon UP): same assertion guarded behind daemon availability check.
+  - Part D (unit): `DATE_NAISSANCE` recognizer tested for `Né(e) le` form directly;
+    placeholder guard tested for `(vide)`, `N/A`, `néant` → no NOM emitted.
+  - Total: 49 assertions (was 42).
+- **CHANGELOG correction:** 1.14.0 entry falsely claimed DOB was among the fields
+  fixed. Corrected — 1.14.0 fixed Nom/Prénom/Lieu/Passeport/CNI wiring; DOB via
+  `Né(e) le` was missed and is fixed here in 1.14.1.
+- All 3 copies of `structured_ext.py` and `recognizers.py` re-synced (root →
+  `plugin/bubble-shield/vendor/` → `plugin/bubble-shield/mcpb/server/vendor/`).
+  `scripts/` ↔ `mcpb/server/scripts/` identical. MCPB re-packed.
+- All suites green: `test_257_form_layout` 49/49, `test_bubble_shield_mcp` 18/18,
+  `test_guard` 21/21, `test_guard_marker` 11/11, `test_tripwire` 18/18,
+  `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9,
+  `test_256_daemon_path_fail_loud` 16/16.
+
+## 1.14.0 — 2026-06-23 (fix #257: FR état-civil FORM layout detection — wiring + Nom/Lieu/Pièce recognizers)
+
+- **Fixed: GLiNER misses PII in FORM-LABEL layouts (board #257 — TOTAL LEAK).**
+  In real client DCCs structured as `Nom : DUBOIS / Prénom : Marc / Né(e) le :
+  03/05/1980 à : Lyon / Passeport n° 12AB34567`, the GLiNER NER daemon was blind
+  to name, prénom, birthplace, and passport because the label-value layout has no
+  prose context for NER to anchor on. Even with the daemon armed, those fields leaked.
+  **Note: DOB via `Né(e) le` was NOT fixed in this release — see 1.14.1.**
+- **Root cause — wiring bug confirmed:** `_engine()` in `bubble_shield_mcp.py`
+  and the engine construction in `posttool_anonymize.py::main()` both built the
+  engine with only `[daemon_detector]` as `extra_detectors`. `structured_ext`'s
+  deterministic form-layout recognizers were NEVER wired in, so they never ran in
+  the `bubble_shield_read` / `anonymize_text` / posttool path.
+- **Fix 1 — wiring:** `structured_ext.make_structured_detector()` is now the
+  FIRST entry in `extra_detectors` in both `bubble_shield_mcp.py::_engine()` and
+  `posttool_anonymize.py` main engine build. It runs before the daemon and is
+  daemon-independent (fail-open if import fails).
+- **Fix 2 — new recognizers in `structured_ext.py`:**
+  - `form_nom_matches`: matches `Nom : <VALUE>`, `Prénom : <VALUE>`,
+    `Nom de naissance : <VALUE>`, `Nom d'usage : <VALUE>` → **NOM**.
+  - `form_lieu_naissance_matches`: matches `Lieu de naissance : <VALUE>` and
+    `Né(e) le : <DATE> à : <CITY>` (the "à :" city fragment) → **LIEU_NAISSANCE**.
+  - `form_piece_identite_matches`: matches `Passeport n° <ID>`, `CNI n° <ID>`,
+    `Pièce d'identité : <ID>`, `Titre de séjour n° <ID>` → **PIECE_IDENTITE**.
+    Pattern: ID numbers are bounded to 30 chars starting with uppercase letter or digit.
+  - All three are ADD-only, fail-open, recall-first.
+- **Regression test `scripts/test_257_form_layout.py`:** 42 assertions covering
+  daemon DOWN and daemon UP paths, `bubble_shield_read` file path, explicit lieu
+  label, non-PII control text (no over-masking), and direct unit tests of each new
+  recognizer. Uses `XANTHIPPE ZORVEC` — a name not in any FR first-name gazetteer —
+  to prove the structured recognizer does the work, not the gazetteer.
+  **Missing assertion: DOB masking — see 1.14.1.**
+- Vendor re-synced. MCPB re-packed; `scripts/` ↔ `mcpb/server/scripts/` identical.
+- All existing suites green: `test_bubble_shield_mcp` 18/18, `test_guard` 21/21,
+  `test_guard_marker` 11/11, `test_tripwire` 18/18, `test_posttool_anonymize` 19/19,
+  `test_option_b_e2e` 9/9, `test_256_daemon_path_fail_loud` 16/16.
+
+## 1.13.1 — 2026-06-23 (dev: bump to align with #256 public release)
+
+- Dev plugin.json version bump to 1.13.1 to align with public repo (no code changes).
+
+## 1.13.0 — 2026-06-23 (MCPB-packaged MCP server — installable as a plugin)
+
+- **Fixed plugin install failure.** The Claude app rejected the plugin with
+  "MCP server 'bubble_shield' is a local/stdio server. Plugins may only declare
+  remote (http/sse/ws) or MCPB servers." (same rejection caused the opaque GitHub
+  `failed_content`). Plugins may not declare a bare stdio MCP server.
+- **Converted the stdio server to MCPB.** The local stdio server is now packaged
+  as `mcpb/bubble-shield.mcpb` (MCPB manifest v0.4, `server.type=python`) and the
+  plugin declares it via `plugin.json` → `"mcpServers": "./mcpb/bubble-shield.mcpb"`.
+  The old stdio `plugin/bubble-shield/.mcp.json` was removed (the loader merges it
+  too, so leaving it would re-trigger the rejection). The host extracts the bundle
+  and launches the wrapper `server/entry.py`, which puts the bundled pure-python
+  engine + scripts on `sys.path` and runs the unchanged `bubble_shield_mcp.py`.
+- **Bundle is pure-python.** Only the vendored `bubble_shield` engine and `pypdf`
+  ship in the MCPB (1.7 MB unpacked). The ML accuracy pack (GLiNER/onnxruntime/
+  numpy) stays a lazy, on-demand `bubble_shield_setup_ml` download into a separate
+  runtime venv — NOT bundled.
+- All 8 tools, fail-closed behaviour, and the vault round-trip verified through the
+  packed-and-extracted bundle on synthetic PII. Existing suites stay green.
+- **Re-pack on every release** (see RELEASING.md): the `.mcpb` is a built artifact;
+  if you change `scripts/` or `vendor/`, re-sync into `mcpb/server/` and re-pack.
+
 ## 1.12.0 — 2026-06-23 (verified protection model + client docs)
 
 - **Corrected the documented protection model.** Proven on Claude Code v2.1.186:

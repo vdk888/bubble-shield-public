@@ -220,18 +220,31 @@ _DEGRADED_WARNING = (
 
 
 def _engine(text_for_daemon: str = ""):
-    """Build the shared engine: regex core + (daemon NER if up) + policy + the
-    consistent per-session vault. Reused by every anonymise path.
+    """Build the shared engine: regex core + structured_ext form detectors +
+    (daemon NER if up) + policy + the consistent per-session vault.
+    Reused by every anonymise path.
 
     Returns (engine, vault_path, daemon_up: bool). The third value lets callers
-    surface a degraded-mode warning when the daemon is down (regex-only)."""
+    surface a degraded-mode warning when the daemon is down (regex-only).
+
+    FIX #257: structured_ext (deterministic FR état-civil FORM recognizers) is now
+    always wired in as an extra_detector so it runs in the bubble_shield_read path
+    even without the GLiNER daemon. It covers Nom/Prénom, Lieu de naissance, and
+    Pièce d'identité label-value lines that GLiNER misses in FORM layouts."""
     sys.path.insert(0, str(_vendor()))
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield import AnonymizationEngine, Vault
     from bubble_shield import policy as _policy
     from bubble_shield import custom_recognizers as _cr
 
+    # structured_ext: always-on deterministic FR KYC FORM safety net (daemon-independent)
     detectors = []
+    try:
+        from bubble_shield.structured_ext import make_structured_detector
+        detectors.append(make_structured_detector())
+    except Exception:
+        pass  # fail-open: if import fails, continue without it
+
     daemon_up = False
     try:
         import posttool_anonymize as _pt

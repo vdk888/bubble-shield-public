@@ -167,8 +167,12 @@ RECOGNIZERS: List[Recognizer] = [
                           re.I), 86, group=1),
     # Date of birth — context-cued (high precision; we deliberately don't
     # redact every date, only the identifying one).
+    # The n[eé](?:e|\(e\))? arm handles: "né le", "née le", "nee le" AND
+    # the parenthetical form "Né(e) le" / "né(e) le" that appears in FR DCC
+    # état-civil forms (the bare n[ée]e? pattern silently failed on it because
+    # the literal parenthetical "(e)" broke the optional "e?"). Fix: #257-b.
     Recognizer("DATE_NAISSANCE",
-               re.compile(r"(?:n[ée]e?\s+le|date\s+de\s+naissance|naissance)\s*:?\s*(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}|\d{1,2}\s+\w+\s+\d{4})",
+               re.compile(r"(?:n[eé](?:e|\(e\))?\s+le|date\s+de\s+naissance|naissance)\s*:?\s*(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}|\d{1,2}\s+\w+\s+\d{4})",
                           re.I), 72, group=1),
     # French phone numbers.
     Recognizer("TEL", re.compile(r"(?:(?:\+33|0033)[ .\-]?[1-9]|0[1-9])(?:[ .\-]?\d{2}){4}\b"), 70),

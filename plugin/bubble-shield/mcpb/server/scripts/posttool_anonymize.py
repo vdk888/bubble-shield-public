@@ -360,7 +360,12 @@ def main() -> None:
     except Exception:
         _noop()
 
-    # Build the engine: regex core + (optional) daemon NER + policy panel + vault.
+    # Build the engine: regex core + structured_ext (always-on) +
+    # (optional) daemon NER + policy panel + vault.
+    #
+    # FIX #257: structured_ext is now wired in so the deterministic FR KYC FORM
+    # safety net (Nom/Prénom/Lieu de naissance/Pièce d'identité label lines) fires
+    # even when the GLiNER daemon is down. Fail-open: if import fails, falls back.
     try:
         sys.path.insert(0, str(_vendor_dir()))
         from bubble_shield import AnonymizationEngine, Vault
@@ -374,7 +379,16 @@ def main() -> None:
 
         pol = _policy.load_policy()                 # the masquer/conserver table
         match_filter = _policy.make_match_filter(pol)
-        extra = [daemon] if daemon else []
+
+        # Always include structured_ext (daemon-independent deterministic recognizers)
+        extra = []
+        try:
+            from bubble_shield.structured_ext import make_structured_detector
+            extra.append(make_structured_detector())
+        except Exception:
+            pass  # fail-open
+        if daemon:
+            extra.append(daemon)
 
         engine = AnonymizationEngine(
             vault=vault, extra_detectors=extra,
