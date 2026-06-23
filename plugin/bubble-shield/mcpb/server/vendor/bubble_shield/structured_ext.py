@@ -692,5 +692,219 @@ def make_structured_detector():
             matches += doc_level_repetition_matches(text, matches)
         except Exception:
             pass
+        # ── fix #266: signataire / gérant / déclarant labeled blocks ─────────
+        try:
+            matches += signataire_matches(text)
+        except Exception:
+            pass
+        # ── fix #266: doc-level person-name repetition post-pass ─────────────
+        # Must run LAST — after all primary detectors AND the #264 repetition
+        # pass so it has full RAISON_SOCIALE + NOM context to derive seeds from.
+        try:
+            matches += doc_level_person_repetition_matches(text, matches)
+        except Exception:
+            pass
         return matches
     return _detector
+
+
+# ── PERSON-NAME EXTRACTION FROM RAISON SOCIALE (fix #266) ───────────────────
+_RAISON_SOCIALE_PREFIXES: frozenset = frozenset({
+    "SELARL", "SARL", "SASU", "SAS", "SCI", "SCM", "SCP", "SA", "SNC",
+    "EURL", "SCOP", "SELAFA", "SELARLU", "SELAS",
+    "DU", "DE", "DES", "ET", "EN", "AU", "AUX", "LA", "LE", "LES", "D", "L",
+    "DOCTEUR", "DR", "MAITRE", "ME", "PROFESSEUR", "PR",
+    "CABINET", "ETUDE", "ETUDES", "GROUPE", "GROUPEMENT",
+    "ASSOCIATION", "SOCIETE", "CENTRE", "CLINIQUE", "MEDICAL", "MEDICALE",
+})
+
+_COMMON_FRENCH_SURNAMES: frozenset = frozenset({
+    "MARTIN", "BERNARD", "THOMAS", "PETIT", "ROBERT", "RICHARD",
+    "DURAND", "DUBOIS", "MOREAU", "LAURENT", "SIMON", "MICHEL",
+    "LEFEBVRE", "LEFEVRE", "LEROY", "ROUX", "DAVID", "BERTRAND",
+    "MOREL", "FOURNIER", "GIRARD", "BONNET", "DUPONT", "LAMBERT",
+    "FONTAINE", "ROUSSEAU", "VINCENT", "MULLER", "LECOMTE", "BLANC",
+    "GRAY", "GRIS", "LEGRAND", "GRAND", "BRUN", "LEBRUN", "LENOIR",
+    "ROI", "PAGE", "SAGE", "LION", "ROSE", "VIOLET", "BOIS",
+    "PIERRE", "PAUL", "ANDRE", "CLAUDE", "MARIE", "ANNE", "JEAN",
+    "NICOLAS", "MARC", "LUC", "PASCAL", "ERIC", "ALAIN",
+    "NORD", "SUD", "EST", "OUEST", "FRANCE", "PARIS",
+    "NOIR", "ROUGE", "VERT", "BLEU",
+})
+
+_PERSON_TOKEN_MIN_LEN = 4
+
+
+def extract_person_name_from_raison_sociale(company_name: str) -> List[str]:
+    """Extract personal name tokens from a company name (fix #266).
+
+    Given "SELARL DU DOCTEUR FAKENAME TESTONI", return ["FAKENAME", "TESTONI"].
+    Strips forme-juridique prefix + honorific words; returns residual CAPS tokens.
+    """
+    tokens = re.split(r"[\s''\-]+", company_name.strip().upper())
+    while tokens and tokens[0] in _RAISON_SOCIALE_PREFIXES:
+        tokens.pop(0)
+    tokens = [t for t in tokens if len(t) >= 2 and re.search(r"[A-Z\xc9\xc8\xc0\xc2\xce\xd4\xd9\xdb\xdc]", t)]
+    return tokens
+
+
+def _person_name_seeds(tokens: List[str]) -> List[str]:
+    """Return seed strings for the doc-level person-name repetition pass (fix #266).
+
+    Includes the full PAIR (both orderings) when >=2 tokens.
+    Includes a lone token only if it is NOT a common word and has length >= _PERSON_TOKEN_MIN_LEN.
+    """
+    seeds: List[str] = []
+    if not tokens:
+        return seeds
+    if len(tokens) >= 2:
+        pair_ab = " ".join(tokens[:2])
+        pair_ba = " ".join(reversed(tokens[:2]))
+        seeds.append(pair_ab)
+        if pair_ba != pair_ab:
+            seeds.append(pair_ba)
+    for tok in tokens:
+        if (len(tok) >= _PERSON_TOKEN_MIN_LEN
+                and tok.upper() not in _COMMON_FRENCH_SURNAMES
+                and tok.upper() not in _RAISON_SOCIALE_PREFIXES
+                and tok.upper() not in _FORME_JURIDIQUE_SET):
+            seeds.append(tok)
+    return seeds
+
+
+_SIGNATAIRE_LABEL_RE = re.compile(
+    r"(?i)"
+    r"^(?:"
+    r"signataire"
+    r"|g[e\xe9]rant"
+    r"|co\s*g[e\xe9]rant"
+    r"|d[e\xe9]clarant"
+    r"|repr[e\xe9]sentant\s+l[e\xe9]gal"
+    r"|repr[e\xe9]sentant"
+    r"|nom\s*(?:\([^)]*\))?\s*du\s*(?:signataire|d[e\xe9]clarant|g[e\xe9]rant|repr[e\xe9]sentant)"
+    r"|qualit[e\xe9]\s+du\s+(?:signataire|d[e\xe9]clarant)"
+    r"|mandataire\s+social"
+    r"|pr[e\xe9]sident"
+    r"|directeur\s+g[e\xe9]n[e\xe9]ral"
+    r")"
+    r"(?:[^\S\n]*/[^\S\n]*(?:signataire|d[e\xe9]clarant|g[e\xe9]rant))*"
+    r"[^\S\n]*:[^\S\n]*(?P<val>[^\n]+)",
+    re.MULTILINE,
+)
+
+_ROLE_WORDS: frozenset = frozenset({
+    "GÉRANT", "GERANT", "PRÉSIDENT", "PRESIDENT", "DIRECTEUR",
+    "SIGNATAIRE", "DÉCLARANT", "DECLARANT", "REPRÉSENTANT", "REPRESENTANT",
+    "MANDATAIRE", "ASSOCIÉ", "ASSOCIE", "COGÉRANT", "COGERANT",
+    "ADMINISTRATEUR", "LIQUIDATEUR", "DOCTEUR", "DR", "MAITRE", "ME",
+    "PROFESSEUR", "PR",
+})
+
+
+def _strip_leading_role(val: str) -> str:
+    """Strip leading role/position word from a signataire value (fix #266)."""
+    words = val.split()
+    if words and words[0].upper() in _ROLE_WORDS:
+        remainder = " ".join(words[1:]).strip()
+        if remainder:
+            return remainder
+    return val
+
+
+def signataire_matches(text: str) -> List[Match]:
+    """Match Signataire/Gerant/Declarant: <NAME> and similar role labels -> NOM (fix #266).
+
+    Precision guards: placeholder values skipped; value capped at 80 chars;
+    value must contain at least one letter. Leading role words are stripped.
+    """
+    out: List[Match] = []
+    for m in _SIGNATAIRE_LABEL_RE.finditer(text):
+        raw_val = m.group("val").strip()
+        if not raw_val or len(raw_val) > 80:
+            continue
+        if _is_placeholder(raw_val):
+            continue
+        if not re.search(r"[A-Za-z\xc0-\xff]", raw_val):
+            continue
+        val = _strip_leading_role(raw_val).strip()
+        if not val:
+            val = raw_val
+        start = m.start("val")
+        out.append(Match(start=start, end=start + len(raw_val),
+                         entity_type="NOM", value=val,
+                         score=0.90, priority=58))
+    return out
+
+
+def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[Match]:
+    """Find all verbatim repetitions of the practitioner's personal name (fix #266).
+
+    Derives person name from RAISON_SOCIALE matches (strips company prefix) and
+    from high-confidence NOM matches with >=2 CAPS tokens. Emits NOM for each
+    uncovered occurrence. ADD-only, fail-open, vault-consistent.
+    """
+    if not found:
+        return []
+
+    seeds: set = set()
+
+    for m in found:
+        if m.entity_type == "RAISON_SOCIALE":
+            c = _canonical_company_name(m.value)
+            tokens = extract_person_name_from_raison_sociale(c)
+            if not tokens:
+                continue
+            for seed in _person_name_seeds(tokens):
+                seeds.add(seed)
+
+    for m in found:
+        if m.entity_type == "NOM":
+            val = m.value.strip().upper()
+            toks = re.split(r"\s+", val)
+            toks = [t for t in toks if re.search(r"[A-Z\xc9\xc8\xc0\xc2\xce\xd4\xd9\xdb\xdc]{2,}", t)]
+            if len(toks) >= 2:
+                for seed in _person_name_seeds(toks):
+                    seeds.add(seed)
+
+    if not seeds:
+        return []
+
+    covered: set = {(m.start, m.end) for m in found}
+
+    # Process seeds longest-first so pair matches (e.g. "TESTONI FAKENAME")
+    # are added before lone-token seeds (e.g. "FAKENAME"), and lone tokens
+    # that fall inside an already-covered pair span are skipped.
+    sorted_seeds = sorted(seeds, key=len, reverse=True)
+
+    extra: List[Match] = []
+    for seed in sorted_seeds:
+        if not seed or len(seed) < _PERSON_TOKEN_MIN_LEN:
+            continue
+        pattern = re.compile(
+            r"(?<![A-Za-z\xc0-\xff])"
+            + re.escape(seed)
+            + r"(?![A-Za-z\xc0-\xff])",
+            re.UNICODE,
+        )
+        for occ in pattern.finditer(text):
+            span = (occ.start(), occ.end())
+            if span in covered:
+                continue
+            # Don't emit if fully inside an already-covered span
+            if any(cs <= occ.start() and occ.end() <= ce for (cs, ce) in covered):
+                continue
+            covered.add(span)
+            # Use the ACTUAL matched text as the value so the vault restores
+            # exactly what was in the document (fix: de-anon fidelity — round-trip
+            # name inversion, Bug 1 of #266 fidelity review).  Token consistency
+            # is preserved: vault._token_for_name groups by distinctive words, so
+            # "TESTONI FAKENAME" and "FAKENAME TESTONI" both resolve to person-
+            # number 1 (\u27e6NOM_0001\u27e7 / \u27e6NOM_0001a\u27e7) and each restores to
+            # its own surface form.
+            extra.append(Match(
+                start=occ.start(), end=occ.end(),
+                entity_type="NOM", value=occ.group(0),
+                score=0.88, priority=58,
+            ))
+
+    return extra

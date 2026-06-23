@@ -138,8 +138,8 @@ _ROLE = (r"(?:directeur|directrice|dirigeant|dirigeante|g[ée]rant|g[ée]rante|"
          r"chef|cheffe|manager|consultant|consultante|chargé|chargée|"
          r"associé|associée|fondateur|fondatrice|salarié|salariée|employé|employée|"
          r"avocat|avocate|notaire|expert-comptable|PDG|DG|DAF|DRH)")
-_QUAL = r"(?:\s+(?:de|des|du|d['’]|en|au|dans|à\s+la|une?)?\s*[a-zà-ÿ][\wà-ÿ\-]+){0,3}"
-_COMP = r"(?:\s+(?:chez|au\s+sein\s+de|de\s+la|de|dans)\s+[A-ZÉÈ][\wÀ-ÿ&\.\- ]{1,40})?"
+_QUAL = r"(?:[^\S\n]+(?:de|des|du|d['’]|en|au|dans|à[^\S\n]+la|une?)?[^\S\n]*[a-zà-ÿ][\wà-ÿ\-]+){0,3}"
+_COMP = r"(?:[^\S\n]+(?:chez|au[^\S\n]+sein[^\S\n]+de|de[^\S\n]+la|de|dans)[^\S\n]+[A-ZÉÈ][\wÀ-ÿ&\.\- ]{1,40})?"
 
 RECOGNIZERS: List[Recognizer] = [
     # — structured / checksum-backed (high priority) —

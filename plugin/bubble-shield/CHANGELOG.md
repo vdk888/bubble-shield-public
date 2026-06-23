@@ -5,6 +5,97 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.16.1 — 2026-06-24 (fix #266: practitioner's personal name leaks in corporate/fiscal docs)
+
+### Bug fixed — PERSONAL NAME leaks in signature blocks and label-less table cells (risk:HIGH)
+- **Root cause:** #259/#264 mask the company name ("SELARL DU DOCTEUR FORENAME SURNAME"
+  → one RAISON_SOCIALE token), but the practitioner's bare personal name standing ALONE
+  (e.g. "TESTONI FAKENAME" in "Signataire : GÉRANT  TESTONI FAKENAME" or in a label-less
+  table cell "/ / / TESTONI FAKENAME") was missed — GLiNER needs prose context; form
+  recognizers need a "Nom :" label (absent here).
+
+### Fix 1 — `extract_person_name_from_raison_sociale` (new, `structured_ext.py`)
+- Strips the forme-juridique prefix and honorific words from a detected RAISON_SOCIALE
+  ("SELARL DU DOCTEUR FAKENAME TESTONI" → residual ["FAKENAME", "TESTONI"]).
+- Uses `_RAISON_SOCIALE_PREFIXES` frozenset (type words + honorifics + connectors).
+
+### Fix 2 — `_person_name_seeds` (new, `structured_ext.py`)
+- Given name tokens, returns seed strings for the doc-level repetition pass.
+- Always includes the full PAIR ("FAKENAME TESTONI" + "TESTONI FAKENAME") — distinctive.
+- Lone tokens only if NOT a common French surname (`_COMMON_FRENCH_SURNAMES`) and length ≥ 4.
+- Precision guard: "MARTIN", "BLANC", "DUPONT", etc. are NOT lone seeds (common words).
+  A practitioner named "MARTIN" will have the pair masked but not every "martin" in prose.
+
+### Fix 3 — `signataire_matches` (new recognizer, `structured_ext.py`)
+- Matches labeled signature/role blocks → NOM:
+    "Signataire : TESTONI FAKENAME"
+    "Gérant : FAKENAME TESTONI"
+    "Nom (et qualité) du signataire/déclarant : TESTONI FAKENAME"
+    "Représentant légal : FAKENAME TESTONI"
+- Strips leading role/position words ("GÉRANT TESTONI FAKENAME" → value "TESTONI FAKENAME").
+- Precision guards: placeholder values skipped; value capped at 80 chars.
+
+### Fix 4 — `doc_level_person_repetition_matches` (new post-pass, `structured_ext.py`)
+- Reuses the #264 doc-level repetition machinery for person names.
+- After all primary detectors run, derives the person name from:
+    1. RAISON_SOCIALE matches: strips company prefix → personal-name sub-span.
+    2. High-confidence NOM matches with ≥2 CAPS tokens (signataire / form_nom / civility).
+- Scans the FULL document for every verbatim occurrence of each seed and emits NOM.
+- This catches all uncovered occurrences: label-less table cells, doubled signataire,
+  "N° département  TESTONI FAKENAME", etc.
+- Vault consistency: all repetition matches use the full PAIR as their value → one NOM token.
+- Word-boundary-aware matching: no partial substring matches.
+- ADD-only, fail-open.
+
+### Precision guards (critical — same risk class as #264)
+- `_COMMON_FRENCH_SURNAMES`: frozenset of ~60 high-frequency surnames / common words.
+  These are NOT used as lone-token seeds. Pair seeds (always) + lone seeds (if distinctive only).
+- `_RAISON_SOCIALE_PREFIXES` guard: forme-juridique words never used as person name seeds.
+- Minimum lone-seed length: 4 characters.
+- Precision: "La SELARL exerce" → NOT masked; "Forme juridique : SELARL" → NOT masked;
+  common words "blanc", "martin" in prose → NOT masked.
+
+### make_structured_detector updated
+- Now calls `signataire_matches(text)` after the #264 repetition pass.
+- Now calls `doc_level_person_repetition_matches(text, matches)` as the final pass.
+
+### New test `scripts/test_266_person_name_corporate.py`
+- Part A (daemon DOWN): all 5 person-name occurrences masked in CORP_BLOCK.
+- Part A2 (precision): common-word names NOT masked in ordinary prose.
+- Part B (daemon UP if available): same as A with NER running.
+- Part C (de-anon round-trip): anon output has NOM tokens, FAKENAME/TESTONI gone, ≤2 NOM token types.
+- Part D (unit tests D1–D25): extract, seeds, signataire, repetition pass, full detector, vault consistency.
+
+### Other
+- All 3 copies synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/` →
+  `plugin/bubble-shield/mcpb/server/vendor/`). Test scripts synced to `mcpb/server/scripts/`.
+  MCPB re-packed.
+- All suites green: `test_266_person_name_corporate` 57/57, `test_264_repeated_company` 31/31,
+  `test_259_corporate_kyc` 20/20, `test_257_form_layout` 42/42, `test_bubble_shield_mcp` 18/18,
+  `test_posttool_anonymize` 19/19, `test_256_daemon_path_fail_loud` 10/10.
+  (test_guard/marker/tripwire/option_b require Python ≥10; pre-existing on this machine's 3.9.)
+
+### Fidelity patch — doc-level person-name de-anon (Bug 1 + Bug 2 from reviewer, no leak)
+
+**Bug 1 — round-trip name inversion** (`structured_ext.py`
+`doc_level_person_repetition_matches`, ~L900):
+- **Root cause:** stored `value=canonical_val` for every occurrence even when the doc
+  had the inverted form ("TESTONI FAKENAME"). Vault restored all occurrences to the
+  canonical form instead of the original surface text.
+- **Fix:** `value=occ.group(0)` — actual matched text. vault._token_for_name groups by
+  distinctive words: both forms share person-number 1 (\u27e6NOM_0001\u27e7 / \u27e6NOM_0001a\u27e7),
+  each restores to its own surface form. Dead-code `nom_canonical` dict removed.
+- **Test D26:** de-anon restores "TESTONI FAKENAME" unchanged (not inverted);
+  all NOM tokens share one person number.
+
+**Bug 2 — POSTE/_QUAL crosses newlines** (`recognizers.py` ~L141):
+- **Root cause:** `_QUAL = r"(?:\s+...){0,3}"` used `\s+` which matches `\n`,
+  swallowing the next line's "Signataire" label and breaking signataire_matches.
+- **Fix:** `\s+` → `[^\S\n]+` in `_QUAL` and `_COMP`. Same-line whitespace only.
+  POSTE still matches same-line qualifiers; next-line label is never swallowed.
+- **Test D27:** POSTE match ends before newline; signataire name still masked;
+  same-line qualifier regression-free.
+
 ## 1.16.0 — 2026-06-23 (feat #260: optional local OCR for scanned/image PDFs)
 
 ### Feature — OCR pack (optional, off by default, fail-open)
@@ -60,7 +151,6 @@ All notable changes to the plugin. Bump the version in BOTH
   `test_257_form_layout` 51/51, `test_guard` 21/21, `test_guard_marker` 11/11,
   `test_tripwire` 18/18, `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9,
   `test_256_daemon_path_fail_loud` 16/16.
-
 ## 1.15.2 — 2026-06-23 (fix #264 ship-blockers: bare-type seed + two-token company)
 
 ### Bug A fix — degenerate seed corrupts the document (ship-blocker)
