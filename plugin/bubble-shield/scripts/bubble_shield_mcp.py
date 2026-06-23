@@ -45,6 +45,14 @@ VAULT_DIR = BUBBLE_SHIELD_HOME / "vaults"
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "bubble_shield", "version": "1.0.0"}
 
+# Prefix added by the OCR extractor to signal OCR-sourced text to callers.
+_OCR_TAG = "[OCR]"
+_OCR_QUALITY_NOTE = (
+    "ℹ️ Ce document a été lu via OCR (PDF scanné) — relecture humaine conseillée "
+    "pour les champs critiques (noms, dates, numéros). La mise en page peut être "
+    "partiellement altérée.\n\n"
+)
+
 TOOLS = [
     {
         "name": "bubble_shield_read",
@@ -117,6 +125,23 @@ TOOLS = [
             "(installing / downloading / ready / error). After 'start', poll 'status' "
             "every ~20s and tell the user in plain language when it's ready. No "
             "Terminal needed — this runs the setup for them."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "status"],
+                           "description": "'start' to begin install, 'status' to check progress."}
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "bubble_shield_setup_ocr",
+        "description": (
+            "Install or check the optional on-device OCR pack (reads scanned/image PDFs "
+            "locally). action='start' begins the one-time install in the background "
+            "(downloads ~150MB of Python packages — takes a few minutes) and returns "
+            "immediately; action='status' reports progress. After 'start', poll 'status' "
+            "every ~20s and tell the user when it's ready. No Terminal needed."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -412,6 +437,55 @@ def _setup_status() -> dict:
     return {"state": state, "message": msgs.get(state, state)}
 
 
+# ---- OCR pack setup (async, host-side) --------------------------------------
+
+_OCR_SETUP_MARKER = BUBBLE_SHIELD_HOME / "ocr-setup.status"
+_OCR_SETUP_LOG = BUBBLE_SHIELD_HOME / "ocr-setup.log"
+
+
+def _ocr_setup_script() -> Path:
+    for cand in (PLUGIN_ROOT / "scripts" / "bubble_shield_setup_ocr.py",
+                 _HERE / "bubble_shield_setup_ocr.py"):
+        if cand.is_file():
+            return cand
+    return PLUGIN_ROOT / "scripts" / "bubble_shield_setup_ocr.py"
+
+
+def _ocr_setup_start() -> dict:
+    if (BUBBLE_SHIELD_HOME / "ocr.json").is_file():
+        return {"state": "ready", "message": "Le pack OCR est déjà installé."}
+    script = _ocr_setup_script()
+    if not script.is_file():
+        return {"state": "error", "message": f"script OCR introuvable: {script}"}
+    BUBBLE_SHIELD_HOME.mkdir(parents=True, exist_ok=True)
+    _OCR_SETUP_MARKER.write_text("installing", encoding="utf-8")
+    import subprocess
+    logf = open(_OCR_SETUP_LOG, "a")
+    wrapper = (
+        f"import subprocess,sys;"
+        f"rc=subprocess.run([sys.executable,{str(script)!r}]).returncode;"
+        f"open({str(_OCR_SETUP_MARKER)!r},'w').write('ready' if rc==0 else 'error')"
+    )
+    subprocess.Popen([sys.executable, "-c", wrapper],
+                     stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
+                     start_new_session=True)
+    return {"state": "installing",
+            "message": "Installation du pack OCR démarrée (téléchargement des paquets, "
+                       "quelques minutes). Rappelle bubble_shield_setup_ocr(action='status') "
+                       "pour suivre."}
+
+
+def _ocr_setup_status() -> dict:
+    if (BUBBLE_SHIELD_HOME / "ocr.json").is_file():
+        return {"state": "ready", "message": "Pack OCR prêt — lecture de PDF scannés active."}
+    state = _OCR_SETUP_MARKER.read_text(encoding="utf-8").strip() if _OCR_SETUP_MARKER.is_file() else "absent"
+    msgs = {"installing": "Installation en cours (téléchargement des paquets)…",
+            "ready": "Pack OCR prêt.",
+            "error": "L'installation a échoué — voir ~/.bubble_shield/ocr-setup.log.",
+            "absent": "Pack OCR non installé. Lance bubble_shield_setup_ocr(action='start')."}
+    return {"state": state, "message": msgs.get(state, state)}
+
+
 # ---- global "anonymise everywhere" switch (host-side config) ---------------
 
 GLOBAL_CONFIG = Path(os.path.expanduser("~/.config/bubble_shield/bubble-shield.json"))
@@ -489,7 +563,11 @@ def _handle(req: dict) -> None:
 
         try:
             if name == "bubble_shield_read":
-                ok(_anonymise_file(args.get("path", "")))
+                anon = _anonymise_file(args.get("path", ""))
+                # Surface OCR quality note when the text was extracted via OCR pack
+                if _OCR_TAG in anon[:30]:
+                    anon = _OCR_QUALITY_NOTE + anon
+                ok(anon)
             elif name == "bubble_shield_anonymize_text":
                 ok(_anonymise_text(args.get("text", "")))
             elif name == "bubble_shield_write":
@@ -503,6 +581,10 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_setup_ml":
                 action = args.get("action", "status")
                 r = _setup_start() if action == "start" else _setup_status()
+                ok(f"[{r['state']}] {r['message']}")
+            elif name == "bubble_shield_setup_ocr":
+                action = args.get("action", "status")
+                r = _ocr_setup_start() if action == "start" else _ocr_setup_status()
                 ok(f"[{r['state']}] {r['message']}")
             elif name == "bubble_shield_enable_global":
                 r = _enable_global(args.get("action", "status"))

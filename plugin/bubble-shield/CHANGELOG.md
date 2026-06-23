@@ -5,6 +5,62 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.16.0 — 2026-06-23 (feat #260: optional local OCR for scanned/image PDFs)
+
+### Feature — OCR pack (optional, off by default, fail-open)
+- **New: read scanned/image-only PDFs locally (board #260).** The plugin core
+  continues to handle native/text PDFs with zero install. For scanned or
+  image-only PDFs (no text layer), the optional OCR pack can now be installed
+  once and used fully offline thereafter.
+- **New MCP tool `bubble_shield_setup_ocr(action=start|status)`:** installs or
+  checks the OCR pack from inside Cowork — no Terminal needed. `start` spawns
+  the setup in the background; `status` reports progress. The setup creates a
+  dedicated venv at `~/.bubble_shield/ocr-env/` with `docling` + `onnxruntime`
+  (~150MB pip deps + ~506MB docling layout model from HuggingFace — one-time).
+- **`bubble_shield_setup_ocr.py` — setup script (one-time, idempotent):**
+  - Installs `docling` + `onnxruntime` into a persistent venv.
+  - Downloads the docling layout model (docling-layout-heron, ~506MB) ONCE into
+    the HuggingFace local cache (`ensure_layout_model_cached()`). A sentinel
+    file (`layout_model_cached.flag`) marks the cache as warm.
+  - Verifies the install by running a synthetic scanned-page OCR test WITH
+    `HF_HUB_OFFLINE=1` enforced — proving the model loads from cache with ZERO
+    network access.
+  - Writes `~/.bubble_shield/ocr.json` with the venv python path.
+- **Offline enforcement (PRIVACY GUARANTEE):**
+  - `bubble_shield_extract._ocr_pack_python()` checks the sentinel before returning
+    the venv path — if the model was not cached during setup, it returns `None`
+    (fail-closed, never silently fetches at runtime).
+  - `_ocr_pdf_if_pack_present()` sets `HF_HUB_OFFLINE=1` and
+    `TRANSFORMERS_OFFLINE=1` in the subprocess env for every OCR invocation.
+  - ZERO outbound connections after setup: the sentinel + offline flag together
+    guarantee that no call to huggingface.co is ever made at OCR runtime.
+  - Documentation updated: "models downloaded once at setup; OCR runs fully
+    offline thereafter (HF_HUB_OFFLINE enforced)."
+- **Fail-open on OCR error, fail-closed on pack absent (unchanged):** if the
+  OCR pack is not installed, `extract_pdf_text` raises `ExtractionError` with
+  an install hint — it never returns empty text. If the pack IS installed but
+  OCR fails (e.g., illegible scan), the error falls through to `ExtractionError`
+  (fail-open within the OCR path, fail-closed to the caller).
+- **`[OCR]` quality note:** text extracted via OCR is prefixed with `[OCR]`;
+  `bubble_shield_read` prepends a human-readable note recommending review of
+  critical fields (names, dates, numbers) for OCR accuracy.
+- **`test_260_ocr.py` — 3-test suite:**
+  - Test 0: `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` are verified in the
+    subprocess env via mock — proves zero runtime network (no real OCR run
+    needed for this assertion).
+  - Test 1: pack absent → `ExtractionError` with install hint (fail-closed).
+  - Test 2: pack present → OCR text + anonymise pipeline (skipped if not installed).
+- **`test_bubble_shield_mcp.py` — updated:** expected tool count 8 → 9 (added
+  `bubble_shield_setup_ocr`). New assertion: `setup_ocr status` returns a state.
+  Suite: 19/19 passed.
+- All 4 script copies synced (`scripts/` ↔ `mcpb/server/scripts/` identical).
+  MCPB re-packed.
+- All suites green: `test_bubble_shield_mcp` 19/19, `test_260_ocr` 3/3,
+  `test_264_repeated_company` 37/37, `test_259_corporate_kyc` 24/24,
+  `test_257_form_layout` 51/51, `test_guard` 21/21, `test_guard_marker` 11/11,
+  `test_tripwire` 18/18, `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9,
+  `test_256_daemon_path_fail_loud` 16/16.
+
 ## 1.15.2 — 2026-06-23 (fix #264 ship-blockers: bare-type seed + two-token company)
 
 ### Bug A fix — degenerate seed corrupts the document (ship-blocker)

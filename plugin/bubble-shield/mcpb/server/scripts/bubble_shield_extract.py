@@ -11,8 +11,8 @@ changes. Plain-text formats (.txt/.md/.csv/.json) decode directly; PDFs and
 PDF) raises ExtractionError with a human FR message rather than silently feeding
 garbage to the anonymiser — garbage in means PII could slip through unrecognised.
 
-OCR for scanned PDFs is intentionally out of scope (heavy local stack); the
-message tells the user so explicitly.
+For scanned PDFs, the optional OCR pack (bubble_shield_setup_ocr) is tried if
+installed. Fail-open: OCR errors fall through to the original ExtractionError.
 
 Usage (the skill calls it as a CLI so it works without importing anything):
     python3 bubble_shield_extract.py <path>          # prints extracted text to stdout
@@ -37,6 +37,8 @@ if _VENDOR.is_dir() and str(_VENDOR) not in sys.path:
 PDF_MAGIC = b"%PDF"
 DOCX_MAGIC = b"PK\x03\x04"  # docx is a zip
 
+_OCR_TAG = "[OCR]"  # prepended to signal OCR-sourced text to callers
+
 
 class ExtractionError(Exception):
     """Raised when a file can't be turned into usable text."""
@@ -50,8 +52,94 @@ def looks_like_docx(filename: str, raw: bytes) -> bool:
     return filename.lower().endswith(".docx") and raw[:4].startswith(DOCX_MAGIC)
 
 
+def _ocr_pack_python() -> "Path | None":
+    """Return the ocr-env venv python if the OCR pack is installed, else None.
+
+    Also checks that the layout model sentinel exists — if setup ran but the
+    model was never downloaded, we must not proceed (the subprocess would try
+    to fetch from HuggingFace, which is forbidden at runtime).  Returns None
+    so the caller falls through to the ExtractionError path."""
+    import os
+    from pathlib import Path
+    home = Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield"))
+    manifest = home / "ocr.json"
+    if not manifest.is_file():
+        return None
+    # If the layout model has not been cached yet (setup incomplete), refuse
+    # to proceed — we must not attempt a HuggingFace download at runtime.
+    sentinel = home / "layout_model_cached.flag"
+    if not sentinel.is_file():
+        return None
+    try:
+        import json
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        py = Path(data.get("venv_python", ""))
+        return py if py.is_file() else None
+    except Exception:
+        return None
+
+
+def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
+    """Try OCR on a scanned PDF using the optional OCR pack.
+
+    Returns the OCR'd text (prefixed with _OCR_TAG) if successful, None otherwise.
+    Layout-aware: docling preserves label:value structure from KYC/form PDFs.
+    Called only when pypdf finds no text layer. Completely local — no cloud.
+
+    PRIVACY GUARANTEE: HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set in
+    the subprocess env, so NO outbound network call is made at runtime.  The
+    layout model MUST already be cached (guaranteed by _ocr_pack_python() which
+    checks the sentinel before returning the venv path)."""
+    py = _ocr_pack_python()
+    if py is None:
+        return None
+    import subprocess
+    import tempfile
+    import os
+    # Write raw PDF to a temp file, run docling in the ocr-env, read result
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+        tf.write(raw)
+        tmp_pdf = tf.name
+    try:
+        code = (
+            "import sys, warnings; warnings.filterwarnings('ignore');"
+            "from docling.document_converter import DocumentConverter, PdfFormatOption;"
+            "from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions;"
+            "opts = PdfPipelineOptions();"
+            "opts.do_ocr = True;"
+            "opts.ocr_options = RapidOcrOptions();"
+            "opts.do_table_structure = True;"
+            f"conv = DocumentConverter(format_options={{'pdf': PdfFormatOption(pipeline_options=opts)}});"
+            f"res = conv.convert({tmp_pdf!r});"
+            "print(res.document.export_to_markdown(), end='')"
+        )
+        # CRITICAL: enforce offline mode — NO huggingface.co calls at runtime.
+        # _ocr_pack_python() already confirmed the sentinel (model cached), so
+        # setting HF_HUB_OFFLINE=1 here is safe and mandatory.
+        env = dict(os.environ)
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+        r = subprocess.run([str(py), "-c", code],
+                           capture_output=True, text=True, timeout=300, env=env)
+        if r.returncode == 0 and r.stdout.strip():
+            return _OCR_TAG + " " + r.stdout.strip()
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_pdf)
+        except Exception:
+            pass
+
+
 def extract_pdf_text(raw: bytes) -> str:
-    """Extract text from a PDF, or raise ExtractionError with a clear reason."""
+    """Extract text from a PDF, or raise ExtractionError with a clear reason.
+
+    For PDFs with a native text layer, uses pypdf (zero extra install). For
+    scanned/image-only PDFs (no text layer), falls back to the optional OCR pack
+    if installed (docling + RapidOCR, provisioned by bubble_shield_setup_ocr).
+    Fail-open: OCR errors fall through to the original ExtractionError message."""
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -83,9 +171,18 @@ def extract_pdf_text(raw: bytes) -> str:
     text = "\n".join(parts).strip()
 
     if not text:
+        # OCR pack: if installed, try layout-aware local OCR on the scanned pages.
+        # Fail-open: any OCR error falls through to the original message.
+        try:
+            _ocr_text = _ocr_pdf_if_pack_present(raw)
+        except Exception:
+            _ocr_text = None
+        if _ocr_text:
+            return _ocr_text
         raise ExtractionError(
             "Aucun texte extractible — PDF probablement scanné (image). "
-            "L'OCR n'est pas pris en charge ; colle le texte manuellement.")
+            "Installez le pack OCR (bubble_shield_setup_ocr) pour lire ce type de fichier, "
+            "ou collez le texte manuellement.")
     return text
 
 

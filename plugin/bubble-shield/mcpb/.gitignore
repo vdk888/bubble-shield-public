@@ -1,0 +1,4 @@
+# Backup files — must never be swept into the .mcpb bundle
+*.bak*
+*.bak
+*~
