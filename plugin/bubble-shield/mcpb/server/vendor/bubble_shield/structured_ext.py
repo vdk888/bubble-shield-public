@@ -842,11 +842,32 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
     Derives person name from RAISON_SOCIALE matches (strips company prefix) and
     from high-confidence NOM matches with >=2 CAPS tokens. Emits NOM for each
     uncovered occurrence. ADD-only, fail-open, vault-consistent.
+
+    fix #273 — glued-token left-boundary:
+    PDF extraction artifacts can GLUE a seed to the preceding token with no space,
+    e.g. "g\u00e9rantETESTONI" where "E" is the trailing char of the preceding word
+    and "TESTONI" is the known surname. The standard word-boundary check
+    ``(?<![A-Za-z])`` fails because "E" IS a letter.
+
+    For seeds derived from RAISON_SOCIALE (known, high-confidence), we use a
+    LOOSE left boundary — no left-char restriction — so the seed is found even
+    when glued. The right boundary (``(?![A-Za-z])``) stays strict to prevent
+    matching inside longer words (e.g. "TESTONIAN"). Only applies to lone-token
+    seeds (length >= 6) from RAISON_SOCIALE derivation; pair seeds and NOM-derived
+    seeds keep the standard boundary (they are inherently longer / multi-token and
+    the glue artifact only affects lone tokens).
+
+    Precision guard: lone-token seeds shorter than 6 chars or in
+    _COMMON_FRENCH_SURNAMES are already excluded by _person_name_seeds(), so the
+    loose boundary never fires for "MARTIN", "PETIT", etc.
     """
     if not found:
         return []
 
+    # Track which seeds came from RAISON_SOCIALE derivation (fix #273: loose left
+    # boundary for PDF-glued lone tokens).
     seeds: set = set()
+    raison_sociale_lone_seeds: set = set()   # lone tokens only (no space in seed)
 
     for m in found:
         if m.entity_type == "RAISON_SOCIALE":
@@ -856,6 +877,10 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
                 continue
             for seed in _person_name_seeds(tokens):
                 seeds.add(seed)
+                # A lone token seed has no space and comes from a known company name
+                # -> eligible for the glued-token loose-left-boundary pass (#273).
+                if " " not in seed and len(seed) >= 6:
+                    raison_sociale_lone_seeds.add(seed)
 
     for m in found:
         if m.entity_type == "NOM":
@@ -880,31 +905,57 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
     for seed in sorted_seeds:
         if not seed or len(seed) < _PERSON_TOKEN_MIN_LEN:
             continue
+
+        # Standard pattern: strict word boundary on both sides.
         pattern = re.compile(
             r"(?<![A-Za-z\xc0-\xff])"
             + re.escape(seed)
             + r"(?![A-Za-z\xc0-\xff])",
             re.UNICODE,
         )
-        for occ in pattern.finditer(text):
+        # fix #273 -- loose-left-boundary pattern for RAISON_SOCIALE lone-token
+        # seeds: the seed may be immediately preceded by any character (including a
+        # letter from a PDF-extraction artifact), but the RIGHT boundary is still
+        # strict so we never match inside a longer word.
+        glued_pattern = None
+        if seed in raison_sociale_lone_seeds:
+            glued_pattern = re.compile(
+                re.escape(seed)
+                + r"(?![A-Za-z\xc0-\xff])",
+                re.UNICODE,
+            )
+
+        def _collect(occ, _covered=covered, _extra=extra):
             span = (occ.start(), occ.end())
-            if span in covered:
-                continue
+            if span in _covered:
+                return
             # Don't emit if fully inside an already-covered span
-            if any(cs <= occ.start() and occ.end() <= ce for (cs, ce) in covered):
-                continue
-            covered.add(span)
+            if any(cs <= occ.start() and occ.end() <= ce for (cs, ce) in _covered):
+                return
+            _covered.add(span)
             # Use the ACTUAL matched text as the value so the vault restores
-            # exactly what was in the document (fix: de-anon fidelity — round-trip
+            # exactly what was in the document (fix: de-anon fidelity -- round-trip
             # name inversion, Bug 1 of #266 fidelity review).  Token consistency
             # is preserved: vault._token_for_name groups by distinctive words, so
             # "TESTONI FAKENAME" and "FAKENAME TESTONI" both resolve to person-
             # number 1 (\u27e6NOM_0001\u27e7 / \u27e6NOM_0001a\u27e7) and each restores to
             # its own surface form.
-            extra.append(Match(
+            _extra.append(Match(
                 start=occ.start(), end=occ.end(),
                 entity_type="NOM", value=occ.group(0),
                 score=0.88, priority=58,
             ))
+
+        for occ in pattern.finditer(text):
+            _collect(occ)
+
+        # fix #273 -- glued-token pass: scan with the loose-left pattern and emit
+        # only occurrences NOT already found by the standard pattern (covered set
+        # already updated above). Only accept when the preceding char IS a letter or
+        # digit — i.e., a genuine glue artifact that the standard pattern missed.
+        if glued_pattern is not None:
+            for occ in glued_pattern.finditer(text):
+                if occ.start() > 0 and re.match(r"[A-Za-z\xc0-\xff0-9]", text[occ.start() - 1]):
+                    _collect(occ)
 
     return extra

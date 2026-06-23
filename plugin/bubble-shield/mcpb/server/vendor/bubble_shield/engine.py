@@ -14,11 +14,24 @@ below the confidence threshold (we'd rather over-flag than leak).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from bubble_shield.recognizers import Match, Recognizer, detect, resolve_overlaps
 from bubble_shield.vault import TOKEN_RE, Vault
+
+# fix #273 — glued-token output normalisation.
+# When a PDF extraction artifact omits a space between two adjacent tokens (e.g.
+# a POSTE match immediately followed by the first letter of a surname), the
+# anonymised output can contain "⟦POSTE_0003⟧ESURNAME" — the closing bracket of
+# one token glued to the start of the next word.  Post-substitution we insert a
+# single space between "⟧" and any immediately adjacent alphabetic character so
+# that subsequent readers (human or automated) parse the token boundary correctly.
+# This is a DISPLAY normalisation only — it does NOT change detection coverage
+# (the detection pass already found the surname via the loose-left-boundary
+# extension in structured_ext.doc_level_person_repetition_matches).
+_GLUED_TOKEN_RE = re.compile(r"(⟧)([A-Za-z\xc0-\xff])")
 
 
 @dataclass
@@ -178,6 +191,10 @@ class AnonymizationEngine:
                 score=m.score, start=m.start, end=m.end))
             min_score = min(min_score, m.score)
         entities.sort(key=lambda e: e.start)
+
+        # fix #273 — insert a space between ⟧ and any immediately adjacent
+        # alphabetic char (PDF glued-token output normalisation).
+        out = _GLUED_TOKEN_RE.sub(r"\1 \2", out)
 
         residual = self._residual_scan(out)
         return AnonymizationResult(

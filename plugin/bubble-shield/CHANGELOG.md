@@ -5,6 +5,83 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.16.2 — 2026-06-24 (fix #273: glued-token surname leak in liasse fiscale)
+
+### Bug fixed — SURNAME LEAK when glued to preceding token by PDF extraction artifact (risk:HIGH)
+
+- **Root cause:** in some liasse fiscale PDFs, text extraction omits the space
+  between a preceding token (e.g. a POSTE/role word such as "gérant") and the
+  following surname, producing "gérantETESTONI" — with a trailing artifact char
+  ("E") belonging to the preceding word. The anonymised output therefore showed
+  `⟦POSTE_0003⟧ESURNAME` (the POSTE token immediately followed by the bare
+  surname). The doc-level person-repetition pass (#266) uses a strict left word
+  boundary `(?<![A-Za-z])SURNAME` that fails here because "E" IS a letter, so
+  the glued surname was never detected and leaked in clear.
+  The same SURNAME was correctly masked in a separate, clean occurrence
+  (`⟦NOM_0001⟧`) — confirming this is purely a boundary/extraction miss, not
+  a vault or recognizer error.
+  DCC .docx variants are CLEAN; this is liasse/PDF-extraction-specific.
+
+### Fix — Option A + Option B (both applied)
+
+**Option B (detection fix) — `structured_ext.py` `doc_level_person_repetition_matches`**
+- Track which seeds came from RAISON_SOCIALE extraction separately as
+  `raison_sociale_lone_seeds` (lone tokens with no space, length ≥ 6).
+- For these seeds only, compile a second `glued_pattern` with NO left-char
+  restriction (only the strict right boundary `(?![A-Za-z])` remains).
+- After the standard word-boundary scan, run the glued pattern and emit any
+  occurrence whose PRECEDING character IS alphabetic or a digit — confirming
+  it is a genuine glue artifact the standard scan missed.
+- Precision guards: seeds shorter than 6 chars or in `_COMMON_FRENCH_SURNAMES`
+  are excluded by `_person_name_seeds()` BEFORE this code runs, so "MARTIN",
+  "BLANC", "PETIT", etc. are never loose-boundary-scanned. The right boundary
+  still prevents partial matches inside longer words (e.g. "TESTONIAN").
+- **Location:** `structured_ext.py` `doc_level_person_repetition_matches`
+  (seed collection loop + per-seed scanning loop).
+
+**Option A (output normalisation) — `engine.py` `anonymize()`**
+- Added `_GLUED_TOKEN_RE = re.compile(r"(⟧)([A-Za-z\xc0-\xff])")` at module
+  level.
+- After all token substitutions, apply `_GLUED_TOKEN_RE.sub(r"\1 \2", out)` to
+  insert a space between `⟧` and any immediately adjacent alphabetic character.
+  This fixes the output representation (`⟦POSTE_0003⟧ESURNAME` →
+  `⟦POSTE_0003⟧ ESURNAME`) even if Option B missed the detection.
+  Display normalisation only — does not change detection coverage.
+- **Location:** `engine.py` (module-level constant + `anonymize()` post-loop).
+
+### Precision (same guards as #264/#266 — over-mask is a ship-blocker)
+- Common-surname lone-token seeds (MARTIN/BLANC/PETIT) excluded by
+  `_COMMON_FRENCH_SURNAMES` BEFORE the loose-boundary pass — never scanned
+  loosely.
+- Lone seeds shorter than 6 chars never enter `raison_sociale_lone_seeds`.
+- Right boundary always strict: no partial word matches.
+- "Forme juridique : SELARL", "La SELARL exerce", "blanc" in prose → NOT masked.
+- All #266/#264/#259/#257/#256 precision controls green.
+
+### New test `scripts/test_273_glued_token.py`
+- Part A (daemon DOWN): glued TESTONI masked; FAKENAME masked; 'Forme juridique'
+  preserved; precision block unchanged.
+- Part A2 (precision): common-word names NOT masked.
+- Part B (de-anon round-trip via Python API): anon has NOM tokens, TESTONI/FAKENAME
+  gone; de-anon restores both.
+- Part C (daemon UP if available): same checks.
+- Part D unit tests D1–D12: glued detection, raison_sociale_lone_seeds set,
+  common-word guards, full combined detector, Option A engine normalisation,
+  de-anon round-trip, precision controls.
+- 36/36 passed.
+
+### Other
+- All 3 copies synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/` →
+  `plugin/bubble-shield/mcpb/server/vendor/`). Test scripts synced to both
+  `scripts/` and `mcpb/server/scripts/`. MCPB re-packed at 1.16.2 (no stray .bak).
+- All suites green: `test_273_glued_token` 36/36, `test_266_person_name_corporate`
+  62/62, `test_264_repeated_company` 37/37, `test_259_corporate_kyc` 24/24,
+  `test_257_form_layout` 51/51, `test_bubble_shield_mcp` 19/19,
+  `test_posttool_anonymize` 19/19, `test_256_daemon_path_fail_loud` 16/16,
+  `test_260_ocr` 3/3. pytest 50/50.
+  (`test_guard`/`test_guard_marker`/`test_tripwire`/`test_option_b` require
+  Python ≥ 3.10; pre-existing on this machine's Python 3.9.)
+
 ## 1.16.1 — 2026-06-24 (fix #266: practitioner's personal name leaks in corporate/fiscal docs)
 
 ### Bug fixed — PERSONAL NAME leaks in signature blocks and label-less table cells (risk:HIGH)
