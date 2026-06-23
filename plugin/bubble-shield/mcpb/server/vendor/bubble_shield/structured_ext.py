@@ -319,10 +319,11 @@ def form_piece_identite_matches(text: str) -> List[Match]:
     return out
 
 
-# ── DÉNOMINATION / RAISON SOCIALE label lines (fix #259) ─────────────────────
+# ── DÉNOMINATION / RAISON SOCIALE label lines (fix #259, extended fix #264) ───
 #
 # Corporate form lines like:
 #   "Dénomination ou raison sociale : SELARL DU DOCTEUR FAKENAME TESTONI"
+#   "Dénomination de l'entreprise : SELARL DU DOCTEUR FAKENAME TESTONI"
 #   "Raison sociale : SCI DU HAMEAU"
 #   "Dénomination sociale : SAS INNOVATION LABS"
 #
@@ -342,7 +343,7 @@ def form_piece_identite_matches(text: str) -> List[Match]:
 _RAISON_SOCIALE_LABEL_RE = re.compile(
     r"(?i)"
     r"^(?:"
-    r"d[eé]nomination(?:\s+sociale)?(?:\s+ou\s+raison\s+sociale)?"
+    r"d[eé]nomination(?:\s+(?:sociale|de\s+l['']\s*entreprise))?(?:\s+ou\s+raison\s+sociale)?"
     r"|raison\s+sociale"
     r")"
     r"[^\S\n]*:[^\S\n]*" + _VALLINE,
@@ -351,8 +352,8 @@ _RAISON_SOCIALE_LABEL_RE = re.compile(
 
 
 def form_raison_sociale_matches(text: str) -> List[Match]:
-    """Match 'Dénomination (ou) (sociale)? : <VALUE>' and 'Raison sociale : <VALUE>'
-    label lines — RAISON_SOCIALE entity (fix #259).
+    """Match 'Dénomination (ou) (sociale|de l'entreprise)? : <VALUE>' and
+    'Raison sociale : <VALUE>' label lines — RAISON_SOCIALE entity (fix #259, #264).
 
     Masks the whole company name value, including any embedded practitioner names
     (SELARL DU DOCTEUR …). Does NOT mask standalone forme-juridique type words
@@ -371,11 +372,263 @@ def form_raison_sociale_matches(text: str) -> List[Match]:
         # Guard: value must contain at least one letter (not a blank line)
         if not re.search(r"[A-Za-zÀ-ÿ]", val):
             continue
+        # Bug B fix: normalise doubled-prefix artifact so vault keys are consistent.
+        # "SELARL SELARL DU DOCTEUR X" → "SELARL DU DOCTEUR X" (same canonical form
+        # as the clean "Raison sociale : SELARL DU DOCTEUR X" occurrence) so that
+        # vault.token_for() collapses both to ONE token.
+        canonical_val = _canonical_company_name(val)
         start = m.start("val")
         out.append(Match(start=start, end=start + len(val),
-                         entity_type="RAISON_SOCIALE", value=val,
+                         entity_type="RAISON_SOCIALE", value=canonical_val,
                          score=0.90, priority=59))
     return out
+
+
+# ── FORME-JURIDIQUE-ANCHORED recognizer (fix #264) ───────────────────────────
+#
+# In liasse fiscale PDFs, the company name appears UNLABELED — as page headers,
+# table headers, repeated footer lines — with the forme-juridique type word
+# leading directly into the company name WITHOUT a "raison sociale :" label:
+#
+#   "SELARL DU DOCTEUR FAKENAME TESTONI"        (standalone header)
+#   "SELARL SELARL DU DOCTEUR FAKENAME TESTONI" (doubled prefix artifact)
+#   "EXPERTISE SELARL SELARL DU DOCTEUR FAKENAME TESTONI"  (prefixed)
+#   "01012025 31122025 SELARL SELARL DU DOCTEUR FAKENAME TESTONI"
+#
+# The doubled-prefix pattern "SELARL SELARL …" is a PDF extraction artifact
+# from some liasse layouts where the type word appears in two adjacent blocks.
+#
+# Precision guards (CRITICAL — false positives are the main risk here):
+#   - Type word MUST be followed by at least one personal-name token (≥2 letters,
+#     not a generic stopword). Bare "SELARL" / "La SELARL exerce…" → NOT matched.
+#   - "Forme juridique : SELARL" or "Type : SAS" → NOT matched because the
+#     forme-juridique-anchored pattern requires actual company-name words after
+#     the type, and these label lines don't have them.
+#   - The name captured is the words following the (possibly doubled) type word —
+#     NOT the type word itself. We use the canonical (de-duplicated) form for the
+#     vault key, but always emit ALL matched characters for correct span masking.
+#   - Company name must be 2–12 CAPS words (liasse headers, not prose sentences).
+#   - We don't fire on lines where SELARL/SAS/… appears mid-sentence with a
+#     lowercase word nearby (that's prose, not a company name header).
+
+# Forme-juridique type words (full list of common FR professional structures)
+_FORME_JURIDIQUE = (
+    r"SELARL|SARL|SASU|SAS|SCI|SCM|SCP|SA|SNC|EURL|SCOP|SELAFA|SELARLU|SELAS"
+)
+
+# Python set of the same words — used to guard against degenerate seeds that
+# canonicalise to a bare type word (Bug A fix: "Raison sociale : SARL" must
+# NOT cause the repetition pass to mask every bare "SARL" in the document).
+_FORME_JURIDIQUE_SET: frozenset = frozenset({
+    "SELARL", "SARL", "SASU", "SAS", "SCI", "SCM", "SCP", "SA", "SNC",
+    "EURL", "SCOP", "SELAFA", "SELARLU", "SELAS",
+})
+
+# A CAPS name word: uppercase-only, may include apostrophe, hyphen, accented CAPS.
+# Must be ≥2 chars and NOT a pure-number token.
+_CAPS_WORD = r"[A-ZÉÈÀÂÎÔÙÛÜ][A-ZÉÈÀÂÎÔÙÛÜ''\-]{1,}"
+
+# Words that alone (with nothing following) do NOT constitute a company name.
+# These are stopwords that can START a name segment (e.g. "SELARL DU DOCTEUR X")
+# but only if followed by a genuine CAPS personal-name word. The guard below
+# checks that after optional article/preposition tokens there is at least one
+# CAPS word that is NOT itself a pure stopword.
+_FORME_JURI_NAME_STOPONLY = frozenset({
+    # Pure prepositions / articles — alone are NOT a name
+    "DE", "DES", "ET", "EN", "AU", "AUX",
+    # Generic organisational nouns that alone don't identify a practice
+    # (e.g. "SELARL CABINET" is not PII — needs a name after it)
+    "CABINET", "ETUDE", "ETUDES", "GROUPE", "GROUPEMENT",
+    "ASSOCIATION", "SOCIETE",
+})
+
+# The forme-juridique-anchored pattern:
+#   optional leading garbage (digits/uppercase words before the type)
+#   then: (TYPE_WORD)+ (one or two occurrences to handle doubling)
+#   then: 1–12 CAPS words constituting the company name
+#
+# We capture only what follows the (normalised) type word(s) as the "name" group,
+# because that's the PII payload. The full match (including the type prefix) is
+# what we report so the vault token covers the whole span.
+#
+# Pattern notes:
+#   (?:SELARL\s+)? — optional doubled prefix (SELARL SELARL …)
+#   (?P<type>…)    — the authoritative type word (used for normalisation)
+#   \s+            — at least one space between type and name
+#   (?P<name>…)    — the company name words (CAPS, 1–12 tokens)
+_FORME_JURI_RE = re.compile(
+    rf"(?<!\w)(?:{_FORME_JURIDIQUE})\s+(?P<type>(?:{_FORME_JURIDIQUE})\s+)?(?P<name>(?:{_CAPS_WORD})(?:\s+(?:{_CAPS_WORD}|DU|DES|DE|LA|LE|LES|DU|ET){{0,}}(?:{_CAPS_WORD})){{0,11}})",
+    re.UNICODE,
+)
+
+# Simplified, direct pattern: TYPE (optionally doubled) then NAME words
+# We rebuild this more carefully:
+_FORME_JURI_RE = re.compile(
+    # optional doubled type (e.g. SELARL SELARL)
+    rf"(?<!\w)(?:{_FORME_JURIDIQUE})(?:\s+(?:{_FORME_JURIDIQUE}))?\s+(?P<name>(?:{_CAPS_WORD})"
+    # allow interleaved prepositions (DU, DE, DES, etc.) + more CAPS words, 0-11 more tokens
+    rf"(?:\s+(?:DU|DES|DE|LA|LE|LES|ET|DU|AU|AUX|D['']\s*|L['']\s*){{0,1}}(?:{_CAPS_WORD})){{0,11}})",
+    re.UNICODE,
+)
+
+
+def forme_juridique_anchored_matches(text: str) -> List[Match]:
+    """Find unlabeled company names anchored by their forme-juridique type word.
+
+    Catches patterns like:
+      "SELARL DU DOCTEUR FAKENAME TESTONI"
+      "SELARL SELARL DU DOCTEUR FAKENAME TESTONI"  (doubled prefix artifact)
+      "EXPERTISE SELARL DU DOCTEUR FAKENAME TESTONI" (leading context words OK)
+
+    Emits the FULL match span (type word + name) as RAISON_SOCIALE so the vault
+    can produce a consistent token with the labeled-form matches.
+
+    Precision guards:
+      - Name group must contain at least one CAPS word that is NOT a pure stopword
+        (prevents "SELARL DE" or "SCI ET" bare-preposition-only matches).
+      - "Forme juridique : SELARL" / "Type : SAS" → not matched because the label
+        line has "forme juridique" / "type" immediately before the ":" and our
+        line-prefix check skips those.
+      - First non-preposition token must NOT be a pure-digit string (dates/years).
+      - Does NOT match when SELARL/SAS appears mid-lowercase-prose (ALL-CAPS
+        name continuation required by the pattern).
+    """
+    out: List[Match] = []
+    for m in _FORME_JURI_RE.finditer(text):
+        name = m.group("name").strip()
+        if not name:
+            continue
+        # Collect the real name tokens (skip leading prepositions/articles)
+        tokens = re.split(r"\s+", name)
+        real_tokens = [t for t in tokens if t.upper() not in _FORME_JURI_NAME_STOPONLY]
+        # Must have at least one real CAPS name word (not a pure-digit, not stopword)
+        if not real_tokens:
+            continue
+        # First real token must not be pure digits (fiscal year / date marker)
+        if re.match(r"^\d+$", real_tokens[0]):
+            continue
+        # First real token must be ≥2 letters (actual name word, not single-char)
+        if not re.search(r"[A-ZÉÈÀÂÎÔÙÛÜ]{2,}", real_tokens[0]):
+            continue
+        # Precision: skip "Forme juridique : SELARL …" / "Type : SAS …" lines
+        # by checking the line prefix before the match for those label patterns.
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_prefix = text[line_start:m.start()].rstrip()
+        if re.search(
+            r"(?i)(?:forme\s+juridique|type\s+de\s+soci[eé]t[eé]|nature\s+juridique|type)\s*:",
+            line_prefix,
+        ):
+            continue
+        # Emit the WHOLE match span (type word + name) as RAISON_SOCIALE.
+        # Bug B fix: normalise the value to canonical form so the vault always
+        # keys on the same string regardless of which occurrence (doubled-prefix
+        # or clean) was found first.
+        start = m.start()
+        end = m.end()
+        full_val = _canonical_company_name(text[start:end].strip())
+        out.append(Match(start=start, end=end,
+                         entity_type="RAISON_SOCIALE", value=full_val,
+                         score=0.82, priority=57))  # lower than labeled (0.90)
+    return out
+
+
+# ── DOC-LEVEL COMPANY-NAME REPETITION POST-PASS (fix #264) ───────────────────
+#
+# Once we know the canonical company name from ANY detection (labeled or
+# forme-juridique-anchored), we scan the full document for every verbatim
+# occurrence of that string and emit a RAISON_SOCIALE match for each one.
+#
+# This is the definitive fix for the liasse fiscale 14× leak: the name appears
+# as unlabeled page/table headers and there is no label to anchor on, but the
+# string is identical to the labeled occurrence found earlier.
+#
+# Contract:
+#   - ADD-only (never removes existing matches)
+#   - Vault emits consistent tokens across all occurrences (same value → same token)
+#   - Works with or without the forme-juridique-anchored recognizer (belt+suspenders)
+#   - Only emits spans that do NOT already overlap an existing match (dedup)
+
+def _canonical_company_name(val: str) -> str:
+    """Normalise a company name found by any recognizer to its canonical form.
+
+    Handles the doubled-prefix extraction artifact:
+      "SELARL SELARL DU DOCTEUR X"  →  "SELARL DU DOCTEUR X"
+    The canonical form is the shorter one (with the duplicate type prefix removed),
+    so the vault key is consistent regardless of which occurrence was found first.
+    """
+    val = val.strip()
+    # Detect doubled prefix: "TYPE TYPE ..." → "TYPE ..."
+    doubled = re.match(
+        rf"^({_FORME_JURIDIQUE})\s+\1\s+",
+        val,
+        re.UNICODE,
+    )
+    if doubled:
+        val = val[doubled.end() - (len(doubled.group(1)) + 1):]
+    return val.strip()
+
+
+def doc_level_repetition_matches(text: str, found: List[Match]) -> List[Match]:
+    """Find all verbatim repetitions of company names already identified in `found`.
+
+    For each unique RAISON_SOCIALE value (canonical form), scan the full document
+    for every occurrence and emit a Match for each that isn't already covered by
+    an existing match in `found`.
+
+    This is the core fix for the liasse fiscale 14× leak (#264): the labeled
+    "Dénomination" line gives us the name once; this pass finds the other 13.
+    """
+    if not found:
+        return []
+
+    # Collect unique canonical names from RAISON_SOCIALE detections
+    canonical_names: set = set()
+    for m in found:
+        if m.entity_type == "RAISON_SOCIALE":
+            c = _canonical_company_name(m.value)
+            if c and len(c) >= 4:   # sanity: skip ultra-short strings
+                # Bug A fix: skip seeds that are a bare forme-juridique type word.
+                # If "Raison sociale : SARL" yields canonical "SARL", using that as
+                # a seed would mask every bare "SARL" in the document — simultaneous
+                # over-mask (type labels, prose) AND under-mask (SARL DUPONT → only
+                # "SARL" masked, "DUPONT" leaks). A bare type word is never PII by
+                # itself; only the full company name is.
+                if c.upper() in _FORME_JURIDIQUE_SET:
+                    continue
+                canonical_names.add(c)
+            # Also register the original (non-canonical) form in case it's different —
+            # but only if it is not itself a bare type word.
+            orig = m.value.strip()
+            if orig and orig != c and orig.upper() not in _FORME_JURIDIQUE_SET:
+                canonical_names.add(orig)
+
+    if not canonical_names:
+        return []
+
+    # Build a set of already-covered spans to avoid double-emitting
+    covered: set = {(m.start, m.end) for m in found}
+
+    extra: List[Match] = []
+    for name in canonical_names:
+        if not name:
+            continue
+        # Escape for literal search
+        pattern = re.compile(re.escape(name), re.UNICODE)
+        for occ in pattern.finditer(text):
+            span = (occ.start(), occ.end())
+            if span in covered:
+                continue
+            # Don't emit if fully inside an already-covered span
+            if any(cs <= occ.start() and occ.end() <= ce for (cs, ce) in covered):
+                continue
+            covered.add(span)
+            extra.append(Match(
+                start=occ.start(), end=occ.end(),
+                entity_type="RAISON_SOCIALE", value=name,
+                score=0.88, priority=59,
+            ))
+
+    return extra
 
 
 def make_structured_detector():
@@ -388,12 +641,18 @@ def make_structured_detector():
           Nom/Prénom → NOM  (placeholder guard: (vide)/N/A/néant etc. skipped)
           Lieu de naissance / "à : CITY" in DOB lines → LIEU_NAISSANCE
           Passeport/CNI/Pièce d'identité n° → PIECE_IDENTITE
-          Dénomination/Raison sociale : → RAISON_SOCIALE  (fix #259)
+          Dénomination/Raison sociale / Dénomination de l'entreprise :
+            → RAISON_SOCIALE  (fix #259, #264)
+      - Forme-juridique-anchored recognizer: "(SELARL|SARL|SAS|…) <CAPS NAME>"
+          → RAISON_SOCIALE even without a label (fix #264 — liasse fiscale headers)
+          Handles doubled-prefix artifact "SELARL SELARL DU DOCTEUR …".
+          Precision guards: bare type words / form-label lines / prose → NOT matched.
+      - Doc-level repetition post-pass (fix #264): once a RAISON_SOCIALE is
+          identified (from ANY source), scan the whole document for verbatim
+          repetitions and emit a match for each unlabeled occurrence.
       - Note: "Né(e) le : DD/MM/YYYY" DOB masking is handled by the core
-        DATE_NAISSANCE recognizer in recognizers.py (fix #257-b), which now
-        matches the parenthetical form Né(e) le in addition to née/né/nee.
-      - Note: Full 14-digit SIRET (including hyphen-separated NIC suffix) masking
-        is handled by the core SIRET recognizer in recognizers.py (fix #259).
+        DATE_NAISSANCE recognizer in recognizers.py (fix #257-b).
+      - Note: Full 14-digit SIRET masking is in the core SIRET recognizer (#259).
     """
     def _detector(text: str) -> List[Match]:
         matches: List[Match] = []
@@ -419,6 +678,18 @@ def make_structured_detector():
             pass
         try:
             matches += form_raison_sociale_matches(text)
+        except Exception:
+            pass
+        # ── fix #264: forme-juridique-anchored unlabeled headers ─────────────
+        try:
+            matches += forme_juridique_anchored_matches(text)
+        except Exception:
+            pass
+        # ── fix #264: doc-level repetition post-pass ─────────────────────────
+        # Must run AFTER all primary detectors so it has the full set of
+        # RAISON_SOCIALE matches to derive canonical names from.
+        try:
+            matches += doc_level_repetition_matches(text, matches)
         except Exception:
             pass
         return matches

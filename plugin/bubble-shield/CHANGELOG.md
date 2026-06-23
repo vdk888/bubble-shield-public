@@ -5,6 +5,100 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.15.2 — 2026-06-23 (fix #264 ship-blockers: bare-type seed + two-token company)
+
+### Bug A fix — degenerate seed corrupts the document (ship-blocker)
+- **Root cause:** `doc_level_repetition_matches()` accepted any RAISON_SOCIALE seed
+  whose canonical form was a bare forme-juridique type word (e.g. "SARL", "SELARL").
+  Input `Raison sociale : SARL` → canonical "SARL" → the repetition pass matched
+  every bare "SARL" in the document. Simultaneous over-mask ("Forme juridique : SARL"
+  and "La SARL exerce…" → wrongly masked) AND under-mask ("SARL DUPONT" → only
+  "SARL" masked, "DUPONT" leaked).
+- **Fix:** Added `_FORME_JURIDIQUE_SET` (frozenset of all 14 type words).
+  In `doc_level_repetition_matches`, skip any seed whose canonical form is a member
+  of `_FORME_JURIDIQUE_SET`. Also skip the original (non-canonical) form if it is
+  itself a bare type word. A bare-type seed contributes NO repetition matches.
+- **Location:** `structured_ext.py` lines 419–425 (`_FORME_JURIDIQUE_SET`),
+  `doc_level_repetition_matches()` (seed-collection loop, `_FORME_JURIDIQUE_SET` guards).
+
+### Bug B fix — two vault tokens for the same company (ship-blocker)
+- **Root cause:** `Dénomination de l'entreprise :` captured `SELARL SELARL DU DOCTEUR
+  FAKENAME TESTONI` (doubled prefix, PDF extraction artifact) while `Raison sociale :`
+  captured `SELARL DU DOCTEUR FAKENAME TESTONI`. Different `Match.value` strings →
+  `vault.token_for()` (keyed by exact string) minted two different tokens
+  (`⟦RAISON_SOCIALE_0001⟧` and `⟦RAISON_SOCIALE_0002⟧`) for ONE company. De-anon
+  returned inconsistent surface forms.
+- **Fix:** Apply `_canonical_company_name()` to `Match.value` before emitting in BOTH
+  `form_raison_sociale_matches()` and `forme_juridique_anchored_matches()`. Both
+  recognizers now emit `canonical_val` ("SELARL DU DOCTEUR FAKENAME TESTONI") as the
+  vault key regardless of which surface form they observed. The vault sees one string →
+  one token → consistent output.
+- **Location:** `structured_ext.py` `form_raison_sociale_matches()` (emit block),
+  `forme_juridique_anchored_matches()` (emit block).
+
+### Test additions (D13–D20 in `test_264_repeated_company.py`)
+- D13: bare SARL seed → 0 repetition matches (Bug A guard)
+- D14: "Forme juridique : SARL" NOT masked as RAISON_SOCIALE (Bug A)
+- D15: prose "La SARL exerce…" NOT masked as RAISON_SOCIALE (Bug A)
+- D16: real multi-word canonical seed still produces repetition matches (Bug A, no regression)
+- D17/D17b: doubled-prefix and clean form → same canonical value from form_raison_sociale_matches (Bug B)
+- D18: vault emits different tokens for different raw strings (confirms fix must be in recognizer)
+- D19: structured_ext emissions all share one value → single vault key (Bug B)
+- D20: end-to-end simulation → both lines get the same ⟦RAISON_SOCIALE_0001⟧ token (Bug B)
+
+### Other
+- All 3 copies synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/` → `plugin/bubble-shield/mcpb/server/vendor/`). Test scripts synced to `mcpb/server/scripts/`. MCPB re-packed.
+- All suites green: `test_264_repeated_company` 37/37, `test_259_corporate_kyc` 24/24, `test_257_form_layout` 51/51, `test_bubble_shield_mcp` 18/18, `test_guard` 21/21, `test_guard_marker` 11/11, `test_tripwire` 18/18, `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9, `test_256_daemon_path_fail_loud` 16/16.
+
+## 1.15.1 — 2026-06-23 (fix #264: repeated company name leaks in liasse fiscale)
+
+- **LEAK FIXED — corporate name repeated 14× in liasse fiscale.** Once #259 masked
+  the labeled `Raison sociale :` line, the practitioner's company name (SELARL DU
+  DOCTEUR …) still appeared unmasked as free-standing page/table headers throughout
+  the liasse fiscale — the label-anchored recognizer naturally misses unlabeled
+  repetitions. The company name leaked in clear in every table header, footer line,
+  and section title.
+- **Root cause:** PII detection is span-based — only the labeled occurrence was
+  matched. Subsequent verbatim repetitions of the same string in unlabeled positions
+  had no anchor to trigger a match.
+- **Fix 1 — extend `_RAISON_SOCIALE_LABEL_RE`:** added the `de l'entreprise` label
+  variant (`Dénomination de l'entreprise :`) which the #259 pattern missed. Liasse
+  fiscale uses this exact label form.
+- **Fix 2 — `forme_juridique_anchored_matches` (new, `structured_ext.py`):**
+  Catches unlabeled company-name headers anchored by a forme-juridique type word
+  (`SELARL|SARL|SAS|SCI|SCM|SCP|SASU|SNC|EURL|SCOP|…`), including the doubled-
+  prefix extraction artifact `SELARL SELARL DU DOCTEUR …`. Emits RAISON_SOCIALE
+  for the full span (type word + name) at score 0.82 (below labeled 0.90; overlap
+  resolution keeps the higher-scoring labeled match when both fire on the same span).
+  Precision guards: bare `SELARL` alone not matched; `Forme juridique : SELARL`
+  label line not matched (line-prefix check); prose `La SELARL exerce…` not matched
+  (ALL-CAPS name continuation required); `Type : SAS` not matched.
+- **Fix 3 — `doc_level_repetition_matches` post-pass (new, `structured_ext.py`):**
+  After all primary detectors run, collects every unique RAISON_SOCIALE value
+  (canonicalised — doubled prefix stripped), then scans the full document for every
+  verbatim occurrence and emits a RAISON_SOCIALE match for each span not already
+  covered. This is the definitive belt-and-suspenders fix: even if the
+  forme-juridique-anchored pattern can't fire (unusual layout), once the labeled
+  occurrence is found the post-pass finds the other 13 repetitions. ADD-only,
+  fail-open.
+- **Canonical normalisation helper `_canonical_company_name`:** strips the doubled-
+  prefix artifact (`SELARL SELARL DU DOCTEUR X` → `SELARL DU DOCTEUR X`) so the
+  vault lookup is consistent and both forms resolve to the same canonical key for
+  the repetition search.
+- **New test `scripts/test_264_repeated_company.py`:** 4-part (daemon DOWN / UP /
+  unlabeled-only / unit), 28 assertions. Full synthetic liasse block with all 5
+  occurrence types (labeled variant, doubled-prefix, standalone header,
+  prefixed header, date-prefixed header). Precision controls: `Forme juridique :
+  SELARL` and `La SELARL exerce une activité` → NOT masked.
+- All 3 copies re-synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/`
+  → `plugin/bubble-shield/mcpb/server/vendor/`). `scripts/` ↔
+  `mcpb/server/scripts/` identical. MCPB re-packed.
+- All suites green: `test_264_repeated_company` 28/28, `test_259_corporate_kyc`
+  24/24, `test_257_form_layout` 51/51, `test_bubble_shield_mcp` 18/18,
+  `test_guard` 21/21, `test_guard_marker` 11/11, `test_tripwire` 18/18,
+  `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9,
+  `test_256_daemon_path_fail_loud` 16/16.
+
 ## 1.15.0 — 2026-06-23 (fix #259: corporate KYC PII leaks — raison sociale + SIRET NIC suffix)
 
 - **LEAK 1 FIXED — Raison sociale leaks in clear.** Form line `Dénomination ou
