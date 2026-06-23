@@ -49,7 +49,10 @@ CONFIG_LOCATIONS = [
 
 DEFAULT_MESSAGE = (
     "🔒 Bubble Shield — accès bloqué. Ce fichier est dans un dossier client protégé. "
-    "Lance d'abord l'anonymisation Bubble Shield, puis travaille sur la copie anonymisée."
+    "N'utilise PAS Read/Bash dessus. À la place, appelle l'outil MCP "
+    "`bubble_shield_read(path=\"…\")` : il te renvoie le contenu déjà anonymisé "
+    "(jetons ⟦…⟧), les vraies valeurs ne touchent jamais ton contexte. Travaille "
+    "sur ces jetons, puis produis le document final via `bubble_shield_write`."
 )
 
 

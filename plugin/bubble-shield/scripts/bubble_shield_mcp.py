@@ -146,6 +146,48 @@ TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "bubble_shield_add_field",
+        "description": (
+            "Add a custom PII field (regex pattern, GLiNER label, or keep-list entry). "
+            "Patterns must be CATEGORY DESCRIPTORS (regex metacharacters like \\d, [A-Z], {5}), "
+            "NEVER a real PII value. The guard-rail will refuse any concrete PII instance."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["regex", "gliner_label", "keep"]},
+                "entity_type": {"type": "string", "description": "UPPER_SNAKE id e.g. DOSSIER_CODE (regex/gliner only)"},
+                "label": {"type": "string", "description": "Human-readable FR label"},
+                "pattern": {"type": "string", "description": "For kind=regex: a REGEX TEMPLATE never a real value"},
+                "gliner_label": {"type": "string", "description": "For kind=gliner_label: a CATEGORY phrase e.g. 'employer name'"},
+                "keep_kind": {"type": "string", "enum": ["phrase", "email_domain", "phone"], "description": "For kind=keep"},
+                "keep_value": {"type": "string", "description": "For kind=keep: the firm's OWN non-client identifier"},
+                "validator": {"type": "string", "enum": ["none", "luhn", "iban", "isin", "mod97"]},
+                "confirm": {"type": "boolean", "description": "Required true to store a kind=keep literal"}
+            },
+            "required": ["kind"]
+        }
+    },
+    {
+        "name": "bubble_shield_list_fields",
+        "description": "List active custom PII fields (patterns/labels/keep counts). Never echoes PII instances.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "bubble_shield_remove_field",
+        "description": "Remove a custom PII field from the configuration.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["regex", "gliner_label", "keep"]},
+                "entity_type": {"type": "string"},
+                "gliner_label": {"type": "string"},
+                "keep_kind": {"type": "string", "enum": ["phrase", "email_domain", "phone"]},
+                "keep_value": {"type": "string"}
+            },
+            "required": ["kind"]
+        }
+    },
 ]
 
 
@@ -176,6 +218,7 @@ def _engine(text_for_daemon: str = ""):
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield import AnonymizationEngine, Vault
     from bubble_shield import policy as _policy
+    from bubble_shield import custom_recognizers as _cr
 
     detectors = []
     try:
@@ -188,10 +231,56 @@ def _engine(text_for_daemon: str = ""):
 
     engine = AnonymizationEngine(
         extra_detectors=detectors,
+        extra_recognizers=_cr.load_custom_recognizers(),
         match_filter=_policy.make_match_filter(_policy.load_policy()))
     vpath = _vault_path()
     engine.vault = Vault.load(str(vpath)) if vpath.is_file() else Vault(mission=os.environ.get("BUBBLE_SHIELD_SESSION", "mcp-session"))
     return engine, vpath
+
+
+# ---- custom-field config management (Phase 1) ------------------------------
+
+def _custom_fields_path() -> Path:
+    """Resolve custom_fields.json path: env override → vendor dir → ~/.config."""
+    override = os.environ.get("BUBBLE_SHIELD_CUSTOM_FIELDS")
+    if override:
+        return Path(override)
+    vendor_path = _vendor() / "bubble_shield" / "custom_fields.json"
+    if vendor_path.is_file():
+        return vendor_path
+    return Path(os.path.expanduser("~/.config/bubble_shield/custom_fields.json"))
+
+
+def _load_custom_fields() -> dict:
+    p = _custom_fields_path()
+    if not p.is_file():
+        return {"version": 1, "regex_fields": [], "gliner_labels": []}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "regex_fields": [], "gliner_labels": []}
+
+
+def _save_custom_fields(cfg: dict) -> None:
+    """Atomic write of custom_fields.json (temp file + os.replace)."""
+    p = _custom_fields_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _guard_check(value: str, kind: str, confirm: bool = False) -> dict:
+    """Run pii_guard.check_input. Returns {"ok": True} or {"ok": False, "reason": str}.
+
+    Fail-CLOSED: any error becomes a refusal (never silently allow an unchecked
+    value into the config)."""
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield import pii_guard
+        return pii_guard.check_input(value, kind, confirm=confirm)
+    except Exception as e:
+        return {"ok": False, "reason": f"guard error: {e}"}
 
 
 def _anonymise_text(text: str) -> str:
@@ -385,6 +474,116 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_enable_global":
                 r = _enable_global(args.get("action", "status"))
                 ok(f"[{r['state']}] {r['message']}")
+            elif name == "bubble_shield_add_field":
+                kind = args.get("kind", "")
+                if kind == "regex":
+                    entity_type = args.get("entity_type", "")
+                    pattern = args.get("pattern", "")
+                    label = args.get("label", entity_type)
+                    validator = args.get("validator")
+                    if not entity_type or not pattern:
+                        fail("entity_type et pattern sont requis pour kind=regex")
+                        return
+                    guard = _guard_check(pattern, "regex")
+                    if not guard["ok"]:
+                        fail(f"⛔ Bubble Shield guard-rail : {guard['reason']}")
+                        return
+                    import re as _re
+                    if not _re.fullmatch(r'[A-Z][A-Z0-9_]{1,31}', entity_type):
+                        fail("entity_type doit être [A-Z][A-Z0-9_]{1,31}")
+                        return
+                    cfg = _load_custom_fields()
+                    cfg.setdefault("regex_fields", [])
+                    cfg["regex_fields"] = [f for f in cfg["regex_fields"] if f.get("entity_type") != entity_type]
+                    entry = {"entity_type": entity_type, "label": label, "pattern": pattern,
+                             "ignore_case": False, "cloak": True}
+                    if validator and validator != "none":
+                        entry["validator"] = validator
+                    cfg["regex_fields"].append(entry)
+                    _save_custom_fields(cfg)
+                    ok(f"✅ Champ regex ajouté : {entity_type} (pattern stocké, valeur jamais journalisée)")
+                elif kind == "gliner_label":
+                    gliner_label = args.get("gliner_label", "")
+                    entity_type = args.get("entity_type", "")
+                    if not gliner_label or not entity_type:
+                        fail("gliner_label et entity_type sont requis pour kind=gliner_label")
+                        return
+                    guard = _guard_check(gliner_label, "gliner_label")
+                    if not guard["ok"]:
+                        fail(f"⛔ Bubble Shield guard-rail : {guard['reason']}")
+                        return
+                    cfg = _load_custom_fields()
+                    cfg.setdefault("gliner_labels", [])
+                    cfg["gliner_labels"] = [f for f in cfg["gliner_labels"]
+                                            if f.get("entity_type") != entity_type or f.get("label") != gliner_label]
+                    cfg["gliner_labels"].append({"label": gliner_label, "entity_type": entity_type})
+                    _save_custom_fields(cfg)
+                    ok(f"✅ Étiquette GLiNER ajoutée : '{gliner_label}' → {entity_type}")
+                elif kind == "keep":
+                    keep_kind = args.get("keep_kind", "")
+                    keep_value = args.get("keep_value", "")
+                    confirm = bool(args.get("confirm", False))
+                    if not keep_kind or not keep_value:
+                        fail("keep_kind et keep_value sont requis pour kind=keep")
+                        return
+                    guard = _guard_check(keep_value, "keep", confirm=confirm)
+                    if not guard["ok"]:
+                        fail(f"⛔ Bubble Shield guard-rail : {guard['reason']}")
+                        return
+                    sys.path.insert(0, str(_vendor()))
+                    from bubble_shield import allowlist as _al
+                    _al.add_allowlist_entry(keep_kind, keep_value)
+                    ok(f"✅ Entrée liste blanche ajoutée ({keep_kind}) — confirm=True requis et fourni")
+                else:
+                    fail(f"kind inconnu: {kind}. Valeurs valides: regex, gliner_label, keep")
+            elif name == "bubble_shield_list_fields":
+                cfg = _load_custom_fields()
+                sys.path.insert(0, str(_vendor()))
+                try:
+                    from bubble_shield import allowlist as _al
+                    al_path = _al._firm_config_path()
+                    al_data = json.loads(al_path.read_text()) if al_path.is_file() else {}
+                except Exception:
+                    al_data = {}
+                summary = {
+                    "regex_fields": len(cfg.get("regex_fields", [])),
+                    "gliner_labels": len(cfg.get("gliner_labels", [])),
+                    "keep_phrases": len(al_data.get("phrases", [])),
+                    "keep_email_domains": len(al_data.get("email_domains", [])),
+                    "keep_phones": len(al_data.get("phones", [])),
+                    "regex_entity_types": [f["entity_type"] for f in cfg.get("regex_fields", [])],
+                    "gliner_label_list": [f["label"] for f in cfg.get("gliner_labels", [])],
+                }
+                ok(json.dumps(summary, ensure_ascii=False, indent=2))
+            elif name == "bubble_shield_remove_field":
+                kind = args.get("kind", "")
+                if kind == "regex":
+                    entity_type = args.get("entity_type", "")
+                    cfg = _load_custom_fields()
+                    before = len(cfg.get("regex_fields", []))
+                    cfg["regex_fields"] = [f for f in cfg.get("regex_fields", []) if f.get("entity_type") != entity_type]
+                    _save_custom_fields(cfg)
+                    removed = before - len(cfg["regex_fields"])
+                    ok(f"✅ {removed} champ(s) regex supprimé(s) pour entity_type={entity_type}")
+                elif kind == "gliner_label":
+                    gliner_label = args.get("gliner_label", "")
+                    entity_type = args.get("entity_type", "")
+                    cfg = _load_custom_fields()
+                    before = len(cfg.get("gliner_labels", []))
+                    cfg["gliner_labels"] = [f for f in cfg.get("gliner_labels", [])
+                                            if not (f.get("entity_type") == entity_type and f.get("label") == gliner_label)]
+                    _save_custom_fields(cfg)
+                    removed = before - len(cfg["gliner_labels"])
+                    ok(f"✅ {removed} étiquette(s) GLiNER supprimée(s)")
+                elif kind == "keep":
+                    keep_kind = args.get("keep_kind", "")
+                    keep_value = args.get("keep_value", "")
+                    sys.path.insert(0, str(_vendor()))
+                    from bubble_shield import allowlist as _al
+                    removed = _al.remove_allowlist_entry(keep_kind, keep_value)
+                    ok(f"✅ Entrée liste blanche {'supprimée' if removed else 'introuvable'} ({keep_kind})")
+                else:
+                    fail(f"kind inconnu: {kind}")
             else:
                 _error(id_, -32601, f"unknown tool: {name}")
         except Exception as e:

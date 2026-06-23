@@ -253,11 +253,13 @@ def _try_mail_containment(event, cfg) -> None:
         sys.path.insert(0, str(_vendor_dir()))
         from bubble_shield import AnonymizationEngine, Vault
         from bubble_shield import policy as _policy
+        from bubble_shield import custom_recognizers as _cr
         VAULT_DIR.mkdir(parents=True, exist_ok=True)
         mission = event.get("session_id", "ambient") or "ambient"
         vpath = VAULT_DIR / f"{mission}.vault.json"
         vault = Vault.load(str(vpath)) if vpath.is_file() else Vault(mission=mission)
         eng = AnonymizationEngine(vault=vault,
+                                  extra_recognizers=_cr.load_custom_recognizers(),
                                   match_filter=_policy.make_match_filter(_policy.load_policy()))
         new_tr, n = _anonymise_json_strings(tr, eng)
         if n == 0:
@@ -342,6 +344,7 @@ def main() -> None:
         sys.path.insert(0, str(_vendor_dir()))
         from bubble_shield import AnonymizationEngine, Vault
         from bubble_shield import policy as _policy
+        from bubble_shield import custom_recognizers as _cr
 
         VAULT_DIR.mkdir(parents=True, exist_ok=True)
         mission = event.get("session_id", "ambient") or "ambient"
@@ -353,7 +356,8 @@ def main() -> None:
         extra = [daemon] if daemon else []
 
         engine = AnonymizationEngine(
-            vault=vault, extra_detectors=extra, match_filter=match_filter)
+            vault=vault, extra_detectors=extra,
+            extra_recognizers=_cr.load_custom_recognizers(), match_filter=match_filter)
         res = engine.anonymize(text)
 
         # If nothing was actually cloaked, don't rewrite (avoid churn).

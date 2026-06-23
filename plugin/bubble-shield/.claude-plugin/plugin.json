@@ -1,12 +1,12 @@
 {
   "name": "bubble-shield",
-  "description": "Fail-closed PII guard for Cowork \u2014 blocks Claude from reading protected client folders until the data is run through Bubble Shield's local, reversible anonymiser.",
-  "version": "1.11.1",
+  "description": "Fail-closed PII guard for Cowork — blocks Claude from reading protected client folders until the data is run through Bubble Shield's local, reversible anonymiser.",
+  "version": "1.12.0",
   "author": {
     "name": "Bubble Invest",
-    "email": "rd@bubbleinvest.com"
+    "email": "bubbleinvest.ai@gmail.com"
   },
-  "homepage": "https://bubbleinvest.com/bubble_shield",
+  "homepage": "https://bubbleinvest.com/bubble-shield",
   "license": "MIT",
   "keywords": [
     "pii",

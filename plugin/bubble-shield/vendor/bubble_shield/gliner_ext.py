@@ -83,19 +83,39 @@ LABEL_TO_TYPE: Dict[str, str] = {
 }
 DEFAULT_LABELS: List[str] = list(LABEL_TO_TYPE.keys())
 
+
+def load_label_map(path=None) -> Dict[str, str]:
+    """Return LABEL_TO_TYPE merged with any custom gliner_labels from
+    custom_fields.json (label → entity_type). Fail-soft: returns a copy of the
+    built-in map if the custom config is missing/unreadable."""
+    merged = dict(LABEL_TO_TYPE)
+    try:
+        from bubble_shield.custom_recognizers import load_custom_fields_config
+        cfg = load_custom_fields_config(path)
+    except Exception:
+        return merged
+    for entry in cfg.get("gliner_labels", []):
+        label = str(entry.get("label", "")).strip().lower()
+        etype = str(entry.get("entity_type", "")).strip()
+        if label and etype:
+            merged[label] = etype
+    return merged
+
+
+def default_labels(path=None) -> List[str]:
+    """Dynamic DEFAULT_LABELS including any custom labels (the labels we ask
+    GLiNER for). Use this over the DEFAULT_LABELS constant when custom fields
+    should participate in detection."""
+    return list(load_label_map(path).keys())
+
+
 # Process-wide model cache (model id → loaded GLiNER instance).
 _MODEL_CACHE: Dict[str, object] = {}
 
 
 def _load_model(model_id: str):
     """Lazy, cached GLiNER load. Returns None if the backend is unavailable
-    (fail-open: the engine then behaves as pure-regex).
-
-    ONNX path (the on-device accuracy pack): if BUBBLE_SHIELD_GLINER_ONNX is set to an
-    onnx file name (e.g. "onnx/model_quantized.onnx"), the model loads under
-    onnxruntime — no torch needed at inference (~32ms warm, 71MB runtime vs
-    436MB torch). This is what the warm daemon uses. Falls back to the torch
-    path when the env var is unset (dev/export side)."""
+    (fail-open: the engine then behaves as pure-regex)."""
     if model_id in _MODEL_CACHE:
         return _MODEL_CACHE[model_id]
     try:
@@ -103,14 +123,9 @@ def _load_model(model_id: str):
     except Exception:
         _MODEL_CACHE[model_id] = None
         return None
-    onnx_file = os.environ.get("BUBBLE_SHIELD_GLINER_ONNX", "").strip()
     try:
-        if onnx_file:
-            model = GLiNER.from_pretrained(
-                model_id, load_onnx_model=True, onnx_model_file=onnx_file)
-        else:
-            model = GLiNER.from_pretrained(model_id)
-            model.eval()
+        model = GLiNER.from_pretrained(model_id)
+        model.eval()
         _MODEL_CACHE[model_id] = model
         return model
     except Exception:
@@ -149,7 +164,12 @@ def gliner_matches(
     model = _load_model(model_id)
     if model is None:
         return []
-    labels = labels or DEFAULT_LABELS
+    # Always resolve the active label map (built-in + custom). When the caller
+    # gives no explicit labels, ask GLiNER for the full merged set so custom
+    # labels participate; either way the etype lookup uses the merged map so a
+    # custom label maps to its configured entity type.
+    active_label_map = load_label_map()
+    labels = labels or list(active_label_map.keys())
 
     # key = (entity_type, span_text) → (best_score, abs_start, abs_end)
     best: Dict[tuple, tuple] = {}
@@ -159,7 +179,7 @@ def gliner_matches(
         except Exception:
             continue  # a flaky window never breaks the whole pass
         for e in ents:
-            etype = LABEL_TO_TYPE.get(e.get("label", "").lower())
+            etype = active_label_map.get(e.get("label", "").lower())
             if not etype:
                 continue
             span = e.get("text", "").strip()

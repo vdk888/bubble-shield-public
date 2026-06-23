@@ -49,10 +49,15 @@ ENTITY_CATALOG: Dict[str, Dict[str, Any]] = {
     "MONTANT":        {"label": "Montant en euros",        "identifying": False, "default_cloak": False},
     "ISIN":           {"label": "ISIN (titre financier)",  "identifying": False, "default_cloak": False},
     "DATE_EVENEMENT": {"label": "Date (événement)",        "identifying": False, "default_cloak": True},
+    # Phase 2 additions — emitted by OpenAI Privacy Filter soft layer only.
+    # The regex/checksum core never emits these (vault/token format is type-agnostic).
+    "URL":            {"label": "URL / lien web",          "identifying": True,  "default_cloak": True},
+    "SECRET":         {"label": "Secret / credential",     "identifying": True,  "default_cloak": True},
 }
 
 DEFAULT_POLICY_PATH = os.environ.get(
-    "BUBBLE_SHIELD_POLICY", str(Path(__file__).resolve().parent.parent / "webapp" / "data" / "policy.json")
+    "BUBBLE_SHIELD_POLICY",
+    str(Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield")) / "policy.json"),
 )
 
 
@@ -114,5 +119,51 @@ def policy_view(policy: Mapping[str, bool]) -> List[Dict[str, Any]]:
             "cloak": bool(policy.get(etype, meta["default_cloak"])),
         })
     # Show identifying types first, then the kept-for-reasoning ones.
+    rows.sort(key=lambda r: (not r["identifying"], r["type"]))
+    return rows
+
+
+def custom_entity_catalog(path=None) -> Dict[str, Dict[str, Any]]:
+    """Return catalog rows for custom fields (regex + gliner_label kinds).
+
+    Does NOT modify ENTITY_CATALOG — returns a separate dict for merging in
+    views. Custom types are always treated as identifying and cloaked by default
+    (a firm only adds a custom field because it identifies something)."""
+    try:
+        from bubble_shield.custom_recognizers import load_custom_fields_config
+        cfg = load_custom_fields_config(path)
+    except Exception:
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for entry in cfg.get("regex_fields", []):
+        etype = entry.get("entity_type", "")
+        if etype and etype not in ENTITY_CATALOG:
+            label = entry.get("label", etype)
+            result[etype] = {"label": label, "identifying": True,
+                             "default_cloak": entry.get("cloak", True)}
+    for entry in cfg.get("gliner_labels", []):
+        etype = entry.get("entity_type", "")
+        if etype and etype not in ENTITY_CATALOG and etype not in result:
+            result[etype] = {"label": entry.get("label", etype),
+                             "identifying": True, "default_cloak": True}
+    return result
+
+
+def extended_policy_view(policy: Mapping[str, bool], custom_path=None) -> List[Dict[str, Any]]:
+    """Like policy_view() but includes custom field types.
+
+    Custom rows carry an extra ``custom=True`` key so UIs can visually
+    distinguish them from the built-in catalog rows.
+    """
+    custom = custom_entity_catalog(custom_path)
+    rows = policy_view(policy)
+    for etype, meta in custom.items():
+        rows.append({
+            "type": etype,
+            "label": meta["label"],
+            "identifying": meta["identifying"],
+            "cloak": bool(policy.get(etype, meta["default_cloak"])),
+            "custom": True,
+        })
     rows.sort(key=lambda r: (not r["identifying"], r["type"]))
     return rows

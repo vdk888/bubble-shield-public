@@ -5,3 +5,6 @@ __pycache__/
 
 # never ship a real deployment firm-identity config (only the .example)
 vendor/bubble_shield/deployment_allowlist.json
+
+# Internal R&D positioning doc — never ship to public
+docs/Bubble-Shield-Note-Preparation-Deploiement.docx

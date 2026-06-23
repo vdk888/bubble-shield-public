@@ -2,9 +2,11 @@
 
 A Claude Code **plugin** that stops Claude from reading raw client data. While
 enabled, any attempt to `Read`/`Grep`/`Glob`/`Edit`/`Write`/`Bash` a file inside
-a **protected client folder** is **denied** — Claude is told to run the data
-through [Bubble Shield](../../README.md) first and work on the local, reversible,
-anonymised copy. The token↔value vault never leaves the machine.
+a **protected client folder** is **denied** — Claude is told to read it through
+the MCP tool `bubble_shield_read` instead, which returns the contents
+**already anonymised** (`⟦…⟧` tokens). Claude works on the tokens; the final
+document is de-anonymised locally via `bubble_shield_write`. The token↔value
+vault never leaves the machine.
 
 This is **Jalon 2** of Bubble Shield: the engine (Jalon 1) anonymises; this plugin
 *enforces* that nothing identifying reaches the model in clear.
@@ -50,6 +52,16 @@ only method that works in Cowork, which is sandboxed and can't write to
 `~/.config` — but can write into a folder you've connected. Same idea as
 `.gitignore`. Delete the marker to stop protecting the folder.
 
+> **One marker at the root protects the whole tree.** Because the guard walks
+> *up* to the nearest marker, a single `.bubble-shield.json` at the root of a
+> client's synced folder (e.g. `~/Dropbox/`) guards **every file at every depth
+> below it** — nested sub-folders inherit automatically. The recommended
+> onboarding step is exactly this: drop one marker at the client's folder root,
+> with **no** `allow_paths` / `allow_extensions` exemptions, for full coverage.
+> ⚠️ A file placed **outside** any marked folder is **not** protected (read raw),
+> and any `allow_paths` / `allow_extensions` you add are deliberate holes — keep
+> them empty unless you mean it.
+
 ```jsonc
 // <client-folder>/.bubble-shield.json
 { "allow_paths": ["clean"], "allow_extensions": [".anon.txt"], "block_bash": true }
@@ -86,12 +98,24 @@ found in this order (first hit wins). It composes with markers.
 
 1. `hooks/hooks.json` registers a `PreToolUse` hook on the file/shell tools.
 2. `scripts/guard.py` reads the event JSON, resolves the target path(s), and
-   compares against `protected_folders` (symlink-resolved, `~`-expanded).
+   compares against markers / `protected_folders` (symlink-resolved, `~`-expanded).
 3. Inside a protected folder (and not exempted) → `permissionDecision: "deny"`
-   with a French message pointing to the `bubble-shield-anonymize` skill.
-4. The bundled skill `/bubble-shield:bubble-shield-anonymize` is the sanctioned path:
-   anonymise the folder into `clean/`, work on the cloaked copy, de-anonymise
-   the answer locally with the vault.
+   with a French message telling Claude **not** to use `Read`/`Bash`, and to call
+   the MCP tool `bubble_shield_read(path="…")` instead.
+4. `bubble_shield_read` returns the file **already anonymised** (`⟦…⟧` tokens) as
+   its **own** tool output — Claude works on the tokens, then produces the final
+   document via `bubble_shield_write`, which de-anonymises locally from the vault.
+
+> **Why deny-and-reroute, instead of scrubbing the result after the read?**
+> Claude Code's `PostToolUse` hooks **cannot** rewrite the output of built-in
+> tools like `Read`/`Bash` — the harness ignores `updatedToolOutput` for them
+> (proven on v2.1.186; [anthropics/claude-code#32105](https://github.com/anthropics/claude-code/issues/32105),
+> still open). A post-hook scrub would print a reassuring notice while raw PII
+> still reached the model. So Bubble Shield does **not** rely on it: the guarantee
+> is the `PreToolUse` **deny** (honored for built-in tools) plus a first-party MCP
+> read whose **own** output — the only channel the harness reliably substitutes —
+> is what Claude sees. The bundled `bubble-shield-anonymize` skill remains an
+> alternative manual path (anonymise a folder into `clean/`, work on the copy).
 
 ### The chat box (tripwire)
 

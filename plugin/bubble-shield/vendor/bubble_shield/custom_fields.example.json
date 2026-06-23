@@ -1,0 +1,35 @@
+{
+  "version": 1,
+
+  "detector": {
+    "mode": "gliner",
+    "merge": "regex_wins_then_union",
+    "openai_viterbi_bias": {
+      "begin_bias": null,
+      "inside_bias": null,
+      "end_bias": null,
+      "single_bias": null,
+      "outside_bias": null,
+      "transition_temp": null
+    }
+  },
+
+  "regex_fields": [
+    {
+      "entity_type": "DOSSIER_CODE",
+      "label": "Code dossier interne",
+      "pattern": "\\b[A-Z]{2}-\\d{5}-[A-Z]\\b",
+      "ignore_case": false,
+      "cloak": true,
+      "priority": 65,
+      "score_if_unvalidated": 0.6
+    }
+  ],
+
+  "gliner_labels": [
+    {
+      "label": "employer name",
+      "entity_type": "EMPLOYEUR"
+    }
+  ]
+}

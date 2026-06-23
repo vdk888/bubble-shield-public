@@ -18,12 +18,24 @@ progress so the operator can watch. It does NOT start the daemon or touch
 launchd — that's bubble_shield_nerd.py / a separate install step. This script only
 makes the model + runtime exist and verifies they load.
 
+PHASE 2 — OpenAI Privacy Filter support (--openai flag)
+  The OpenAI model is NOT downloaded by default. Pass --openai to fetch it.
+  It uses a SEPARATE models/ dir entry and extends ml.json with a "models"
+  block for multi-model support, back-compat with the flat single-model format.
+
+  OpenAI model ONNX sizes:
+    onnx/model_q4.onnx + .onnx_data   → ~917 MB  (recommended for M4)
+    onnx/model_quantized.onnx + data  → ~1.62 GB (INT8, higher accuracy)
+  Default: model_q4.onnx (--openai-onnx to override).
+
 USAGE
     python3 bubble_shield_setup_ml.py [--model onnx-community/gliner_multi_pii-v1] \
                                [--onnx onnx/model_quantized.onnx] [--check-only]
+                               [--openai] [--openai-onnx onnx/model_q4.onnx]
 
 Runs under the client's system python3 (3.9+). Creates the venv with the same
-interpreter. Network needed once (pip + model download, ~420MB total).
+interpreter. Network needed once (pip + model download, ~420MB for GLiNER,
+~917MB+ for OpenAI).
 """
 from __future__ import annotations
 
@@ -42,7 +54,26 @@ MANIFEST = BUBBLE_SHIELD_HOME / "ml.json"
 
 DEFAULT_MODEL = "onnx-community/gliner_multi_pii-v1"
 DEFAULT_ONNX = "onnx/model_quantized.onnx"   # int8; smaller variants: model_q4.onnx
-PIP_DEPS = ["onnxruntime", "gliner", "huggingface_hub"]
+
+OPENAI_DEFAULT_MODEL = "openai/privacy-filter"
+OPENAI_DEFAULT_ONNX = "onnx/model_q4.onnx"   # ~917MB, best M4 fit
+
+# Phase 2: add `tokenizers` for the OpenAI fast tokenizer (onnxruntime-only path
+# doesn't bring tokenizers transitively). GLiNER deps unchanged.
+#
+# IMPORTANT — ORT VERSION REQUIREMENT FOR OPENAI MODEL:
+# openai/privacy-filter uses com.microsoft contrib ops (GatherBlockQuantized with
+# 'bits' attribute, QMoE, MatMulNBits) that require onnxruntime >= 1.27.
+# ort 1.19.x raises "GatherBlockQuantized not a registered op".
+# ort 1.20.x raises "Unrecognized attribute: bits".
+# ort >= 1.27 (currently only from ort-nightly on the MS Artifacts feed or the
+# GitHub nightly releases) loads the model successfully on Apple M4.
+# PyPI stable tops out at 1.19.2 as of 2026-06-21; install from nightly feed:
+#   pip install ort-nightly --pre \
+#     --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+# or wait for the stable 1.27 release on PyPI.
+PIP_DEPS = ["onnxruntime", "gliner", "huggingface_hub", "tokenizers"]
+PIP_DEPS_OPENAI = ["onnxruntime>=1.27", "tokenizers"]  # openai model needs ort >=1.27
 
 # LaunchAgent so the warm daemon starts at login (the "no intervention" path).
 LAUNCH_LABEL = "com.bubbleinvest.bubble-shield-nerd"
@@ -70,34 +101,86 @@ def ensure_venv() -> Path:
     return py
 
 
-def ensure_deps(py: Path) -> None:
-    """pip install the ONNX runtime + gliner into the venv (idempotent)."""
-    # quick probe: are deps already importable?
+def ensure_deps(py: Path, need_openai: bool = False) -> None:
+    """pip install the ONNX runtime + gliner + tokenizers into the venv (idempotent).
+
+    When need_openai=True, also verify that onnxruntime >= 1.27 is present.
+    The openai/privacy-filter ONNX uses com.microsoft contrib ops
+    (GatherBlockQuantized + QMoE) that only landed in ORT 1.27.  If the
+    installed ORT is older, attempt to upgrade it from the ORT nightly feed.
+    """
     probe = subprocess.run(
-        [str(py), "-c", "import onnxruntime, gliner, huggingface_hub"],
+        [str(py), "-c", "import onnxruntime, gliner, huggingface_hub, tokenizers"],
         capture_output=True)
     if probe.returncode == 0:
-        log("✓ ML deps already installed (onnxruntime + gliner)")
+        log("✓ ML deps already installed (onnxruntime + gliner + tokenizers)")
+    else:
+        log(f"• installing ML deps into the venv: {', '.join(PIP_DEPS)} …")
+        subprocess.run([str(py), "-m", "pip", "install", "-q", "--upgrade", "pip"],
+                       check=True)
+        subprocess.run([str(py), "-m", "pip", "install", "-q", *PIP_DEPS], check=True)
+        log("✓ ML deps installed")
+
+    if not need_openai:
         return
-    log(f"• installing ML deps into the venv: {', '.join(PIP_DEPS)} (~71MB) …")
-    subprocess.run([str(py), "-m", "pip", "install", "-q", "--upgrade", "pip"],
-                   check=True)
-    subprocess.run([str(py), "-m", "pip", "install", "-q", *PIP_DEPS], check=True)
-    log("✓ ML deps installed")
+
+    # Check ORT version — OpenAI model requires >= 1.27
+    ver_check = subprocess.run(
+        [str(py), "-c",
+         "import onnxruntime as ort; "
+         "v=tuple(int(x) for x in ort.__version__.split('.')[:2]); "
+         "exit(0 if v >= (1,27) else 1)"],
+        capture_output=True)
+    if ver_check.returncode == 0:
+        log("✓ onnxruntime >= 1.27 (required for OpenAI model)")
+        return
+
+    log("• onnxruntime < 1.27 detected; upgrading from ORT nightly feed "
+        "(required for openai/privacy-filter QMoE + GatherBlockQuantized ops) …")
+    NIGHTLY_INDEX = ("https://aiinfra.pkgs.visualstudio.com/PublicPackages/"
+                     "_packaging/ORT-Nightly/pypi/simple/")
+    r = subprocess.run(
+        [str(py), "-m", "pip", "install", "-q", "--pre",
+         "ort-nightly",
+         "--extra-index-url", NIGHTLY_INDEX],
+        capture_output=True, text=True)
+    if r.returncode == 0:
+        log("✓ ort-nightly installed (>= 1.27)")
+    else:
+        log(f"⚠️  Could not upgrade onnxruntime to >= 1.27 automatically.\n"
+            f"   The openai adapter will fail-open until you manually install:\n"
+            f"     pip install --pre ort-nightly \\\n"
+            f"       --extra-index-url {NIGHTLY_INDEX}\n"
+            f"   pip error: {r.stderr[:300]}")
 
 
-def download_model(py: Path, model_id: str, onnx_file: str) -> None:
+def download_model(py: Path, model_id: str, onnx_file: str,
+                   extra_patterns: list | None = None) -> None:
     """Download the model snapshot (incl. the chosen onnx file) into MODELS_DIR.
+
+    For the OpenAI model, pass extra_patterns to include the .onnx_data sidecar
+    (onnxruntime loads it automatically from the same directory).
 
     Runs inside the venv so it uses the venv's huggingface_hub. Stores under a
     stable local dir so the daemon loads from disk (no network at run time)."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     local = MODELS_DIR / model_id.replace("/", "__")
+    # Default patterns for any model
+    patterns = ["*.json", "*.txt", "tokenizer*", onnx_file]
+    # Add .onnx_data sidecar for external-data ONNX files (OpenAI model)
+    if extra_patterns:
+        patterns.extend(extra_patterns)
+    # Also grab the data file by standard naming convention
+    onnx_data = f"{onnx_file}_data"
+    if onnx_data not in patterns:
+        patterns.append(onnx_data)
+
+    patterns_repr = repr(patterns)
     code = (
         "import sys;"
         "from huggingface_hub import snapshot_download;"
         f"p=snapshot_download({model_id!r}, local_dir={str(local)!r},"
-        f" allow_patterns=['*.json','*.txt','tokenizer*','{onnx_file}']);"
+        f" allow_patterns={patterns_repr});"
         "print(p)"
     )
     if (local / onnx_file).exists():
@@ -111,15 +194,42 @@ def download_model(py: Path, model_id: str, onnx_file: str) -> None:
     log(f"✓ model ready ({sz:.0f} MB on disk)")
 
 
-def write_manifest(model_id: str, onnx_file: str) -> None:
-    local = MODELS_DIR / model_id.replace("/", "__")
-    MANIFEST.write_text(json.dumps({
+def _local_dir(model_id: str) -> Path:
+    return MODELS_DIR / model_id.replace("/", "__")
+
+
+def write_manifest(
+    model_id: str,
+    onnx_file: str,
+    openai_model_id: str | None = None,
+    openai_onnx_file: str | None = None,
+) -> None:
+    """Write ml.json. Back-compat: top-level keys are always the GLiNER model.
+    Phase 2 adds a 'models' block for multi-model support (daemon reads it)."""
+    local = _local_dir(model_id)
+    manifest: dict = {
         "ml_env": str(ML_ENV),
         "venv_python": str(_venv_python(ML_ENV)),
+        # Top-level keys: GLiNER (back-compat with old manifests)
         "model_id": model_id,
         "model_dir": str(local),
         "onnx_file": onnx_file,
-    }, indent=2), encoding="utf-8")
+        "models": {
+            "gliner": {
+                "model_id": model_id,
+                "model_dir": str(local),
+                "onnx_file": onnx_file,
+            }
+        },
+    }
+    if openai_model_id and openai_onnx_file:
+        openai_local = _local_dir(openai_model_id)
+        manifest["models"]["openai"] = {
+            "model_id": openai_model_id,
+            "model_dir": str(openai_local),
+            "onnx_file": openai_onnx_file,
+        }
+    MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     log(f"✓ manifest written: {MANIFEST}")
 
 
@@ -166,8 +276,8 @@ def install_launchagent(py: Path) -> None:
 
 
 def verify(py: Path, model_id: str, onnx_file: str) -> bool:
-    """Load the ONNX model in the venv and run one detection. Proves it works."""
-    local = MODELS_DIR / model_id.replace("/", "__")
+    """Load the ONNX GLiNER model in the venv and run one detection. Proves it works."""
+    local = _local_dir(model_id)
     code = (
         "import os,sys,time;"
         "os.environ['TOKENIZERS_PARALLELISM']='false';"
@@ -181,9 +291,35 @@ def verify(py: Path, model_id: str, onnx_file: str) -> bool:
     )
     r = subprocess.run([str(py), "-c", code], capture_output=True, text=True)
     if r.returncode == 0 and r.stdout.startswith("OK"):
-        log(f"✓ verified — model loads & detects ({r.stdout.strip()})")
+        log(f"✓ GLiNER verified — model loads & detects ({r.stdout.strip()})")
         return True
-    log(f"✗ verification failed:\n{r.stdout}\n{r.stderr}")
+    log(f"✗ GLiNER verification failed:\n{r.stdout}\n{r.stderr}")
+    return False
+
+
+def verify_openai(py: Path, model_id: str, onnx_file: str) -> bool:
+    """Verify the OpenAI Privacy Filter adapter loads and runs on a probe text."""
+    local = _local_dir(model_id)
+    # The adapter imports onnxruntime + tokenizers (no torch / gliner needed)
+    here = Path(__file__).resolve().parent
+    vendor = here.parent / "vendor"
+    code = (
+        "import os, sys;"
+        f"sys.path.insert(0, {str(vendor)!r});"
+        "os.environ['TOKENIZERS_PARALLELISM']='false';"
+        "from bubble_shield.openai_pf_ext import openai_pf_matches;"
+        "ms = openai_pf_matches("
+        "    'Contact Jean Martin at jean.martin@example.com or 06 12 34 56 78',"
+        f"   model_dir={str(local)!r},"
+        f"   onnx_file={onnx_file!r},"
+        ");"
+        "print('OK', len(ms), [m.entity_type for m in ms])"
+    )
+    r = subprocess.run([str(py), "-c", code], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.startswith("OK"):
+        log(f"✓ OpenAI PF verified — adapter loads & detects ({r.stdout.strip()})")
+        return True
+    log(f"✗ OpenAI PF verification failed:\n{r.stdout}\n{r.stderr}")
     return False
 
 
@@ -195,25 +331,58 @@ def main() -> int:
                     help="only verify an existing install, do not create/download")
     ap.add_argument("--no-launchd", action="store_true",
                     help="skip installing the login LaunchAgent (hook lazy-starts the daemon instead)")
+    # Phase 2 flags
+    ap.add_argument("--openai", action="store_true",
+                    help="also fetch the OpenAI Privacy Filter model (Phase 2, default OFF)")
+    ap.add_argument("--openai-model", default=OPENAI_DEFAULT_MODEL,
+                    help=f"OpenAI model HF id (default: {OPENAI_DEFAULT_MODEL})")
+    ap.add_argument("--openai-onnx", default=OPENAI_DEFAULT_ONNX,
+                    help=f"OpenAI ONNX file to use (default: {OPENAI_DEFAULT_ONNX} ~917MB; "
+                         "alternative: onnx/model_quantized.onnx ~1.62GB)")
     args = ap.parse_args()
 
     log("Bubble Shield — ML accuracy pack setup")
     log(f"  home: {BUBBLE_SHIELD_HOME}")
-    log(f"  model: {args.model} ({args.onnx})")
+    log(f"  GLiNER model: {args.model} ({args.onnx})")
+    if args.openai:
+        log(f"  OpenAI model: {args.openai_model} ({args.openai_onnx})")
 
     if args.check_only:
         py = _venv_python(ML_ENV)
         if not py.exists():
             log("✗ not installed (no venv)")
             return 1
-        return 0 if verify(py, args.model, args.onnx) else 1
+        ok = verify(py, args.model, args.onnx)
+        if args.openai:
+            ok = verify_openai(py, args.openai_model, args.openai_onnx) and ok
+        return 0 if ok else 1
 
+    ok = False
     try:
         py = ensure_venv()
-        ensure_deps(py)
+        ensure_deps(py, need_openai=args.openai)
         download_model(py, args.model, args.onnx)
-        write_manifest(args.model, args.onnx)
+
+        openai_model_id = None
+        openai_onnx_file = None
+        if args.openai:
+            openai_model_id = args.openai_model
+            openai_onnx_file = args.openai_onnx
+            # OpenAI model needs the .onnx_data sidecar for external-data ONNX
+            download_model(
+                py, openai_model_id, openai_onnx_file,
+                extra_patterns=[
+                    "viterbi_calibration.json",
+                    "tokenizer.json",
+                    "config.json",
+                    f"{openai_onnx_file}_data",
+                ]
+            )
+
+        write_manifest(args.model, args.onnx, openai_model_id, openai_onnx_file)
         ok = verify(py, args.model, args.onnx)
+        if args.openai and ok:
+            ok = verify_openai(py, openai_model_id, openai_onnx_file)
         if ok and not args.no_launchd:
             install_launchagent(py)
     except subprocess.CalledProcessError as e:
@@ -224,8 +393,9 @@ def main() -> int:
         return 1
 
     if ok:
-        log("\n✅ ML pack ready. The daemon (bubble_shield_nerd.py) can now serve fast,"
-            " on-device NER. Nothing leaves this machine.")
+        openai_note = " + OpenAI Privacy Filter" if args.openai else ""
+        log(f"\n✅ ML pack ready{openai_note}. The daemon (bubble_shield_nerd.py) can now "
+            f"serve fast, on-device NER. Nothing leaves this machine.")
         return 0
     return 1
 

@@ -5,6 +5,27 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.12.0 — 2026-06-23 (verified protection model + client docs)
+
+- **Corrected the documented protection model.** Proven on Claude Code v2.1.186:
+  PostToolUse `updatedToolOutput` is ignored by the harness for built-in tools
+  (Read *and* Bash), every value shape — not just a Cowork limit
+  ([anthropics/claude-code#32105](https://github.com/anthropics/claude-code/issues/32105),
+  open). The plugin README now states the guarantee plainly: protection is the
+  `PreToolUse` deny/steer + the first-party `bubble_shield_read` MCP tool (whose
+  own output the harness *does* honor), NOT a post-hook scrub. The "anonymisé"
+  notice is context, never proof of substitution.
+- **Verified the Option B path end-to-end.** `bubble_shield_read` returns `⟦…⟧`
+  tokens, fails closed on error, the guard denies a built-in Read of a marked
+  folder and steers to the MCP tool, vault round-trips. Added
+  `scripts/test_option_b_e2e.py` (9 cases). No regressions across the suites.
+- **Documented root-marker coverage.** One `.bubble-shield.json` at a folder root
+  protects the whole tree (sub-folders inherit); files outside marked folders are
+  not covered — now explicit in the README.
+- **Client onboarding docs** (non-technical, FR): added a Cowork user tutorial and
+  corrected the governance email (both surfaces install the same plugin; the
+  difference is config scope, not install-vs-no-install).
+
 ## 1.11.1 — 2026-06-14 (finding + honest docs)
 
 - **PROVEN: Cowork does not run PostToolUse on third-party MCP connectors.** A

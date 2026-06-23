@@ -77,6 +77,7 @@ class AnonymizationEngine:
         use_ner: bool = False,
         use_llm: bool = False,
         extra_detectors: Optional[List[Callable[[str], List[Match]]]] = None,
+        extra_recognizers: Optional[List[Recognizer]] = None,
         match_filter: Optional[Callable[[List[Match]], List[Match]]] = None,
         context_boost: bool = True,
     ) -> None:
@@ -104,6 +105,11 @@ class AnonymizationEngine:
         self.use_llm = use_llm
         self.extra_detectors: List[Callable[[str], List[Match]]] = list(
             extra_detectors or [])
+        # User-defined regex Recognizer objects (custom PII field patterns from
+        # custom_fields.json). These participate in the SAME resolve_overlaps()
+        # pass as the core RECOGNIZERS, so a custom pattern never steals a span
+        # from a higher-priority checksum-valid IBAN/ISIN (correct behaviour).
+        self.extra_recognizers: List[Recognizer] = list(extra_recognizers or [])
 
     def _extra_matches(self, text: str) -> List[Match]:
         extra: List[Match] = []
@@ -120,14 +126,23 @@ class AnonymizationEngine:
                 continue
         return extra
 
+    def _recognizer_list(self) -> List[Recognizer]:
+        """Return the full recognizer list: core + user-defined custom fields."""
+        from bubble_shield.recognizers import RECOGNIZERS
+        recs = list(self.recognizers if self.recognizers is not None else RECOGNIZERS)
+        recs.extend(self.extra_recognizers)
+        return recs
+
     def _detect(self, text: str) -> List[Match]:
         extra = self._extra_matches(text)
-        if not extra:
+        recs = self._recognizer_list()
+        if not extra and not self.extra_recognizers:
+            # Fast path: no extras at all — delegate to detect() directly.
             return detect(text, self.recognizers)
-        # Merge regex + extra-layer raw matches, then resolve overlaps together
-        # so a validated structured PII still wins over a soft name guess.
-        from bubble_shield.recognizers import RECOGNIZERS
-        recs = self.recognizers if self.recognizers is not None else RECOGNIZERS
+        # Merge regex (incl. custom) + extra-layer raw matches, then resolve
+        # overlaps together so a validated structured PII still wins over a soft
+        # name guess AND a custom pattern that overlaps a core IBAN loses to the
+        # checksum-valid IBAN (correct: FR-finance is source of truth).
         raw: List[Match] = []
         for r in recs:
             raw.extend(r.find(text))
@@ -185,9 +200,12 @@ class AnonymizationEngine:
         "ne pas envoyer" for a document that is actually safe to send, because
         the two code paths disagreed. (Real-data bug, 2026-06-01: an advisor's
         name + their firm-domain e-mail tripped the verdict.)
+
+        Also includes custom recognizers so a custom pattern that was detected in
+        the main pass is also checked for residual — consistent detection.
         """
         leftover: List[Match] = []
-        for m in detect(anonymized, self.recognizers):
+        for m in detect(anonymized, self._recognizer_list()):
             # Ignore matches that fall entirely inside one of our tokens
             # (e.g. a recognizer firing on the digits of ⟦IBAN_0001⟧).
             if any(t.start() <= m.start and m.end <= t.end()

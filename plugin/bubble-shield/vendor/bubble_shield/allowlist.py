@@ -187,6 +187,71 @@ def load_deployment_allowlist() -> "Allowlist":
     return PUBLIC_THIRD_PARTIES
 
 
+# ── Firm-config writers (add/remove keep entries) ─────────────────────────
+# The keep-list ("this is the firm's OWN identifier, never a client's") is the
+# ONLY place we persist a literal value, and only via the guarded MCP path
+# (pii_guard refuses real client PII). Writes go to the writable firm config —
+# NEVER the vendored example — using atomic temp-file + os.replace so a
+# concurrent reader never sees a half-written file.
+
+_KEY_MAP = {"phrase": "phrases", "email_domain": "email_domains", "phone": "phones"}
+
+
+def _firm_config_path() -> Path:
+    """The writable firm config path (never the vendored example)."""
+    override = os.environ.get("BUBBLE_SHIELD_DEPLOYMENT_ALLOWLIST")
+    if override:
+        return Path(override)
+    return Path(os.path.expanduser("~/.config/bubble_shield/deployment_allowlist.json"))
+
+
+def _read_firm_config(path: Path) -> dict:
+    if not path.is_file():
+        return {"phrases": [], "email_domains": [], "phones": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    for k in ("phrases", "email_domains", "phones"):
+        data.setdefault(k, [])
+    return data
+
+
+def _atomic_write(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def add_allowlist_entry(kind: str, value: str, path: "Path | None" = None) -> None:
+    """Add an entry to the firm deployment allowlist. kind ∈ {phrase, email_domain, phone}."""
+    key = _KEY_MAP.get(kind)
+    if key is None:
+        raise ValueError(f"unknown allowlist kind: {kind!r}")
+    p = path or _firm_config_path()
+    data = _read_firm_config(p)
+    if value not in data[key]:
+        data[key].append(value)
+    _atomic_write(p, data)
+
+
+def remove_allowlist_entry(kind: str, value: str, path: "Path | None" = None) -> bool:
+    """Remove an entry. Returns True if found+removed, False if not found."""
+    key = _KEY_MAP.get(kind)
+    if key is None:
+        raise ValueError(f"unknown allowlist kind: {kind!r}")
+    p = path or _firm_config_path()
+    data = _read_firm_config(p)
+    if value not in data[key]:
+        return False
+    data[key] = [v for v in data[key] if v != value]
+    _atomic_write(p, data)
+    return True
+
+
 # The active allowlist for this deployment. Importers use this; the firm-specific
 # part comes from the local config, never from source.
 DEPLOYMENT_ALLOWLIST = load_deployment_allowlist()
