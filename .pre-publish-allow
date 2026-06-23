@@ -11,3 +11,8 @@ biziqe@mathieu.fenniak.net
 # (scripts/bubble_shield_setup_ml.py) — a FAKE IBAN used to verify the
 # on-device PII detector actually fires on install. Not a real account.
 FR76 3000 6000 0112 3456 7890 189
+
+# More vendored pypdf (BSD) author/contact emails in module headers — upstream attribution.
+switham_github@mac-guyver.com
+# example.com is a reserved doc domain (RFC 2606) — synthetic by definition.
+jean.martin@example.com
