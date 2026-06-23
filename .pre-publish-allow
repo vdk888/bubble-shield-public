@@ -1,0 +1,13 @@
+# pre-publish-scan allowlist — documented false positives only.
+# Each non-comment line is a literal/regex matched against scan findings.
+# A real leak must NEVER be added here. Reviewed like code.
+
+# Vendored pypdf (BSD) ships its authors' contact emails in module headers.
+# Upstream attribution, not our data, not removable without de-vendoring.
+kulkarni.ashish@gmail.com
+biziqe@mathieu.fenniak.net
+
+# Synthetic test IBAN baked into the GLiNER warm-up self-test string
+# (scripts/bubble_shield_setup_ml.py) — a FAKE IBAN used to verify the
+# on-device PII detector actually fires on install. Not a real account.
+FR76 3000 6000 0112 3456 7890 189

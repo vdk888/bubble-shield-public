@@ -8,3 +8,6 @@ vendor/bubble_shield/deployment_allowlist.json
 
 # Internal R&D positioning doc — never ship to public
 docs/Bubble-Shield-Note-Preparation-Deploiement.docx
+
+# Dev-only test suite — never ship to public (synthetic PII fixtures trip the backend content scanner)
+scripts/test_*.py
