@@ -319,6 +319,65 @@ def form_piece_identite_matches(text: str) -> List[Match]:
     return out
 
 
+# ── DÉNOMINATION / RAISON SOCIALE label lines (fix #259) ─────────────────────
+#
+# Corporate form lines like:
+#   "Dénomination ou raison sociale : SELARL DU DOCTEUR FAKENAME TESTONI"
+#   "Raison sociale : SCI DU HAMEAU"
+#   "Dénomination sociale : SAS INNOVATION LABS"
+#
+# For professional-practice SELARLs / SCMs / SCPs, the company name EMBEDS the
+# practitioner's personal name (e.g. "SELARL DU DOCTEUR JEAN MARTIN"), so the
+# company name is PII. We mask the whole VALUE (everything after the colon), NOT
+# the forme-juridique TYPE word ("SELARL", "SAS", "SCI") when it stands alone
+# without a label — only the company name on a labeled line is at risk here.
+#
+# Precision guards:
+#   - Requires an explicit "dénomination" or "raison sociale" label + colon.
+#   - Placeholder/empty-marker values are skipped (same guard as other form recogs).
+#   - Value must contain at least one letter (not a blank line).
+#   - Value capped at 120 chars (company names ≤ ~100 chars in practice).
+#   - "Forme juridique : SELARL" (type-only, no name) → NOT matched here because
+#     neither "dénomination" nor "raison sociale" appears as the label.
+_RAISON_SOCIALE_LABEL_RE = re.compile(
+    r"(?i)"
+    r"^(?:"
+    r"d[eé]nomination(?:\s+sociale)?(?:\s+ou\s+raison\s+sociale)?"
+    r"|raison\s+sociale"
+    r")"
+    r"[^\S\n]*:[^\S\n]*" + _VALLINE,
+    re.MULTILINE,
+)
+
+
+def form_raison_sociale_matches(text: str) -> List[Match]:
+    """Match 'Dénomination (ou) (sociale)? : <VALUE>' and 'Raison sociale : <VALUE>'
+    label lines — RAISON_SOCIALE entity (fix #259).
+
+    Masks the whole company name value, including any embedded practitioner names
+    (SELARL DU DOCTEUR …). Does NOT mask standalone forme-juridique type words
+    ("Forme juridique : SELARL") — only labeled dénomination/raison-sociale lines.
+
+    Guard: placeholder/empty-marker values and values with no letters are skipped.
+    """
+    out: List[Match] = []
+    for m in _RAISON_SOCIALE_LABEL_RE.finditer(text):
+        val = m.group("val").strip()
+        if not val or len(val) > 120:
+            continue
+        # Guard: skip placeholder / empty-marker values (template slots)
+        if _is_placeholder(val):
+            continue
+        # Guard: value must contain at least one letter (not a blank line)
+        if not re.search(r"[A-Za-zÀ-ÿ]", val):
+            continue
+        start = m.start("val")
+        out.append(Match(start=start, end=start + len(val),
+                         entity_type="RAISON_SOCIALE", value=val,
+                         score=0.90, priority=59))
+    return out
+
+
 def make_structured_detector():
     """Return the combined deterministic form-layout detector callable.
 
@@ -329,9 +388,12 @@ def make_structured_detector():
           Nom/Prénom → NOM  (placeholder guard: (vide)/N/A/néant etc. skipped)
           Lieu de naissance / "à : CITY" in DOB lines → LIEU_NAISSANCE
           Passeport/CNI/Pièce d'identité n° → PIECE_IDENTITE
+          Dénomination/Raison sociale : → RAISON_SOCIALE  (fix #259)
       - Note: "Né(e) le : DD/MM/YYYY" DOB masking is handled by the core
         DATE_NAISSANCE recognizer in recognizers.py (fix #257-b), which now
         matches the parenthetical form Né(e) le in addition to née/né/nee.
+      - Note: Full 14-digit SIRET (including hyphen-separated NIC suffix) masking
+        is handled by the core SIRET recognizer in recognizers.py (fix #259).
     """
     def _detector(text: str) -> List[Match]:
         matches: List[Match] = []
@@ -353,6 +415,10 @@ def make_structured_detector():
             pass
         try:
             matches += form_piece_identite_matches(text)
+        except Exception:
+            pass
+        try:
+            matches += form_raison_sociale_matches(text)
         except Exception:
             pass
         return matches

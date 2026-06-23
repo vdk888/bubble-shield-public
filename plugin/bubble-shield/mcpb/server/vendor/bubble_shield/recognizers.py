@@ -148,7 +148,11 @@ RECOGNIZERS: List[Recognizer] = [
                95, validator=_iban_valid, score_if_unvalidated=0.5),
     Recognizer("ISIN", re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b"),
                94, validator=_isin_valid, score_if_unvalidated=0.5),
-    Recognizer("SIRET", re.compile(r"\b\d{3}[ ]?\d{3}[ ]?\d{3}[ ]?\d{5}\b"),
+    # SIRET: 14-digit company+établissement number (9-digit SIREN + 5-digit NIC).
+    # Tolerates space OR hyphen between groups — real DCC forms use "123 456 789-00011"
+    # (hyphen separates the NIC) which the previous space-only pattern missed, leaving
+    # the 5-digit NIC suffix in clear after the SIREN was tokenised. Fix #259.
+    Recognizer("SIRET", re.compile(r"\b\d{3}[ -]?\d{3}[ -]?\d{3}[ -]?\d{5}\b"),
                93, validator=_siren_valid, score_if_unvalidated=0.5),
     Recognizer("SIREN", re.compile(r"\b\d{3}[ ]?\d{3}[ ]?\d{3}\b"),
                80, validator=_siren_valid, score_if_unvalidated=0.4),

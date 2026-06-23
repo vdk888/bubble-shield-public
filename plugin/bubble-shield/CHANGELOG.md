@@ -5,6 +5,47 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.15.0 — 2026-06-23 (fix #259: corporate KYC PII leaks — raison sociale + SIRET NIC suffix)
+
+- **LEAK 1 FIXED — Raison sociale leaks in clear.** Form line `Dénomination ou
+  raison sociale : SELARL DU DOCTEUR <PERSON NAME>` returned the company name
+  unmasked. For SELARL/SCM/SCI/SCP practices the company name EMBEDS the
+  practitioner's personal name. No recognizer existed for `dénomination / raison
+  sociale :` label lines.
+- **Fix — `structured_ext.py` — new `form_raison_sociale_matches` recognizer:**
+  Matches `Dénomination (ou raison sociale)? :` and `Raison sociale :` label
+  lines → entity **RAISON_SOCIALE**, masks the whole company name value. ADD-only,
+  fail-open, daemon-independent (deterministic, same contract as #257 recognizers).
+  Precision guards: requires explicit label+colon; skips placeholder values
+  (`néant`, `N/A`, etc.); value must contain at least one letter; capped at 120
+  chars. Does NOT mask `Forme juridique : SELARL` — only labeled dénomination/
+  raison-sociale lines. Wired into `make_structured_detector()`.
+- **LEAK 2 FIXED — SIRET NIC suffix leaks.** Output showed
+  `N° SIRET : ⟦SIREN_0001⟧-NNNNN` — the 9-digit SIREN masked but the 5-digit
+  NIC suffix (`00011`) stayed in clear, making the full 14-digit SIRET
+  reconstructable. Root cause: the SIRET regex `\d{3}[ ]?\d{3}[ ]?\d{3}[ ]?\d{5}`
+  only tolerated spaces between groups. Real DCC forms use a hyphen between the
+  SIREN and NIC (e.g. `123 456 789-00011`), which the old pattern missed —
+  causing the SIRET to match only 9 digits (SIREN), leaving the NIC exposed.
+- **Fix — `recognizers.py` — SIRET pattern updated:** Changed `[ ]?` separators
+  to `[ -]?` so the SIRET recognizer (priority 93) now catches all variants:
+  spaced (`123 456 789 00011`), compact (`12345678900011`), and hyphen-separated
+  (`123 456 789-00011` / `123456789-00011`). Fix #259.
+- **Regression test `scripts/test_259_corporate_kyc.py`:** 4-part test covering
+  daemon DOWN and daemon UP paths, with:
+  - Raison sociale masking for SELARL with embedded non-gazetteer name
+  - Full 14-digit SIRET masking (hyphen-separated form)
+  - Control: `Forme juridique : SELARL` type-word NOT masked
+  - Prose control: no false positives on unlabeled text
+  Uses synthetic-only PII (`FAKENAME TESTONI`, `123 456 789 00011`).
+- All 3 copies re-synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/`
+  → `plugin/bubble-shield/mcpb/server/vendor/`). `scripts/` ↔
+  `mcpb/server/scripts/` identical. MCPB re-packed.
+- All suites green: `test_259_corporate_kyc` 8/8, `test_257_form_layout` 49/49,
+  `test_bubble_shield_mcp` 18/18, `test_guard` 21/21, `test_guard_marker` 11/11,
+  `test_tripwire` 18/18, `test_posttool_anonymize` 19/19, `test_option_b_e2e` 9/9,
+  `test_256_daemon_path_fail_loud` 16/16.
+
 ## 1.14.1 — 2026-06-23 (fix #257-b: DOB leak via Né(e) le + placeholder guard)
 
 - **BLOCKER (PR #3 reviewer): birthdate `03/05/1980` leaked in clear** in the
