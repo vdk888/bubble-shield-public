@@ -1,0 +1,16 @@
+{
+  "_comment": "TEMPLATE — copy to deployment_allowlist.json (gitignored) and fill in the advisory firm's OWN identity, so Bubble Shield keeps it in clear instead of anonymising it. This is the firm's business data; the real file is never committed. Use FULL identifiers only (full names, full addresses, the e-mail domain) — never a bare first name, or you risk suppressing a real client who shares it.",
+
+  "phrases": [
+    "acme patrimoine", "sarl acme patrimoine",
+    "12 avenue de l'exemple", "avenue de l'exemple",
+    "jean conseiller", "marie conseillere"
+  ],
+  "_phrases_doc": "The firm's name (+ legal-form variants), its office address(es), and its advisors' FULL names. Matched case-insensitively as substrings on detected spans.",
+
+  "email_domains": ["acme-patrimoine.fr"],
+  "_email_domains_doc": "The firm's e-mail domain(s). Advisor mailboxes share it, so any address @<domain> is kept in clear.",
+
+  "phones": ["01 23 45 67 89", "+33 1 23 45 67 89"],
+  "_phones_doc": "The firm's switchboard / advisor numbers (any format — matched on digits, last 9)."
+}

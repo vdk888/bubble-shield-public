@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "bubble_shield",
+  "display_name": "Bubble Shield",
+  "version": "1.13.0",
+  "description": "Fail-closed local PII anonymiser — reads/anonymises client data into reversible tokens that never leave the machine.",
+  "long_description": "Bubble Shield's local stdio MCP server, packaged as an MCPB so it can ship inside the bubble-shield plugin (plugins may not declare bare stdio servers). Exposes bubble_shield_read / bubble_shield_anonymize_text / bubble_shield_write / bubble_shield_setup_ml / bubble_shield_enable_global plus custom-field tools. The engine is pure-python and vendored; the optional ML accuracy pack downloads separately on demand and is lazy-imported.",
+  "author": {
+    "name": "Bubble Invest",
+    "email": "bubbleinvest.ai@gmail.com"
+  },
+  "homepage": "https://bubbleinvest.com/bubble-shield",
+  "license": "MIT",
+  "keywords": ["pii", "anonymisation", "rgpd", "gdpr", "guard", "cowork", "finance", "cgp"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/entry.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": ["${__dirname}/server/entry.py"],
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "${__dirname}/server"
+      }
+    }
+  },
+  "tools": [
+    {"name": "bubble_shield_read", "description": "Read a client file and return it anonymised (reversible tokens)."},
+    {"name": "bubble_shield_anonymize_text", "description": "Anonymise a block of text (non-file PII)."},
+    {"name": "bubble_shield_write", "description": "Write a document, restoring real values from tokens locally (never shown)."},
+    {"name": "bubble_shield_setup_ml", "description": "Install/check the optional on-device ML accuracy pack."},
+    {"name": "bubble_shield_enable_global", "description": "Toggle machine-wide ambient anonymisation."},
+    {"name": "bubble_shield_add_field", "description": "Add a custom PII field (regex / GLiNER label / keep-list)."},
+    {"name": "bubble_shield_list_fields", "description": "List active custom PII fields (never echoes PII)."},
+    {"name": "bubble_shield_remove_field", "description": "Remove a custom PII field."}
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "python": ">=3.9" }
+  }
+}
