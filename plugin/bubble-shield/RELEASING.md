@@ -21,6 +21,37 @@ rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
 Never vendor `deployment_allowlist.json` (firm identity) — only the `.example`.
 `.docx` uses stdlib (no python-docx); pypdf is pure-python and already vendored.
 
+## The MCP server ships as an MCPB (NOT a stdio `.mcp.json`)
+
+Plugins may **not** declare a bare local/stdio MCP server — the app rejects it
+("Plugins may only declare remote (http/sse/ws) or MCPB servers"). So the stdio
+server is packaged as an **MCPB** at `mcpb/bubble-shield.mcpb` and declared in
+`plugin.json` via `"mcpServers": "./mcpb/bubble-shield.mcpb"` (the path MUST start
+with `./` and end in `.mcpb` — that is the schema). The `.mcpb` is a **built
+artifact** committed to the repo; the host extracts it and runs
+`mcpb/server/entry.py`.
+
+**The MCPB bundles a COPY of `scripts/` + `vendor/`** under `mcpb/server/`. If you
+change anything under `scripts/` or `vendor/` (including a re-vendor of the engine
+above), you MUST re-sync those copies and re-pack, or the shipped server runs stale
+code:
+
+```bash
+# from plugin/bubble-shield/
+rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' --exclude='test_*.py' \
+  scripts/ mcpb/server/scripts/
+rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='deployment_allowlist.json' \
+  vendor/ mcpb/server/vendor/
+# keep mcpb/manifest.json "version" in sync with plugin.json, then pack:
+npx --yes @anthropic-ai/mcpb validate mcpb/manifest.json
+npx --yes @anthropic-ai/mcpb pack mcpb/ mcpb/bubble-shield.mcpb
+```
+
+Only the pure-python engine + `pypdf` go in the bundle. Do NOT bundle the ML pack
+(GLiNER/onnxruntime/numpy) — it stays a lazy on-demand `bubble_shield_setup_ml`
+download into a separate runtime venv.
+
 ## Checklist
 
 1. **Bump the version in BOTH manifests** (keep them in sync):

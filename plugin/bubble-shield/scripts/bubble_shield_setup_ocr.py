@@ -14,10 +14,15 @@ KEY DESIGN CHOICE — fully offline after setup:
   - RapidOCR + PP-OCRv6 ONNX models are bundled inside the docling wheel (pip).
   - The docling layout model (docling-models / docling-layout-heron, ~506MB) is
     downloaded ONCE here during setup into the HuggingFace local cache.
+  - The TableFormer table-structure model (also in the docling-models HF repo,
+    ~100MB) lives in a DIFFERENT HF repo than the layout model and must be
+    pre-cached SEPARATELY during setup.  Setup uses do_table_structure=True
+    (matching the runtime setting) so both models are exercised and downloaded.
   - At OCR RUNTIME, HF_HUB_OFFLINE=1 (and TRANSFORMERS_OFFLINE=1) are set in
     the subprocess env, so NO network call is ever made after setup completes.
-  - If the layout model is not cached (setup incomplete), the extract path
-    fails gracefully with a clear message — never silently phones home.
+  - If either the layout model OR TableFormer is not cached (setup incomplete),
+    the sentinel is NOT written and the extract path fails gracefully with a
+    clear message — never silently phones home.
 
 PRIVACY GUARANTEE: models downloaded once at setup; OCR runs fully offline
 thereafter (HF_HUB_OFFLINE enforced in every subprocess invocation).
@@ -29,7 +34,8 @@ USAGE
     python3 bubble_shield_setup_ocr.py [--check-only]
 
 Runs under the client's system python3 (3.9+). Creates the venv with the same
-interpreter. Network needed once (pip + model download, ~650MB total).
+interpreter. Network needed once (pip + model download, ~750MB total including
+TableFormer).
 """
 from __future__ import annotations
 
@@ -49,12 +55,16 @@ OCR_MANIFEST = BUBBLE_SHIELD_HOME / "ocr.json"
 # docling bundles RapidOCR + PP-OCRv6 models in the wheel — no extra download.
 # onnxruntime is needed by rapidocr but not declared as a hard dep by docling.
 # The docling layout model (docling-layout-heron, ~506MB) is downloaded from
-# HuggingFace ONCE during setup via ensure_layout_model_cached(), then
+# HuggingFace ONCE during setup via ensure_models_cached(), then
 # HF_HUB_OFFLINE=1 is enforced at runtime to guarantee zero network at OCR time.
+# NOTE: TableFormer (table-structure model) lives in the SAME docling-models HF
+# repo as the layout model but is only triggered when do_table_structure=True.
+# Both must be pre-cached during setup so that table OCR works fully offline.
 PIP_DEPS = ["docling", "onnxruntime"]
 
-# Sentinel file written after the layout model is confirmed cached.
-# Its presence means: model downloaded, HF cache warm, ready for offline use.
+# Sentinel file written ONLY after BOTH the layout model AND TableFormer are
+# confirmed cached.  Its presence means: ALL models downloaded, HF cache warm,
+# ready for offline use (including table-heavy scanned documents).
 _LAYOUT_MODEL_SENTINEL = BUBBLE_SHIELD_HOME / "layout_model_cached.flag"
 
 
@@ -98,8 +108,17 @@ def ensure_deps(py: Path) -> None:
     log("✓ OCR deps installed")
 
 
-# Script run inside the ocr-env venv to pre-download (warm) the HF layout model.
+# Script run inside the ocr-env venv to pre-download (warm) BOTH the HF layout
+# model AND the TableFormer table-structure model.
 # Written to a temp file so we can use multi-line try/except cleanly.
+#
+# IMPORTANT: do_table_structure=True is used here (matching the runtime setting)
+# so that TableFormer — which lives in the docling-models HF repo alongside the
+# layout model but is NOT fetched when do_table_structure=False — is also
+# downloaded and cached.  A fresh install that only ran the old warm script
+# (do_table_structure=False) would be missing TableFormer and would fail at
+# runtime when processing table-heavy scanned documents (HF_HUB_OFFLINE=1 →
+# cache-miss → table extraction fails, even though layout OCR works fine).
 _WARM_MODEL_SCRIPT = r'''
 import sys, warnings
 warnings.filterwarnings("ignore")
@@ -109,37 +128,52 @@ try:
     opts = PdfPipelineOptions()
     opts.do_ocr = True
     opts.ocr_options = RapidOcrOptions()
-    opts.do_table_structure = False
-    # Instantiating DocumentConverter triggers the layout model download/cache check.
-    # With HF_HUB_OFFLINE unset (default here — we WANT the download to happen),
-    # docling will fetch the model from HuggingFace if not already cached.
+    # do_table_structure=True ensures the TableFormer model is also fetched/cached
+    # alongside the layout model.  This aligns with the runtime setting so that
+    # a fresh install can process table-heavy scanned documents fully offline.
+    opts.do_table_structure = True
+    # Instantiating DocumentConverter triggers BOTH the layout model AND the
+    # TableFormer download/cache check.  With HF_HUB_OFFLINE unset (default here
+    # — we WANT the downloads to happen), docling fetches both from HuggingFace.
     DocumentConverter(format_options={"pdf": PdfFormatOption(pipeline_options=opts)})
-    print("OK model cached")
+    print("OK models cached")
 except Exception as e:
     print("FAIL", str(e)[:200])
     sys.exit(1)
 '''
 
 
-def ensure_layout_model_cached(py: Path) -> None:
-    """Download the docling layout model ONCE into the HF local cache.
+def ensure_models_cached(py: Path) -> None:
+    """Download BOTH the docling layout model AND TableFormer into the HF cache.
 
     This is the ONLY network call to huggingface.co in the entire OCR lifecycle.
     After this succeeds, every subsequent OCR call sets HF_HUB_OFFLINE=1 to
     guarantee zero network traffic.
 
-    Idempotent: if the sentinel file exists, the model is already cached and
+    Why TableFormer matters (#269):
+      The layout model (docling-layout-heron) and the TableFormer table-structure
+      model both live in the docling-models HF repo, but TableFormer is only
+      fetched when do_table_structure=True.  The original setup used False →
+      TableFormer was absent on a fresh install → HF_HUB_OFFLINE=1 at runtime
+      caused a cache-miss and table extraction silently produced zero output for
+      table-heavy scanned documents.
+
+    Sentinel written ONLY after BOTH models are confirmed cached, so an
+    incomplete setup never lets runtime attempt a network fetch.
+
+    Idempotent: if the sentinel file exists, both models are already cached and
     this step is skipped entirely (no network, no subprocess)."""
     if _LAYOUT_MODEL_SENTINEL.is_file():
-        log("✓ layout model already cached (sentinel present)")
+        log("✓ layout model + TableFormer already cached (sentinel present)")
         return
-    log("• downloading docling layout model into HF cache (~506MB, one-time) …")
+    log("• downloading docling layout model + TableFormer into HF cache "
+        "(~750MB, one-time) …")
     probe = tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
                                         encoding="utf-8")
     probe.write(_WARM_MODEL_SCRIPT)
     probe.close()
     try:
-        # Run WITHOUT HF_HUB_OFFLINE — we want the download to happen here.
+        # Run WITHOUT HF_HUB_OFFLINE — we want the downloads to happen here.
         r = subprocess.run([str(py), probe.name],
                            capture_output=True, text=True, timeout=600)
     finally:
@@ -149,14 +183,20 @@ def ensure_layout_model_cached(py: Path) -> None:
             pass
     output = r.stdout.strip()
     if r.returncode == 0 and output.startswith("OK"):
-        # Write sentinel to mark the cache as warm
+        # Write sentinel ONLY after BOTH layout model AND TableFormer are cached.
         _LAYOUT_MODEL_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
         _LAYOUT_MODEL_SENTINEL.write_text("cached", encoding="utf-8")
-        log("✓ layout model cached — OCR will run fully offline from now on")
+        log("✓ layout model + TableFormer cached — OCR will run fully offline "
+            "from now on (including table-heavy scanned documents)")
     else:
         raise RuntimeError(
-            f"layout model download failed:\n{r.stdout}\n{r.stderr}"
+            f"model download failed (layout + TableFormer):\n{r.stdout}\n{r.stderr}"
         )
+
+
+# Keep the old name as an alias for backwards-compatibility with any code that
+# might call it directly (e.g. tests, external scripts).
+ensure_layout_model_cached = ensure_models_cached
 
 
 def write_manifest(py: Path) -> None:
@@ -276,7 +316,7 @@ def main() -> int:
     log(f"  ocr env: {OCR_ENV}")
     log(f"  deps: {', '.join(PIP_DEPS)}")
     log("  (RapidOCR + PP-OCRv6 ONNX models bundled inside docling wheel)")
-    log("  (docling layout model downloaded once here; OCR runs offline thereafter)")
+    log("  (layout model + TableFormer downloaded once here; OCR runs offline thereafter)")
 
     if args.check_only:
         py = _venv_python(OCR_ENV)
@@ -284,7 +324,7 @@ def main() -> int:
             log("✗ not installed (no venv)")
             return 1
         if not _LAYOUT_MODEL_SENTINEL.is_file():
-            log("✗ layout model not cached (re-run setup without --check-only)")
+            log("✗ models not cached (layout + TableFormer — re-run setup without --check-only)")
             return 1
         ok = verify(py)
         return 0 if ok else 1
@@ -293,9 +333,9 @@ def main() -> int:
     try:
         py = ensure_venv()
         ensure_deps(py)
-        ensure_layout_model_cached(py)   # downloads HF model once; sets sentinel
+        ensure_models_cached(py)   # downloads layout + TableFormer; sets sentinel only after BOTH
         write_manifest(py)
-        ok = verify(py)                  # runs WITH HF_HUB_OFFLINE=1 to prove offline
+        ok = verify(py)            # runs WITH HF_HUB_OFFLINE=1 to prove offline
     except subprocess.CalledProcessError as e:
         log(f"✗ a setup step failed: {e}")
         return 1
@@ -304,8 +344,8 @@ def main() -> int:
         return 1
 
     if ok:
-        log(f"\n✅ OCR pack ready. Models downloaded once at setup; "
-            f"OCR runs fully offline thereafter (HF_HUB_OFFLINE enforced). "
+        log(f"\n✅ OCR pack ready. Models (layout + TableFormer) downloaded once at "
+            f"setup; OCR runs fully offline thereafter (HF_HUB_OFFLINE enforced). "
             f"Nothing leaves this machine at OCR runtime.")
         return 0
     return 1

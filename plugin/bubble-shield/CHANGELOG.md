@@ -5,6 +5,288 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.17.0 — 2026-06-24 — integrate/v1.17.0: #267+#269+#276+#280(rev3) composed
+
+Consolidated integration of 4 reviewed+approved features:
+
+- **#269** (`fix/269-tableformer-cache`): OCR setup pre-caches TableFormer model (`setup_ocr.py`)
+  — prevents silent table-OCR miss on HF_HUB_OFFLINE runtime after fresh install.
+- **#276** (`feat/276-ocr-route-garbled`): `_is_garbled_extraction` detects glued PDF text
+  and reroutes to OCR (`bubble_shield_extract.py`) — eliminates the entire glue-artifact class.
+- **#267** (`chore/267-harden-surname-guard-v2`): expanded `_COMMON_FRENCH_SURNAMES` to ~186
+  entries + `bypass_common_surname_guard` parameter so RAISON_SOCIALE-anchored surnames
+  mask everywhere (`structured_ext.py`).
+- **#280 rev3** (`fix/280-filename-footer-leak`): `filename_footer_matches` returns
+  `(matches, footer_nom_spans)` tuple; footer-sourced spans are excluded from the
+  corroboration pool in `doc_level_person_repetition_matches` — closes the self-corroboration
+  loop that caused brand/insurer names to over-mask body-wide (`structured_ext.py`,
+  `bubble_shield_mcp.py`, `__init__.py`).
+
+All 4 features verified green: 255+ pytest tests, 19/19 MCP, 19/19 posttool.
+MCPB re-packed at 1.17.0 (9 tools, no .bak). All vendor copies in sync.
+
+---
+
+## 1.16.5 — 2026-06-24 (fix #280 rev 3: close self-corroboration loop in filename-footer masking)
+
+### Rev 3 — self-corroboration bug fix
+
+**Root cause (rev 2 confirmed bug):** Layer 1 `filename_footer_matches()` emits a footer
+NOM for every filename token (incl. brand names like ZEPHYRA). Layer 2
+`doc_level_person_repetition_matches()` was building its corroboration pool
+`nom_detected_words` from the SAME `found` list — which already included those Layer-1
+footer NOMs. So ANY filename token in the footer self-corroborated → seeded body-wide →
+over-masked insurer/brand names.
+
+**Proof:** "ZEPHYRA DUPONT - DER.pdf", body mentions ZEPHYRA (insurer Multisupport) →
+ZEPHYRA masked body-wide (0 un-masked body occurrences). PREDICA passed rev2 ONLY because
+it's on the stop-list — a false pass, not a real fix.
+
+**Fix (rev 3):**
+- `filename_footer_matches()` now returns `(matches, footer_nom_spans)` where
+  `footer_nom_spans` is a `frozenset` of `(start, end)` tuples covering all emitted NOMs.
+- `_detector` in `make_structured_detector` captures this frozenset and passes it to Layer 2.
+- `doc_level_person_repetition_matches()` accepts `footer_nom_spans` parameter and EXCLUDES
+  those spans when building `nom_detected_words`. Only independent body-recognizer NOMs
+  (civility "M. DUPONT", form-label, signataire) count for corroboration.
+
+**Result:**
+- ZEPHYRA (insurer): footer NOM excluded from pool → no independent NOM → NOT corroborated
+  → NOT seeded body-wide → body occurrences survive. Footer still masks via Layer 1 ✓.
+- DUPONT (client, "M. DUPONT" body): civility NOM in pool (not footer) → corroborated →
+  body-wide mask ✓.
+- TESTONI + "M. TESTONI" signal: independent civility NOM → corroborated → body mask ✓.
+- Footer-only TESTONI (no body signal): Layer 1 positional masks footer; body survives ✓.
+
+**Files changed (rev 3):**
+- `bubble_shield/structured_ext.py` + 2 vendor copies (3 in sync):
+  - `filename_footer_matches` → returns `(matches, footer_nom_spans)`
+  - `make_structured_detector._detector` → captures and passes `footer_nom_spans`
+  - `doc_level_person_repetition_matches` → `footer_nom_spans` parameter, exclusion logic
+- `tests/test_280_filename_footer.py` → D15 updated (unpack tuple), D16 replaced with
+  4 regression tests: D16a ZEPHYRA, D16b KORRIGAN, D16c corroborated TESTONI, D16d footer-only.
+- D5 round-trip: updated to use "M. TESTONI" for independent corroboration.
+- MCPB re-packed at 1.16.5 (no version bump).
+
+**Test suite (rev 3):** 255 tests, all green (4 new D16 regression tests added).
+Scripts: posttool 19/19, MCP 19/19, test_259/264/266/267/273/275 all pass.
+
+---
+
+## 1.16.5 — 2026-06-24 (fix #280 rev 2: corroboration + positional — over-mask ship-blockers closed)
+
+### High-severity fix: systematic client-name leak via footer boilerplate (#280)
+### Rev 2 (same release, same version): over-mask ship-blockers closed
+
+**Root cause (#280):** Every signed CGP PDF ends with:
+  `"Page de signatures complémentaire au document DURAND Théophile - DER 012026..."`
+The client's full name was leaking verbatim in this footer. No content recognizer caught it.
+
+**Original fix (rev 1):** Seeded ALL non-stop-list filename tokens body-wide.
+**Problem (reviewer-proven):** The stop-list is inherently incomplete. Major FR insurers
+PREDICA, HELVETIA, PREVOIR, ARIAL, AG2R, ALLIANZ, MONCEAU, CNP, SEQUOIA were not in it.
+"PREDICA DUPONT.pdf" → seeded PREDICA → masked "PREDICA" (insurer name) in body everywhere.
+Similarly: BOURSE missing → over-mask; FINAL missing; LIASSE/FISCALE missing.
+
+**Rev 2 fix — corroboration + positional approach (wins over extending the stop-list):**
+
+Layer 1 — **`filename_footer_matches(text, candidates)`** — new positional function:
+  Directly emits NOM matches where filename person-tokens appear in footer boilerplate
+  (`"au document <name-fragment>"`). Covers the pure-footer case (name ONLY in footer,
+  no body corroboration needed) without body-wide seeding. Safe even for PREDICA —
+  the footer reference to the filename is correctly masked, but no body-wide seed.
+
+Layer 2 — **Corroboration in `doc_level_person_repetition_matches`**:
+  A filename candidate token is promoted to a body-wide seed ONLY when it is
+  corroborated — i.e. the token already appears in a NOM match detected by another
+  recognizer (civility, form-label, signataire, or the footer NOM from Layer 1).
+  - "DUPONT" from civility "M. DUPONT" → NOM → corroborated → body-wide seed → masks ✓
+  - "PREDICA" → no NOM detection anywhere → NOT corroborated → NOT seeded → body untouched ✓
+  - Footer-only case: Layer 1 NOM provides corroboration for Layer 2 → body seed activates ✓
+
+Belt-and-suspenders: stop-list extended with reviewer-missing tokens:
+  PREDICA, HELVETIA, PREVOIR, ARIAL, AG2R, ALLIANZ, MONCEAU, CNP, SEQUOIA,
+  BOURSE, FINAL, FINALE, LIASSE, FISCALE, and other major FR insurers.
+
+**Recall preserved:** TESTONI (footer-only) → Layer 1 positional catches footer ✓.
+TESTONI (body+footer, via "M. TESTONI") → Layer 1 covers footer, Layer 2 covers body ✓.
+
+**1. `extract_person_tokens_from_filename(basename)`** — extended stop-list (rev 2).
+
+**2. `filename_footer_matches(text, candidates)`** — new, emits NOM for footer-quoted tokens.
+
+**3. `make_structured_detector(filename_basename="")`** — now calls `filename_footer_matches`
+   before the repetition pass (Layer 1), so footer NOMs are in `found` for corroboration.
+
+**4. `doc_level_person_repetition_matches(text, found, filename_seeds=None)`** — rev 2:
+   corroboration filter before body-wide seeding.
+
+**5. `bubble_shield/__init__.py`** — `__version__` aligned to 1.16.5 (was stuck at 0.2.0).
+
+**6. Threading in `bubble_shield_mcp.py`** (carried from rev 1).
+
+**Files changed:**
+- `bubble_shield/structured_ext.py` + 2 vendor copies (3 in sync)
+- `bubble_shield/__init__.py` + 2 vendor copies (version 0.2.0 → 1.16.5)
+- `plugin/bubble-shield/scripts/bubble_shield_mcp.py` + mcpb/server copy (3 in sync)
+- `plugin/bubble-shield/.claude-plugin/plugin.json` — version 1.16.5 (unchanged)
+- `tests/test_280_filename_footer.py` — 6 new tests (D11–D16): PREDICA/HELVETIA body
+  no-mask, BOURSE/LIASSE/FISCALE no-mask, positional footer, corroboration feedback.
+- MCPB re-packed at 1.16.5.
+
+**Test suite:** 246 existing + 6 new = 252 tests, all green.
+Scripts: test_257/259/264/266/267/273/275/posttool/256/260 — all pass.
+
+## 1.16.4 -- 2026-06-24 (chore #267 v2: recall regression fix — raison-sociale bypass)
+
+### Recall regression fix (#267-v2, reviewer-reported)
+
+**Root cause (regression introduced by #267 v1):** `_person_name_seeds()` applied the
+`_COMMON_FRENCH_SURNAMES` guard to ALL lone-token seeds, including those derived from a
+confirmed RAISON_SOCIALE match (e.g. "SELARL GARCIA TESTONI"). A newly-listed common
+surname that IS the client's name would be excluded from lone-token seeds, causing
+standalone body repetitions ("GARCIA agit seul", "GARCIA a décidé") to LEAK even
+though the header ("SELARL GARCIA TESTONI") was correctly masked.
+
+**Fix:** Added `bypass_common_surname_guard=False` parameter to `_person_name_seeds()`.
+The RAISON_SOCIALE path in `doc_level_person_repetition_matches` now calls with
+`bypass_common_surname_guard=True` — the company match already confirms the token IS
+the client's name, so the "common word in prose" concern does not apply.
+
+**Both properties preserved:**
+1. Known-client surname (anchored to raison sociale) masks everywhere, including
+   standalone body repetitions and right-glued PDF artifacts. (RECALL)
+2. Unanchored common surname in a doc with NO matching company → NOT masked. (PRECISION)
+
+**Scope of change:**
+- `structured_ext.py`: `_person_name_seeds()` new `bypass_common_surname_guard` param
+  + `doc_level_person_repetition_matches()` RAISON_SOCIALE call-site uses `bypass=True`.
+- `test_267_surname_guard.py`: D23 corrected (lone GARCIA IS in seeds via bypass);
+  D32-D36 added (standalone LECLERC masked, standalone PEREZ unanchored NOT masked,
+  PEREZ-as-client masked everywhere).
+- `test_275_right_glue.py`: D10 updated (LEBLANC as known-client name IS right-glue-
+  masked — old "NOT masked" expectation was based on the pre-fix behavior).
+- All three copies synced; MCPB re-packed at 1.16.4.
+
+**Data-only change from #267 v1 still in place:**
+- `_COMMON_FRENCH_SURNAMES` expanded from ~60 to ~186 entries (GARCIA, NGUYEN, PEREZ,
+  LECLERC, CHEVALIER, FERNANDEZ, GONZALEZ, MARTINEZ, LAURENT, SIMON, MICHEL, ROUX,
+  FONTAINE, etc.) — guard still applies on the unanchored/prose path.
+
+## 1.17.0 — 2026-06-24 (feat #276: route GARBLED-extraction PDFs through OCR)
+
+### Feature — GARBLED native PDF extraction routed through OCR pack (#276)
+
+**Root cause:** pypdf extracts text from the liasse fiscale but GLUES words together
+(no spaces between tokens): "gérantETESTONI", "FAKENAMESignature". Per-boundary fixes
+(#273 left-glue, #275 right-glue) catch most of these, but a 4-char forename like
+"FAKENAME" cannot be safely caught without lowering the length floor and over-masking
+common names (JEAN, PAUL, etc.).
+
+**DURABLE fix:** when native PDF extraction returns non-empty text that looks GARBLED
+and the OCR pack is installed, re-extract via OCR (clean, properly-spaced,
+layout-aware text) and anonymise THAT — eliminating the entire glue-artifact class
+at once.  Fail-open: if the OCR pack is absent or fails, the native text is used
+as before (with the #273/#275 per-boundary fixes still applied).
+
+**Heuristic `_is_garbled_extraction(text) -> bool`** — all three signals must fire:
+1. **Long-token rate ≥ 3 %**: tokens > 25 chars (excluding URLs/email addresses)
+   as a fraction of all tokens.  Glued liasse text produces many super-long tokens
+   ("SIGNATAIREFAKENAMEETESTONISignature"); normal French prose has almost none.
+2. **Low space density**: fewer than 1 space per 10 characters.  Normal French prose
+   is ~1 space per 5–6 chars; garbled liasse extractions are much denser.
+3. **CamelCase-glue signature ≥ 3**: occurrences of `[a-z][A-Z]` or `[A-Z]{2,}[a-z]`
+   transitions.  These are the exact signature of PDF-extraction word-fusion:
+   the casing of one word collides with the next.  URLs/headers don't produce this.
+
+**Conservative by design:** all three signals must fire together (AND logic).
+Any single signal alone would be too noisy.  When unsure → return False (keep native
+text).  False-positive (OCR a clean doc) is a perf/recall cost; false-negative
+(miss garbled) just falls through to #273/#275 — so bias toward NOT-garbled.
+
+**Wiring in `extract_pdf_text`:**
+- After pypdf extraction yields non-empty text, call `_is_garbled_extraction(text)`.
+- If True AND `_ocr_pdf_if_pack_present` returns text → return the OCR text.
+- The `[OCR]` quality note is already prepended by `_ocr_pdf_if_pack_present`, so
+  callers see the caveat automatically.
+- If False OR OCR unavailable/fails → return native text unchanged (current behaviour
+  + #273/#275 per-boundary fixes still apply).
+
+**Location:** `bubble_shield_extract.py`
+- `_is_garbled_extraction()` — new function added before `extract_pdf_text` (line ~137).
+- `extract_pdf_text()` — garbled-route block added after the empty-text check.
+
+### Test `scripts/test_276_garbled_route.py` — 22/22
+
+- **Test 1:** garbled liasse-like text (glued tokens, long tokens, CamelCase
+  transitions) → `_is_garbled_extraction` = True (2 fixtures: GARBLED_TEXT,
+  DENSE_GARBLED with tokens > 25 chars).
+- **Test 2:** clean texts → `_is_garbled_extraction` = False (7 cases: clean French
+  prose, ALL-CAPS headings, long URL, long legitimate words, empty, single word,
+  label-value pairs).
+- **Test 3a:** garbled native text + OCR pack present (mocked) → OCR text used;
+  `[OCR]` tag present; mock called exactly once.
+- **Test 3b:** garbled native text + OCR pack absent (mock returns None) → native
+  text returned, no crash (fail-open verified).
+- **Test 4:** clean native text → OCR mock NOT called (clean docs never OCR'd).
+- **Test 5:** edge cases (one-artifact-in-otherwise-clean doc, all-caps non-glued,
+  mixed doc) — heuristic does not crash; all-caps-clean correctly returns False.
+
+### Note on real-liasse confirmation
+The real-liasse end-to-end test (re-running the actual liasse through OCR) requires
+the OCR pack + model installed.  Tony to confirm post-merge that the liasse is now
+extracted cleanly and "FAKENAME" is masked.  All tests in the PR use synthetic PII.
+
+### All copies synced + MCPB re-packed at 1.17.0 (9 tools, no .bak)
+- Root `bubble_shield/` → `plugin/bubble-shield/vendor/` →
+  `plugin/bubble-shield/mcpb/server/vendor/` (engine unchanged for this PR).
+- `scripts/bubble_shield_extract.py` → `mcpb/server/scripts/bubble_shield_extract.py`.
+- `scripts/test_276_garbled_route.py` → `mcpb/server/scripts/test_276_garbled_route.py`.
+- MCPB re-packed (9 tools intact, no .bak).
+
+### All suites green
+`test_276_garbled_route` 22/22, `test_275_right_glue` 47/47,
+`test_273_glued_token` 32/32, `test_266_person_name_corporate` 57/57,
+`test_264_repeated_company` 31/31, `test_259_corporate_kyc` 20/20,
+`test_257_form_layout` 42/42, `test_bubble_shield_mcp` 19/19,
+`test_posttool_anonymize` 19/19, `test_256_daemon_path_fail_loud` 10/10,
+`test_260_ocr` green, `test_option_b_e2e` pre-existing Python 3.9 compat skip.
+pytest 229/229.
+
+## 1.16.4 — 2026-06-24 (fix #269: pre-cache TableFormer at OCR setup)
+
+### Bug fixed — TableFormer (table-structure model) not pre-cached at setup (risk:LOW, table OCR miss)
+
+- **Root cause (#269):** The OCR setup warm-script used `do_table_structure=False`, so the
+  TableFormer model (which lives in the same `docling-models` HF repo as the layout model
+  but is fetched separately only when `do_table_structure=True`) was never downloaded during
+  setup.  On a fresh install with `HF_HUB_OFFLINE=1` at runtime, any table-heavy scanned
+  PDF silently produced zero table output (cache-miss → fail-closed, no crash, no privacy
+  risk — just missing tables).  The review of #260 only passed because the test machine
+  already had `docling-models` cached locally.
+
+- **Fix:** `_WARM_MODEL_SCRIPT` now uses `do_table_structure=True` (aligned with the runtime
+  setting), so both the layout model AND TableFormer are exercised and downloaded in the
+  same `DocumentConverter()` instantiation during setup.  The `~750MB` estimate in the
+  docstring is updated accordingly.
+
+- **Sentinel hardening:** `ensure_models_cached()` (renamed from `ensure_layout_model_cached`,
+  old name kept as alias) writes `layout_model_cached.flag` ONLY after the warm script exits
+  with `returncode=0` and `stdout.startswith("OK")`.  A partial cache (e.g. TableFormer
+  download error → non-zero returncode) raises `RuntimeError` and leaves the sentinel absent,
+  so the next setup re-run picks up from scratch.
+
+- **Privacy guarantee unchanged:** `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1` still
+  enforced in every runtime subprocess invocation (Test 0 re-confirmed).
+
+- **Tests extended (`test_260_ocr.py`):**
+  - Test 3 (#269): mocked subprocess returns `"OK models cached"` → sentinel written.
+  - Test 4 (#269): mocked subprocess returns non-zero → RuntimeError raised, sentinel absent.
+  - All 5 tests pass (Tests 0–4).
+
+- **Note:** #267 also targets 1.16.4 — if both land, Tony resolves at merge; this PR uses
+  1.16.4 as instructed.
+
 ## 1.16.3 — 2026-06-24 (fix #275: right-glued forename leak — mirror of #273)
 
 ### Ship-blockers fixed (v2 — over-mask guards, 2026-06-24)
@@ -17,7 +299,7 @@ Two over-masking regressions found in PR review. Both fixed in the same version
   The right-glue pass would fire for ANDREA in "ANDREAssistant" (next char 'A' = letter),
   masking the legitimate French word instead of just the client name.
 - Fix: added `_COMMON_FRENCH_FORENAMES` exclusion set (~80 entries: CLAIRE, JULIEN,
-  ANTOINE, ANDREA, ISABELLE, NATHALIE, SANDRINE, CAROLINE, CHRISTELLE, SEBASTIEN,
+  ANTOINE, ANDREA, ISABELLE, NATHALIE, SANDRINE, CAROLINE, CHRISTELLE, THEOPHILE,
   FREDERIC, NICOLAS, STEPHANE, CATHERINE, VERONIQUE, DOMINIQUE, EMMANUEL, GUILLAUME,
   etc.). Seeds in this set do NOT get the right-glue pass. Standard + left-glue (#273)
   passes still fire for these seeds (they're still masked when isolated or left-glued).
@@ -28,14 +310,14 @@ Two over-masking regressions found in PR review. Both fixed in the same version
   CLAIREment, ANTOINEtte, JULIENne).
 - Fix: the right-glue pass now only fires when the FOLLOWING char is UPPERCASE
   (`[A-Z\xc0-\xd6\xd8-\xde]`). CamelCase = PDF extraction glue artifact
-  ("FAKENAMESignature", "AMELSignature" — capital S). Lowercase continuation =
+  ("FAKENAMESignature", "FAKENAMESignature" — capital S). Lowercase continuation =
   inflected French word — never mask.
 - `structured_ext.py` line: `re.match(r"[A-Z\xc0-\xd6\xd8-\xde]", text[end])`.
 
 **Both guards combined:** forename exclusion + uppercase-next-char.
 
 **Verified still masks (real artifact):** "FAKENAMESignature" (F, not a forename),
-"TESTONIDocument" (uppercase D), "AMELSignature" (AMEL len=4 < 6, still masked by
+"TESTONIDocument" (uppercase D), "FAKENAMESignature" (FAKENAME len=4 < 6, still masked by
 standard pass anyway). "ANDREA DUPONT" pair still masked via standard pair-seed pass.
 
 **Verified does NOT mask (ship-blockers):** "ANDREAssistant" (ANDREA in forenames),

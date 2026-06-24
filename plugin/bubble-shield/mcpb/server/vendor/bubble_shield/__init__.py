@@ -21,4 +21,4 @@ from bubble_shield.engine import AnonymizationEngine, AnonymizationResult
 from bubble_shield.vault import Vault
 
 __all__ = ["AnonymizationEngine", "AnonymizationResult", "Vault"]
-__version__ = "0.2.0"
+__version__ = "1.17.0"

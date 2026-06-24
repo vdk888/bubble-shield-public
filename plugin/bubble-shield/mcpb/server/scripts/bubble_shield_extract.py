@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -133,18 +134,89 @@ def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
             pass
 
 
+def _is_garbled_extraction(text: str) -> bool:
+    """Return True if native PDF extraction looks GARBLED (liasse fiscale glue artifact).
+
+    This heuristic detects the class of glue artifacts produced by pypdf on the
+    liasse fiscale: words are merged without spaces ("gerantETESTONI",
+    "AMELSignature", "FAKENAMESignature").  When triggered, the caller
+    re-extracts via OCR (clean, layout-aware text) to eliminate the whole artifact
+    class at once -- rather than patching individual glue boundaries one by one.
+
+    CONSERVATIVE by design: when unsure -> return False (keep native text).
+    A false-positive (OCR a clean doc) wastes time and may lower recall slightly.
+    A false-negative (miss a garbled doc) just falls back to the per-boundary fixes
+    (#273, #275) that already exist.  Bias hard toward NOT-garbled.
+
+    Signals (all three must fire together -- AND logic avoids over-triggering):
+
+    1. Long-token rate: tokens > 25 chars that are NOT URLs/email addresses make up
+       >= 3 % of all tokens.  Normal French prose has very few tokens > 25 chars;
+       glued liasse text has many.
+
+    2. Low space density: fewer than 1 space per 10 characters (normal prose:
+       ~1 per 5-6 chars; garbled liasse with many glued tokens: much lower).
+
+    3. CamelCase-glue signature: >= 3 occurrences of a lower->upper or
+       ALLCAPS->lower transition mid-token ([a-z][A-Z] or [A-Z]{2,}[a-z]).
+       These transitions are the exact signature of PDF-extraction glue: the end
+       of one word's casing collides with the start of the next.
+
+    All three signals must fire.  Any one signal alone is too noisy.
+    """
+    if not text:
+        return False
+
+    # Signal 2: space density (fast, cheap -- check first)
+    char_count = len(text)
+    space_count = text.count(" ")
+    if char_count == 0 or space_count / char_count >= 0.10:
+        # >= 1 space per 10 chars -> normal density -> not garbled
+        return False
+
+    # Signal 1: long-token rate
+    # Split on whitespace; skip URLs and email-like tokens
+    _url_like = re.compile(
+        r"(?:https?://|www\.|\S+@\S+\.\S+)", re.IGNORECASE
+    )
+    tokens = text.split()
+    if not tokens:
+        return False
+    long_tokens = [
+        t for t in tokens
+        if len(t) > 25 and not _url_like.match(t)
+    ]
+    long_token_rate = len(long_tokens) / len(tokens)
+    if long_token_rate < 0.03:
+        # < 3 % long tokens -> probably normal text -> not garbled
+        return False
+
+    # Signal 3: CamelCase-glue transitions
+    # [a-z][A-Z] (e.g. "tETESTONI", "tSignature") or [A-Z]{2,}[a-z] (e.g. "AMELs")
+    camel_glue_count = len(re.findall(r"[a-z][A-Z]|[A-Z]{2,}[a-z]", text))
+    if camel_glue_count < 3:
+        return False
+
+    # All three signals fired -- extraction looks garbled
+    return True
+
+
 def extract_pdf_text(raw: bytes) -> str:
     """Extract text from a PDF, or raise ExtractionError with a clear reason.
 
     For PDFs with a native text layer, uses pypdf (zero extra install). For
     scanned/image-only PDFs (no text layer), falls back to the optional OCR pack
     if installed (docling + RapidOCR, provisioned by bubble_shield_setup_ocr).
+    For PDFs where pypdf returns text but it looks GARBLED (glue artifacts --
+    #276), re-extracts via OCR when the OCR pack is installed.  Fail-open: OCR
+    errors and absent OCR pack both fall back to native text + the per-boundary
+    fixes (#273 / #275).
     Fail-open: OCR errors fall through to the original ExtractionError message."""
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise ExtractionError(
-            "pypdf manquant — installe-le pour lire les PDF : pip install pypdf"
+            "pypdf manquant -- installe-le pour lire les PDF : pip install pypdf"
         ) from exc
 
     try:
@@ -156,11 +228,11 @@ def extract_pdf_text(raw: bytes) -> str:
         try:
             # many "protected" PDFs use an empty owner password
             if reader.decrypt("") == 0:
-                raise ExtractionError("PDF chiffré : mot de passe requis.")
+                raise ExtractionError("PDF chiffre : mot de passe requis.")
         except ExtractionError:
             raise
         except Exception as exc:
-            raise ExtractionError("PDF chiffré : déchiffrement impossible.") from exc
+            raise ExtractionError("PDF chiffre : dechiffrement impossible.") from exc
 
     parts = []
     for page in reader.pages:
@@ -180,16 +252,33 @@ def extract_pdf_text(raw: bytes) -> str:
         if _ocr_text:
             return _ocr_text
         raise ExtractionError(
-            "Aucun texte extractible — PDF probablement scanné (image). "
+            "Aucun texte extractible -- PDF probablement scanne (image). "
             "Installez le pack OCR (bubble_shield_setup_ocr) pour lire ce type de fichier, "
             "ou collez le texte manuellement.")
+
+    # #276 -- GARBLED extraction path: pypdf returned non-empty text but it looks
+    # garbled (glue artifacts: words fused without spaces).  When the OCR pack is
+    # installed, prefer clean OCR-sourced text over the native garbled extraction.
+    # Fail-open: if OCR pack absent OR OCR fails -> keep the native text + rely on
+    # the per-boundary fixes (#273 / #275) that are already applied downstream.
+    if _is_garbled_extraction(text):
+        try:
+            _ocr_text = _ocr_pdf_if_pack_present(raw)
+        except Exception:
+            _ocr_text = None
+        if _ocr_text:
+            # OCR returned good text -- use it (the [OCR] quality note is already
+            # prepended by _ocr_pdf_if_pack_present, so callers see the caveat).
+            return _ocr_text
+        # OCR unavailable or failed -- fall through, use native text as-is.
+
     return text
 
 
 def extract_docx_text(raw: bytes) -> str:
     """Extract text from a .docx (Word), or raise ExtractionError.
 
-    Pure stdlib — a .docx is a zip of XML, so we read word/document.xml directly
+    Pure stdlib -- a .docx is a zip of XML, so we read word/document.xml directly
     with zipfile + ElementTree. NO python-docx / lxml needed (those require a
     compiled C extension and can't be vendored cross-platform). This keeps the
     plugin fully self-contained: the client never installs anything.
@@ -206,7 +295,7 @@ def extract_docx_text(raw: bytes) -> str:
         with zf.open("word/document.xml") as fh:
             tree = ET.parse(fh)
     except KeyError as exc:
-        raise ExtractionError(".docx sans word/document.xml — fichier invalide.") from exc
+        raise ExtractionError(".docx sans word/document.xml -- fichier invalide.") from exc
     except Exception as exc:
         raise ExtractionError(f".docx illisible (xml) : {exc}") from exc
 
@@ -219,12 +308,12 @@ def extract_docx_text(raw: bytes) -> str:
             lines.append("".join(runs))
     text = "\n".join(lines).strip()
     if not text:
-        raise ExtractionError("Aucun texte dans le .docx (peut-être un document vide ou scanné).")
+        raise ExtractionError("Aucun texte dans le .docx (peut-etre un document vide ou scanne).")
     return text
 
 
 def extract_text(filename: str, raw: bytes) -> str:
-    """Dispatch on file type. PDF → pypdf, .docx → python-docx, else UTF-8 decode."""
+    """Dispatch on file type. PDF -> pypdf, .docx -> python-docx, else UTF-8 decode."""
     if not raw:
         return ""
     if looks_like_pdf(filename or "", raw):
@@ -252,7 +341,7 @@ def _main(argv: list[str]) -> int:
         # Fail-closed: a file we can't extract must NOT be treated as empty/safe.
         sys.stderr.write(str(e) + "\n")
         return 2
-    except Exception as e:  # unexpected — still fail closed
+    except Exception as e:  # unexpected -- still fail closed
         sys.stderr.write(f"Extraction impossible : {e}\n")
         return 2
     if check:

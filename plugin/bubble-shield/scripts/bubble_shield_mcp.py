@@ -244,7 +244,7 @@ _DEGRADED_WARNING = (
 )
 
 
-def _engine(text_for_daemon: str = ""):
+def _engine(text_for_daemon: str = "", filename_basename: str = ""):
     """Build the shared engine: regex core + structured_ext form detectors +
     (daemon NER if up) + policy + the consistent per-session vault.
     Reused by every anonymise path.
@@ -255,7 +255,12 @@ def _engine(text_for_daemon: str = ""):
     FIX #257: structured_ext (deterministic FR état-civil FORM recognizers) is now
     always wired in as an extra_detector so it runs in the bubble_shield_read path
     even without the GLiNER daemon. It covers Nom/Prénom, Lieu de naissance, and
-    Pièce d'identité label-value lines that GLiNER misses in FORM layouts."""
+    Pièce d'identité label-value lines that GLiNER misses in FORM layouts.
+
+    FIX #280: filename_basename threads the file's basename into make_structured_detector()
+    so person-name tokens extracted from the filename (e.g. "DURAND Théophile" from
+    "DURAND Théophile - DER 012026.pdf") seed the doc-level repetition pass and catch
+    footer boilerplate leaks.  Empty string = no filename seeding (text-only calls)."""
     sys.path.insert(0, str(_vendor()))
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield import AnonymizationEngine, Vault
@@ -263,10 +268,11 @@ def _engine(text_for_daemon: str = ""):
     from bubble_shield import custom_recognizers as _cr
 
     # structured_ext: always-on deterministic FR KYC FORM safety net (daemon-independent)
+    # fix #280: pass filename_basename so footer/boilerplate name leak is seeded.
     detectors = []
     try:
         from bubble_shield.structured_ext import make_structured_detector
-        detectors.append(make_structured_detector())
+        detectors.append(make_structured_detector(filename_basename=filename_basename))
     except Exception:
         pass  # fail-open: if import fails, continue without it
 
@@ -334,13 +340,21 @@ def _guard_check(value: str, kind: str, confirm: bool = False) -> dict:
         return {"ok": False, "reason": f"guard error: {e}"}
 
 
-def _anonymise_text(text: str) -> str:
+def _anonymise_text(text: str, filename_basename: str = "") -> str:
     """Anonymise a block of text. Used by bubble_shield_anonymize_text and bubble_shield_read.
 
     When the NER daemon is down the output is REGEX-ONLY — free-text PII such as
     names, birthplace, ID numbers may not be caught. A loud degraded-mode warning
-    is prepended to the result so the agent and user know protection is partial."""
-    engine, vpath, daemon_up = _engine(text)
+    is prepended to the result so the agent and user know protection is partial.
+
+    fix #280 — filename_basename parameter:
+    When provided (always set by _anonymise_file), the structured_ext detector is
+    rebuilt with that basename so person-name tokens from the filename are seeded
+    into the doc-level repetition pass.  This masks the footer boilerplate
+    "...complémentaire au document DURAND Théophile" that contains the client name
+    as a quoted filename fragment with no recognizable label context.
+    """
+    engine, vpath, daemon_up = _engine(text, filename_basename=filename_basename)
     res = engine.anonymize(text)
     engine.vault.save(str(vpath))
     # Degraded-mode warning: prepend when NER daemon is offline (regex-only).
@@ -353,14 +367,23 @@ def _anonymise_text(text: str) -> str:
 
 
 def _anonymise_file(path: str) -> str:
-    """Extract + anonymise a file. Raises on failure (fail-closed)."""
+    """Extract + anonymise a file. Raises on failure (fail-closed).
+
+    fix #280: threads the file basename into the anonymisation engine so that
+    person-name tokens extracted from the filename (e.g. "DURAND Théophile" from
+    "DURAND Théophile - DER 012026.pdf") are seeded into the doc-level repetition
+    pass.  This catches the footer boilerplate leak:
+      "Page de signatures complémentaire au document DURAND Théophile - DER 012026..."
+    which contains the client's name verbatim but has no label for any content
+    recognizer to anchor on.
+    """
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield_extract import extract_file          # PDF/docx/text → text
     p = Path(os.path.expanduser(path)).resolve()
     if not p.is_file():
         raise FileNotFoundError(f"no such file: {p}")
     text = extract_file(p)                            # fail-closed on scanned PDFs
-    return _anonymise_text(text)
+    return _anonymise_text(text, filename_basename=p.name)
 
 
 def _deanonymise_to_file(path: str, content: str) -> dict:

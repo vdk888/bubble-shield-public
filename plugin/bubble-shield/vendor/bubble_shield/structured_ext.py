@@ -1,6 +1,51 @@
 """
 structured_ext.py — deterministic recognizers for FR-KYC FORM layouts.
 
+fix #280 (2026-06-24 rev 3): close self-corroboration loop — exclude footer NOMs from
+  corroboration pool.
+  SELF-CORROBORATION BUG (proven rev2→rev3): Layer 1 filename_footer_matches() emits a
+  footer NOM for every filename token (incl. brand/insurer names like ZEPHYRA that sit
+  in the "au document <filename>" quote). Layer 2 doc_level_person_repetition_matches()
+  was building its corroboration pool nom_detected_words from the SAME `found` list —
+  which already contains those Layer-1 footer NOMs. So any filename token in the footer
+  self-corroborated → seeded body-wide → over-masked.
+  PROOF: "ZEPHYRA DUPONT - DER.pdf", body mentions ZEPHYRA (insurer) → ZEPHYRA was
+  masked body-wide. PREDICA passed rev2 ONLY because it's on the stop-list (false pass).
+  FIX: filename_footer_matches() now returns (matches, footer_nom_spans) where
+  footer_nom_spans is a frozenset of (start, end) tuples. The _detector passes
+  footer_nom_spans to doc_level_person_repetition_matches() which EXCLUDES those spans
+  from nom_detected_words. Only independent body-recognizer NOMs (civility, form-label,
+  signataire) can corroborate. Footer-only names still mask via Layer 1 positional.
+
+fix #280 (2026-06-24 rev 2): filename-seeded masking for footer/boilerplate name leak.
+  "Page de signatures complémentaire au document DURAND Théophile - DER 012026..."
+  The client's name appears verbatim in the footer boilerplate as a quoted filename.
+  No content recognizer catches this (no label, no civic-context).
+
+  REVISED FIX (over-mask ship-blockers closed):
+  The original approach seeded ALL non-stop-list filename tokens body-wide. This was
+  INHERENTLY INCOMPLETE — "PREDICA DUPONT.pdf" seeded PREDICA, over-masking the
+  insurer name everywhere in the doc body.
+
+  Two-layer replacement:
+    Layer 1 — POSITIONAL footer masking (filename_footer_matches):
+      Directly matches the footer boilerplate pattern
+      "au document <name-fragment>" and emits NOM matches RIGHT THERE.
+      Covers the pure-footer case (D1: name only in footer, no body occurrence)
+      without seeding anything body-wide.
+    Layer 2 — CORROBORATED body-wide seeding:
+      A filename candidate token is promoted to a body-wide repetition seed ONLY
+      when it is corroborated — i.e., it already appears in a NOM match detected
+      by another recognizer (civility, form-label, signataire, etc.) elsewhere.
+      Footer NOMs from Layer 1 are EXCLUDED from the corroboration pool (rev3 fix).
+      "DUPONT" in "M. DUPONT" → NOM detected → corroborated → body-wide seed.
+      "PREDICA" / "ZEPHYRA" → footer NOM only, not independent → NOT seeded.
+
+  Belt-and-suspenders: the stop-list is extended with previously missing insurer/
+  brand tokens (PREDICA, HELVETIA, PREVOIR, ARIAL, AG2R, ALLIANZ, MONCEAU, CNP,
+  SEQUOIA, BOURSE, FINAL, LIASSE, FISCALE, SELARL, etc.) so even if corroboration
+  ever misfires, those words don't seed. But the corroboration rule is the real fix.
+
 Why this exists (validated 2026-06-01): in real CGP KYC PDFs the data is a
 detached form — labels in one block, values in another. Two identifying fields
 survive there as strong POSITIONAL patterns that the context-sensitive GLiNER
@@ -36,7 +81,7 @@ match win.
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
 from bubble_shield.recognizers import Match
 
@@ -631,7 +676,7 @@ def doc_level_repetition_matches(text: str, found: List[Match]) -> List[Match]:
     return extra
 
 
-def make_structured_detector():
+def make_structured_detector(filename_basename: str = ""):
     """Return the combined deterministic form-layout detector callable.
 
     Covers (fail-open, ADD-only, daemon-independent):
@@ -653,7 +698,27 @@ def make_structured_detector():
       - Note: "Né(e) le : DD/MM/YYYY" DOB masking is handled by the core
         DATE_NAISSANCE recognizer in recognizers.py (fix #257-b).
       - Note: Full 14-digit SIRET masking is in the core SIRET recognizer (#259).
+
+    fix #280 rev 2 — filename_basename parameter (corroboration + positional):
+      When provided, two mechanisms work together:
+      Layer 1 (positional): filename_footer_matches() directly emits NOM for
+        the name tokens where they appear in footer boilerplate ("au document …").
+        This handles the pure-footer case without body-wide seeding.
+      Layer 2 (corroborated body-wide): doc_level_person_repetition_matches()
+        promotes a filename candidate token to a body-wide seed ONLY if that token
+        is also present in an existing NOM match (from civility/form/signataire/
+        or the footer NOM from Layer 1). Prevents insurer/brand names from seeding.
     """
+    # fix #280 rev 2: extract filename person candidates once at creation time.
+    _filename_seeds: Optional[List[str]] = None
+    if filename_basename:
+        try:
+            tokens = extract_person_tokens_from_filename(filename_basename)
+            if tokens:
+                _filename_seeds = tokens
+        except Exception:
+            pass  # fail-open: if extraction fails, proceed without filename seeds
+
     def _detector(text: str) -> List[Match]:
         matches: List[Match] = []
         try:
@@ -697,11 +762,29 @@ def make_structured_detector():
             matches += signataire_matches(text)
         except Exception:
             pass
-        # ── fix #266: doc-level person-name repetition post-pass ─────────────
-        # Must run LAST — after all primary detectors AND the #264 repetition
-        # pass so it has full RAISON_SOCIALE + NOM context to derive seeds from.
+        # ── fix #280 rev 2 Layer 1: positional footer masking ────────────────
+        # Emits NOM matches for filename name-tokens exactly where they appear in
+        # footer boilerplate ("au document …"). Must run BEFORE the repetition
+        # pass so independent body NOMs (not footer NOMs) can corroborate Layer 2.
+        # fix #280 rev3: capture footer_nom_spans to exclude from corroboration pool.
+        _footer_nom_spans: frozenset = frozenset()
+        if _filename_seeds:
+            try:
+                _footer_matches, _footer_nom_spans = filename_footer_matches(
+                    text, _filename_seeds)
+                matches += _footer_matches
+            except Exception:
+                pass
+        # ── fix #266+#280 rev 2+3 Layer 2: corroborated body-wide repetition ─
+        # Must run LAST — after all primary detectors AND both post-passes above
+        # so it has full RAISON_SOCIALE + NOM context to corroborate against.
+        # fix #280 rev3: pass footer_nom_spans so footer-only NOMs are excluded
+        # from the corroboration pool — preventing self-corroboration.
         try:
-            matches += doc_level_person_repetition_matches(text, matches)
+            matches += doc_level_person_repetition_matches(
+                text, matches,
+                filename_seeds=_filename_seeds,
+                footer_nom_spans=_footer_nom_spans)
         except Exception:
             pass
         return matches
@@ -719,17 +802,57 @@ _RAISON_SOCIALE_PREFIXES: frozenset = frozenset({
 })
 
 _COMMON_FRENCH_SURNAMES: frozenset = frozenset({
-    "MARTIN", "BERNARD", "THOMAS", "PETIT", "ROBERT", "RICHARD",
-    "DURAND", "DUBOIS", "MOREAU", "LAURENT", "SIMON", "MICHEL",
-    "LEFEBVRE", "LEFEVRE", "LEROY", "ROUX", "DAVID", "BERTRAND",
-    "MOREL", "FOURNIER", "GIRARD", "BONNET", "DUPONT", "LAMBERT",
-    "FONTAINE", "ROUSSEAU", "VINCENT", "MULLER", "LECOMTE", "BLANC",
-    "GRAY", "GRIS", "LEGRAND", "GRAND", "BRUN", "LEBRUN", "LENOIR",
-    "ROI", "PAGE", "SAGE", "LION", "ROSE", "VIOLET", "BOIS",
-    "PIERRE", "PAUL", "ANDRE", "CLAUDE", "MARIE", "ANNE", "JEAN",
-    "NICOLAS", "MARC", "LUC", "PASCAL", "ERIC", "ALAIN",
-    "NORD", "SUD", "EST", "OUEST", "FRANCE", "PARIS",
-    "NOIR", "ROUGE", "VERT", "BLEU",
+    # ── Top INSEE common French surnames (alphabetised, ~190 entries) ──────────
+    # Source: INSEE patronymes; purpose: prevent lone-token loose passes from
+    # over-masking these surnames when they appear as ordinary words in prose.
+    # KEY SAFETY NOTE: this list only suppresses the LOOSE/lone-token passes.
+    # A client surname that happens to be common (e.g. "MARTIN") is STILL masked
+    # via the standard labeled/pair detection — the exclusion only blocks the
+    # speculative lone-token repetition pass, not known-client detection.
+    # (#267 expansion: added GARCIA, NGUYEN, PEREZ, LECLERC, CHEVALIER,
+    #  FERNANDEZ, GONZALEZ, MARTINEZ, and ~120 more entries.)
+    "ADAM", "ALBERT", "ALLARD", "ALMEIDA", "ANDRE", "ARNAUD",
+    "AUBRY", "AUGER", "AUMONT", "AUBERT",
+    "BARBIER", "BARON", "BAUDOIN", "BAZIN", "BERGER", "BERNARD",
+    "BERTRAND", "BLANCHARD", "BLANC", "BLANCHET", "BLONDEL", "BODIN",
+    "BOIS", "BONNET", "BOUCHARD", "BOUCHER", "BOULANGER", "BOURGEOIS",
+    "BOYER", "BRUN", "BRUNEAU",
+    "CARON", "CARPENTIER", "CHARLES", "CHARPENTIER", "CHEVALIER",
+    "CLEMENT", "COLIN", "COLLIN",
+    "DAVID", "DENIS", "DIALLO", "DUBOIS", "DUFOUR", "DUMAS",
+    "DUMONT", "DUPONT", "DUPUIS", "DURAND",
+    "FABRE", "FERNANDEZ", "FONTAINE", "FOURNIER", "FRANCOIS",
+    "GARCIA", "GARNIER", "GAUTHIER", "GAUTIER", "GERARD", "GIRARD",
+    "GIRAUD", "GONCALVES", "GONZALEZ", "GRANGE", "GROS", "GUERREIRO",
+    "GUERIN", "GUICHARD", "GUILLAUME", "GUILLOT", "GUILLON",
+    "HENRY", "HERVE", "HUMBERT",
+    "JACQUET", "JEANNIN", "JOLY", "JOUBERT",
+    "KLEIN",
+    "LACROIX", "LAINE", "LAMBERT", "LANGLOIS", "LAPORTE", "LAVAL",
+    "LAURENT", "LEBLANC", "LEBRUN", "LECLERC", "LECOMTE",
+    "LEFEBVRE", "LEFEVRE", "LEGRAND", "LEMAIRE", "LEMOINE",
+    "LENOIR", "LEROY", "LESAGE", "LESTRADE", "LEVY", "LION", "LOPEZ",
+    "MARECHAL", "MARIE", "MARTEAU", "MARTIN", "MARTINEZ", "MATHIEU",
+    "MAUREL", "MEUNIER", "MEYER", "MICHEL", "MOLINA", "MOREAU",
+    "MOREL", "MORIN", "MOULIN", "MOUNIER", "MULLER",
+    "NGUYEN", "NICOLAS", "NOEL",
+    "OLIVIER",
+    "PAGES", "PARENT", "PASCAL", "PELLETIER", "PEREZ", "PERRIN",
+    "PETIT", "PICARD", "PICHON", "PIERRE", "PREVOST", "PRUNIER",
+    "RENARD", "RENAUD", "RENAULT", "RICHARD", "RIVIERE", "ROBERT",
+    "RODRIGUEZ", "ROLLAND", "ROUSSEAU", "ROUSSEL", "ROUX",
+    "SALAZAR", "SANCHEZ", "SANTIAGO", "SCHMITT", "SCHNEIDER", "SIMON",
+    "THOMAS", "TORRES", "TREMBLAY",
+    "VALLET", "VASSEUR", "VIDAL", "VINCENT",
+    "WEBER",
+    # ── Colour/direction/geography words also used as surnames ─────────────────
+    "BLEU", "BRUN", "GRIS", "GRAY", "NOIR", "ROUGE", "VERT", "VIOLET",
+    "NORD", "SUD", "EST", "OUEST",
+    "FRANCE", "PARIS",
+    # ── Forenames frequently doubled as surnames ───────────────────────────────
+    "ALAIN", "ANNE", "CLAUDE", "ERIC", "JEAN", "LUC", "MARC", "PAUL",
+    # ── Short/ambiguous entries retained from original list ────────────────────
+    "GRAND", "LEBRUN", "LEGRAND", "PAGE", "ROI", "ROSE", "SAGE",
 })
 
 # Common French forenames (len >= 6) that are also word-prefixes in French —
@@ -751,7 +874,7 @@ _COMMON_FRENCH_FORENAMES: frozenset = frozenset({
     "NICOLAS", "STEPHANE", "FLORENCE", "VIRGINIE", "LAURENCE",
     "BERTRAND", "CHRISTOPHE", "ALEXANDRE", "GUILLAUME",
     # ── 9-letter ──────────────────────────────────────────────────────────────
-    "SEBASTIEN", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
+    "THEOPHILE", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
     "CHRISTELLE", "FRANCOISE", "GENEVIEVE", "JACQUELINE",
     # ── 10+ letter ────────────────────────────────────────────────────────────
     "CHRISTOPHE", "CHRISTELLE", "MAXIMILIANE",
@@ -788,6 +911,239 @@ _COMMON_FRENCH_FORENAMES: frozenset = frozenset({
 _PERSON_TOKEN_MIN_LEN = 4
 
 
+# ── FILENAME PERSON-NAME EXTRACTION (fix #280) ───────────────────────────────
+#
+# CGP filenames embed the client's name:
+#   "DURAND Théophile - DER 012026 - 2026-02-18.pdf"
+#   "TESTONI Prénomtest - Convention RTO - signé.pdf"
+#
+# We strip doc-type/product/date tokens and return the residual person-name tokens.
+# These are used as HIGH-CONFIDENCE seeds (bypass_common_surname_guard=True) in
+# doc_level_person_repetition_matches() so every occurrence in body AND footer masks.
+#
+# STOP-LIST design:
+#   - CGP product / document-type words (DER, RTO, DCC, DA, SCPI, CIF, etc.)
+#   - File-state suffixes (signé, rempli, extrait, original, copie, etc.)
+#   - Firm/product names (GEFINEO, CORUM, EURION, PRIMONIAL, etc.)
+#   - Common legal/structural words that appear in filenames but aren't names
+#   - Date patterns are stripped separately by regex (not needed in set)
+#
+# Precision: we only strip tokens that are IN the stop-list.  Unknown all-caps tokens
+# (the actual client surname) are kept and become seeds.
+# Company-only filenames ("SELARL … .pdf") yield no seeds here — the RAISON_SOCIALE
+# path already handles them.
+
+_FILENAME_STOP_TOKENS: frozenset = frozenset({
+    # ── Document type words ───────────────────────────────────────────────────
+    "DER", "RTO", "DCC", "DA", "CIF", "LM", "PP", "PROFIL",
+    "CONVENTION", "CONTRAT", "AVENANT", "ANNEXE", "MANDAT",
+    "LETTRE", "FICHE", "FORMULAIRE", "DOCUMENT", "DOSSIER",
+    "ATTESTATION", "RAPPORT", "SYNTHESE", "SYNTHÈSE", "BILAN",
+    "NOTE", "NOTICE", "DEVIS", "PROPOSITION", "OFFRE",
+    "QUESTIONNAIRE", "DECLARATION", "DÉCLARATION", "COMPTE", "RENDU",
+    "RECAPITULATIF", "RÉCAPITULATIF", "RELEVE", "RELEVÉ",
+    # ── File-state / workflow suffixes ────────────────────────────────────────
+    "SIGNE", "SIGNÉ", "REMPLI", "EXTRAIT", "ORIGINAL", "COPIE",
+    "VALIDE", "VALIDÉ", "DEFINITIF", "DÉFINITIF", "ARCHIVE", "ARCHIVÉ",
+    "DRAFT", "BROUILLON", "VERSION", "REV", "V1", "V2", "V3",
+    # Reviewer BUG 3 + general
+    "FINAL", "FINALE",
+    # ── Firm / distributor / product names (non-exhaustive but common in CGP) ─
+    "GEFINEO", "CORUM", "EURION", "PRIMONIAL", "SPIRICA", "CARDIF",
+    "GENERALI", "AVIVA", "SWISS", "LIFE", "AFER", "CARAC", "MAIF",
+    "APICIL", "SURAVENIR", "LINXEA", "FORTUNEO", "BOURSORAMA",
+    "EPARGNISSIMO", "NALO", "YOMONI", "GRISBEE",
+    # Reviewer BUG 1 — major FR insurers missing from original stop-list
+    "PREDICA", "HELVETIA", "PREVOIR", "ARIAL", "AG2R", "ALLIANZ",
+    "MONCEAU", "CNP", "SEQUOIA",
+    # Other major FR insurers (belt-and-suspenders)
+    "ABEILLE", "AXA", "ALLIANZ", "AVIVA", "BNP", "CREDIT", "AGRICOLE",
+    "NATIXIS", "SOGECAP", "UNÉO", "UNEO", "MNPAF", "MUTAVIE", "GROUPAMA",
+    "INTERÉPARGNISSIMO",
+    # ── Financial product / category words ───────────────────────────────────
+    "SCPI", "PERCO", "PERP", "PER", "PEA", "PERI", "PEROB", "PERECO",
+    "ASSURANCE", "VIE", "RETRAITE", "CAPITALISATION", "PLACEMENT",
+    "INVESTISSEMENT", "EPARGNE", "ÉPARGNE", "IMMOBILIER", "FONCIER",
+    "PATRIMOINE", "GESTION", "PILOTEE", "PILOTÉE", "LIBRE",
+    # Reviewer BUG 2 — BOURSE missing
+    "BOURSE",
+    # Reviewer BUG 4 — LIASSE / FISCALE missing
+    "LIASSE", "FISCALE",
+    # ── Legal / structural words ──────────────────────────────────────────────
+    "PERSO", "CONJOINT", "CLIENT", "CLIENTS", "PROSPECT", "CONSEILLER",
+    "CABINET", "ETUDE", "GROUPE", "SOCIETE", "SOCIÉTÉ",
+    # ── Date/reference words that appear as filename segments ─────────────────
+    "DATE", "REF", "REFERENCE", "RÉFÉRENCE", "NUM", "NUMERO", "NUMÉRO",
+    # ── Pure numbers / short codes (these are stripped by regex; listed for safety) ─
+    "PDF", "DOCX", "DOC", "XLSX",
+})
+
+# Date patterns to strip from filename tokens before name extraction.
+# Matches: "012026", "2026", "012026", "2026-02-18", "18022026", etc.
+_FILENAME_DATE_RE = re.compile(
+    r"^\d{4,8}$"                    # pure numeric: months+year combos, years
+    r"|^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$"   # DD/MM/YYYY or variants
+    r"|^\d{4}[.\-]\d{2}[.\-]\d{2}$"            # YYYY-MM-DD
+)
+
+# Single-char tokens and pure-digit tokens are never names.
+_FILENAME_TOKEN_MIN_LEN = 2
+
+
+def extract_person_tokens_from_filename(basename: str) -> List[str]:
+    """Extract person-name tokens from a CGP document filename (fix #280).
+
+    Given "DURAND Théophile - DER 012026 - 2026-02-18.pdf", returns
+    ["DURAND", "THEOPHILE"] (normalised to upper-case).
+
+    Algorithm:
+      1. Strip extension.
+      2. Tokenise on spaces, hyphens, underscores, dots.
+      3. Discard tokens that match:
+           - _FILENAME_DATE_RE (date/year patterns)
+           - _FILENAME_STOP_TOKENS (doc-type/product/firm words)
+           - _RAISON_SOCIALE_PREFIXES (forme-juridique type words)
+           - _FORME_JURIDIQUE_SET (SELARL, SAS, etc.)
+           - Pure digits or tokens shorter than _FILENAME_TOKEN_MIN_LEN
+      4. What remains: person-name tokens (surname and/or forename).
+      5. Returns them normalised to upper-case NFC.
+
+    Precision contract:
+      - If all residual tokens are company-type words (SELARL, etc.), returns [].
+        Company-only filenames are handled by the RAISON_SOCIALE path; no person seeds.
+      - Tokens that are common French words but NOT in the stop-list are kept —
+        they're bypassed by the RAISON_SOCIALE-style bypass_common_surname_guard=True
+        in the call site so even common surnames in filenames are seeded.
+    """
+    import unicodedata
+
+    def _norm(s: str) -> str:
+        """NFD → strip combining accents → NFC upper-case."""
+        # We normalise accents for stop-list comparison but keep the original
+        # accentuated form so token matching against the document text works.
+        return unicodedata.normalize("NFC", s.upper())
+
+    # Strip extension
+    stem = re.sub(r"\.[a-zA-Z0-9]{2,5}$", "", basename)
+
+    # Tokenise: split on whitespace, hyphens, underscores, dots
+    raw_tokens = re.split(r"[\s\-_./]+", stem)
+
+    person_tokens: List[str] = []
+    for tok in raw_tokens:
+        if not tok:
+            continue
+        tok_norm = _norm(tok)
+        # Skip short tokens
+        if len(tok_norm) < _FILENAME_TOKEN_MIN_LEN:
+            continue
+        # Skip pure-digit tokens (numbers, phone, reference codes)
+        if re.match(r"^\d+$", tok_norm):
+            continue
+        # Skip date patterns
+        if _FILENAME_DATE_RE.match(tok_norm):
+            continue
+        # Skip stop-list tokens (exact match after normalisation)
+        if tok_norm in _FILENAME_STOP_TOKENS:
+            continue
+        # Skip forme-juridique / RAISON_SOCIALE prefix words (company names, not persons)
+        if tok_norm in _FORME_JURIDIQUE_SET or tok_norm in _RAISON_SOCIALE_PREFIXES:
+            continue
+        # Keep this token as a person-name candidate
+        person_tokens.append(tok_norm)
+
+    return person_tokens
+
+
+# ── POSITIONAL FOOTER MATCHING (fix #280 rev 2) ─────────────────────────────
+#
+# CGP footer boilerplate quotes the filename directly:
+#   "Page de signatures complémentaire au document TESTONI Prénomtest - DER 012026"
+#   "au fichier DURAND Théophile - Convention RTO - signé"
+#
+# This pass emits NOM matches for the person-name TOKENS right where they appear
+# in that boilerplate — WITHOUT seeding those tokens body-wide. This cleanly
+# covers the pure-footer case (name appears ONLY in the footer, no body occurrence)
+# without risk of over-masking product/insurer names that happen to share the
+# filename slot.
+#
+# Pattern: "au document" or "au fichier" followed by text. We re-run the
+# candidate extraction on that fragment and emit NOM for each candidate token
+# found there. We DON'T seed those tokens globally — the corroboration layer
+# handles body-wide repetitions.
+#
+# Why this is safe for PREDICA DUPONT.pdf:
+#   Footer "au document PREDICA DUPONT" → PREDICA and DUPONT both appear as footer
+#   NOM matches. This correctly masks the footer reference.  But PREDICA is NOT
+#   corroborated elsewhere (no NOM detection in the body), so it is NOT seeded
+#   body-wide. Body occurrences of "PREDICA" (insurer name in content) are untouched.
+
+_FOOTER_QUOTE_RE = re.compile(
+    r"(?:au\s+(?:document|fichier)|Page\s+de\s+signatures?\s+compl[eé]mentaire\s+au\s+(?:document|fichier))"
+    r"\s+(?P<fragment>[^\n]{3,120})",
+    re.IGNORECASE,
+)
+
+
+def filename_footer_matches(
+        text: str,
+        filename_candidates: List[str],
+) -> "tuple[List[Match], frozenset]":
+    """Emit NOM matches for person-name tokens from the filename where they appear
+    in footer boilerplate ("au document <fragment>").
+
+    This is the positional layer of the #280 fix: it covers the case where the
+    client's name appears ONLY in the footer (not anywhere else in the body), so
+    no corroboration signal is available yet. The footer quote IS the evidence.
+
+    Does NOT seed tokens globally — no body-wide over-mask risk.
+
+    Returns (matches, footer_nom_spans) where footer_nom_spans is a frozenset of
+    (start, end) tuples covering every NOM match emitted here.
+
+    fix #280 rev3 — self-corroboration fix:
+    The caller MUST pass footer_nom_spans to doc_level_person_repetition_matches()
+    via the footer_nom_spans parameter so those footer-only NOMs are EXCLUDED from
+    the corroboration pool (nom_detected_words). Without this exclusion, every
+    filename token appearing in the footer self-corroborates → body-wide over-mask.
+    """
+    if not filename_candidates:
+        return [], frozenset()
+
+    out: List[Match] = []
+    # Build case-insensitive patterns for each candidate token
+    cand_patterns = [
+        (tok, re.compile(r"(?<![A-Za-z\xc0-\xff])" + re.escape(tok) + r"(?![A-Za-z\xc0-\xff])", re.IGNORECASE | re.UNICODE))
+        for tok in filename_candidates
+        if len(tok) >= _FILENAME_TOKEN_MIN_LEN
+    ]
+    if not cand_patterns:
+        return [], frozenset()
+
+    seen_spans: set = set()
+    for footer_m in _FOOTER_QUOTE_RE.finditer(text):
+        frag_start = footer_m.start("fragment")
+        frag_text = footer_m.group("fragment")
+        for tok, pat in cand_patterns:
+            for tok_m in pat.finditer(frag_text):
+                start = frag_start + tok_m.start()
+                end = frag_start + tok_m.end()
+                span = (start, end)
+                if span in seen_spans:
+                    continue
+                seen_spans.add(span)
+                out.append(Match(
+                    start=start, end=end,
+                    entity_type="NOM",
+                    value=text[start:end],
+                    score=0.87, priority=58,
+                ))
+    # Return both the match list and the frozenset of footer-sourced spans.
+    # Caller passes this to doc_level_person_repetition_matches() (fix #280 rev3).
+    footer_nom_spans = frozenset((m.start, m.end) for m in out)
+    return out, footer_nom_spans
+
+
 def extract_person_name_from_raison_sociale(company_name: str) -> List[str]:
     """Extract personal name tokens from a company name (fix #266).
 
@@ -801,11 +1157,19 @@ def extract_person_name_from_raison_sociale(company_name: str) -> List[str]:
     return tokens
 
 
-def _person_name_seeds(tokens: List[str]) -> List[str]:
+def _person_name_seeds(tokens: List[str],
+                       bypass_common_surname_guard: bool = False) -> List[str]:
     """Return seed strings for the doc-level person-name repetition pass (fix #266).
 
     Includes the full PAIR (both orderings) when >=2 tokens.
     Includes a lone token only if it is NOT a common word and has length >= _PERSON_TOKEN_MIN_LEN.
+
+    bypass_common_surname_guard (fix #267-v2 recall regression):
+      When True, the _COMMON_FRENCH_SURNAMES exclusion is NOT applied to lone-token
+      seeds.  Use this for RAISON_SOCIALE-derived tokens — the company match already
+      confirms the token IS the client's name, so the "common word in prose" concern
+      does not apply.  The guard is still applied on the unanchored prose-repetition /
+      NOM path (where a common surname might genuinely be an ordinary word).
     """
     seeds: List[str] = []
     if not tokens:
@@ -817,8 +1181,10 @@ def _person_name_seeds(tokens: List[str]) -> List[str]:
         if pair_ba != pair_ab:
             seeds.append(pair_ba)
     for tok in tokens:
+        surname_ok = (bypass_common_surname_guard
+                      or tok.upper() not in _COMMON_FRENCH_SURNAMES)
         if (len(tok) >= _PERSON_TOKEN_MIN_LEN
-                and tok.upper() not in _COMMON_FRENCH_SURNAMES
+                and surname_ok
                 and tok.upper() not in _RAISON_SOCIALE_PREFIXES
                 and tok.upper() not in _FORME_JURIDIQUE_SET):
             seeds.append(tok)
@@ -889,7 +1255,12 @@ def signataire_matches(text: str) -> List[Match]:
     return out
 
 
-def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[Match]:
+def doc_level_person_repetition_matches(
+        text: str,
+        found: List[Match],
+        filename_seeds: Optional[List[str]] = None,
+        footer_nom_spans: Optional[frozenset] = None,
+) -> List[Match]:
     """Find all verbatim repetitions of the practitioner's personal name (fix #266).
 
     Derives person name from RAISON_SOCIALE matches (strips company prefix) and
@@ -929,8 +1300,35 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
     loose right boundary never fires for "MARTIN", "PETIT", "DUBOIS", etc.
     The strict left boundary ``(?<![A-Za-z])`` prevents matching inside a longer
     word on the left (e.g. if some token ends with the seed letters).
+
+    fix #280 rev 2 — filename_seeds parameter + CORROBORATION:
+    Person-name tokens extracted from the file basename (e.g. ["DURAND", "THEOPHILE"])
+    are injected into the body-wide repetition pass ONLY when CORROBORATED — i.e. only
+    when the token also appears in an existing NOM match detected elsewhere in the
+    document by an INDEPENDENT body recognizer (civility, form-label, signataire, etc.).
+
+    WHY: the original approach seeded ALL filename tokens body-wide, causing over-mask
+    when insurer/product names (PREDICA, HELVETIA, etc.) appeared in the filename
+    before the client's name. "PREDICA DUPONT.pdf" → PREDICA was seeded → body-wide
+    PREDICA matches → every mention of the insurer was masked.
+
+    CORROBORATION rule: a filename candidate token T is promoted to a body-wide seed
+    only if T.upper() is a substring of some INDEPENDENT NOM match value in `found`
+    (i.e. a NOM whose span is NOT in footer_nom_spans).
+    Token DUPONT → "M. DUPONT" → independent NOM → corroborated → body-wide seed.
+    Token ZEPHYRA/PREDICA → footer NOM only (span excluded) → NOT corroborated → NOT seeded.
+
+    fix #280 rev 3 — footer_nom_spans parameter (self-corroboration fix):
+    The footer_nom_spans frozenset contains (start, end) tuples for every NOM emitted
+    by filename_footer_matches() (Layer 1). These MUST be EXCLUDED from the
+    corroboration pool. Without this exclusion, any filename token that appears in the
+    footer self-corroborates via its own Layer-1 NOM, defeating the entire guard:
+      "ZEPHYRA DUPONT - DER.pdf" → Layer 1 emits NOM("ZEPHYRA") at footer offset N
+      → Layer 2 sees ZEPHYRA in nom_detected_words (self-corroboration)
+      → ZEPHYRA seeded body-wide → insurer name masked throughout.
+    With footer_nom_spans excluded, only body recognizer NOMs (not footer NOMs) count.
     """
-    if not found:
+    if not found and not filename_seeds:
         return []
 
     # Track which seeds came from RAISON_SOCIALE derivation (fix #273: loose left
@@ -938,13 +1336,59 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
     seeds: set = set()
     raison_sociale_lone_seeds: set = set()   # lone tokens only (no space in seed)
 
+    # fix #280 rev 2+3: inject filename-derived person-name seeds — but ONLY for
+    # tokens that are corroborated by an INDEPENDENT body NOM detection in `found`.
+    # This prevents insurer/brand names (PREDICA, ZEPHYRA, etc.) from being
+    # seeded body-wide just because they appear in the filename footer.
+    #
+    # fix #280 rev3: EXCLUDE footer-sourced NOM spans from the corroboration pool.
+    # footer_nom_spans contains the (start, end) tuples of every NOM emitted by
+    # filename_footer_matches() (Layer 1). Without this exclusion, a filename token
+    # T that appears in the footer self-corroborates via its own Layer-1 NOM → over-mask.
+    _footer_spans: frozenset = footer_nom_spans if footer_nom_spans else frozenset()
+    if filename_seeds:
+        # Build a set of NOM value tokens already detected by INDEPENDENT (non-footer)
+        # recognizers (uppercased words). Footer-sourced NOMs are excluded.
+        nom_detected_words: set = set()
+        for m in found:
+            if m.entity_type == "NOM":
+                # Exclude footer-sourced NOMs from the corroboration pool (rev3 fix).
+                if (m.start, m.end) in _footer_spans:
+                    continue
+                for w in re.split(r"[\s\-'']", m.value.upper()):
+                    w = w.strip()
+                    if len(w) >= 3:
+                        nom_detected_words.add(w)
+
+        for cand in filename_seeds:
+            cand_upper = cand.upper()
+            # Corroboration: the candidate must appear in a NOM match word
+            # (exact match against words extracted from NOM values above).
+            # We also allow substring matching for accented variants:
+            # e.g. "PRÉNOMTEST" corroborated by NOM containing "PRENOMTEST".
+            corroborated = (
+                cand_upper in nom_detected_words
+                or any(cand_upper in w or w in cand_upper for w in nom_detected_words if len(w) >= 4)
+            )
+            if not corroborated:
+                continue  # skip: not independently confirmed as a name
+            for seed in _person_name_seeds([cand], bypass_common_surname_guard=True):
+                seeds.add(seed)
+                if " " not in seed and len(seed) >= 6:
+                    raison_sociale_lone_seeds.add(seed)
+
     for m in found:
         if m.entity_type == "RAISON_SOCIALE":
             c = _canonical_company_name(m.value)
             tokens = extract_person_name_from_raison_sociale(c)
             if not tokens:
                 continue
-            for seed in _person_name_seeds(tokens):
+            # fix #267-v2 recall regression: bypass _COMMON_FRENCH_SURNAMES guard
+            # for RAISON_SOCIALE-derived tokens.  The company match already anchors
+            # the token as the client's name — "common surname in prose" concern
+            # does NOT apply here.  An unanchored common surname in prose (no
+            # matching company) still uses the guard (NOM path below).
+            for seed in _person_name_seeds(tokens, bypass_common_surname_guard=True):
                 seeds.add(seed)
                 # A lone token seed has no space and comes from a known company name
                 # -> eligible for the glued-token loose-left-boundary pass (#273)
@@ -1010,7 +1454,7 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
         #      (CLAIRE→clairement, ANDREA→ANDREAssistant, JULIEN→julienne).
         #   2. Uppercase-next-char guard: only emit when the FOLLOWING char is
         #      UPPERCASE (CamelCase glue = real PDF artifact: "FAKENAMESignature",
-        #      "AMELSignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
+        #      "FAKENAMESignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
         #      "TESTONImania") is a legitimate French inflected word — never mask.
         right_glued_pattern = None
         if (seed in raison_sociale_lone_seeds
@@ -1057,7 +1501,7 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
         # fix #275 -- right-glued-token pass (mirror of #273): scan with the
         # loose-right pattern and emit only occurrences where the FOLLOWING char IS
         # an UPPERCASE letter — confirming a genuine CamelCase PDF-glue artifact
-        # (e.g. "FAKENAMESignature", "AMELSignature" — capital S).
+        # (e.g. "FAKENAMESignature", "FAKENAMESignature" — capital S).
         # A lowercase continuation ("CLAIREment", "ANTOINEtte", "TESTONImania")
         # signals a real inflected French word — never mask those.
         # (Ship-blocker fix #275 v2: uppercase-next-char guard.)
