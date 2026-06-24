@@ -732,6 +732,59 @@ _COMMON_FRENCH_SURNAMES: frozenset = frozenset({
     "NOIR", "ROUGE", "VERT", "BLEU",
 })
 
+# Common French forenames (len >= 6) that are also word-prefixes in French —
+# e.g. CLAIRE→"clairement", JULIEN→"julienne", ANTOINE→"antoinette",
+# ANDREA→"andréa" but also prefix of "ANDREAssistant"-like false collisions.
+# Seeds in this set do NOT get the right-glue (loose-right-boundary) pass
+# because the risk of over-masking a real French word prefix far outweighs the
+# benefit — the left-glue (#273) and standard pass still fire for these names.
+# (Same exclusion principle as _COMMON_FRENCH_SURNAMES for surname seeds.)
+_COMMON_FRENCH_FORENAMES: frozenset = frozenset({
+    # ── 6-letter forenames that are French word-prefixes ─────────────────────
+    "CLAIRE", "JULIEN", "ANDREA", "PIERRE", "MARTIN", "PASCAL",
+    "CLAUDE", "THIERRY", "PATRICE",
+    # ── 7-letter ──────────────────────────────────────────────────────────────
+    "ANTOINE", "MAXIME", "BRIGITTE", "VALERIE", "CECILE",
+    "SYLVIE", "SOPHIE", "AURELIE",
+    # ── 8-letter ──────────────────────────────────────────────────────────────
+    "ISABELLE", "NATHALIE", "SANDRINE", "CAROLINE", "FREDERIC",
+    "NICOLAS", "STEPHANE", "FLORENCE", "VIRGINIE", "LAURENCE",
+    "BERTRAND", "CHRISTOPHE", "ALEXANDRE", "GUILLAUME",
+    # ── 9-letter ──────────────────────────────────────────────────────────────
+    "SEBASTIEN", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
+    "CHRISTELLE", "FRANCOISE", "GENEVIEVE", "JACQUELINE",
+    # ── 10+ letter ────────────────────────────────────────────────────────────
+    "CHRISTOPHE", "CHRISTELLE", "MAXIMILIANE",
+    # ── Additional common forenames with known word-prefix collisions ─────────
+    "MARGUERITE", "CHARLOTTE", "VALENTINA", "ANGELIQUE",
+    "BENEDICTE", "CLEMENTINE", "JOSEPHINE", "MADELEINE",
+    "NATHANAEL", "RAFFAELE", "THEOPHILE",
+    # ── Forenames that are also adj/adv prefixes ──────────────────────────────
+    "CHRISTIAN", "CHRISTIANE", "CLEMENCE", "CLEMENT",
+    "AMANDINE", "ARMELLE", "ARNAUD",
+    "BEATRICE", "BLANCHE",
+    "DAMIEN", "DANIELA",
+    "EDOUARD", "ELOISE", "ELODIE",
+    "FABIENNE", "FABRICE",
+    "GILLES",
+    "HELENE", "HERVE",
+    "JEROME",
+    "LAETITIA", "LAURIE",
+    "LUDOVIC", "LUCIE",
+    "MARINE", "MARLENE", "MATHIEU", "MATTHIEU",
+    "MELANIE", "MELANIE",
+    "MONIQUE",
+    "OCEANE", "OLIVIER",
+    "PAULINE", "PHILIPPE",
+    "RAPHAEL", "RENAUD",
+    "SOLANGE", "SOLENE",
+    "THIBAULT", "THIBAUD",
+    "VALENTIN",
+    "XAVIER", "XIMENA",
+    "YANNICK", "YOANN",
+    "ZEPHYRIN",
+})
+
 _PERSON_TOKEN_MIN_LEN = 4
 
 
@@ -857,9 +910,25 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
     seeds keep the standard boundary (they are inherently longer / multi-token and
     the glue artifact only affects lone tokens).
 
+    fix #275 — glued-token right-boundary (mirror of #273):
+    The symmetric artifact: a known forename/surname is FOLLOWED by more letters
+    with no space, e.g. "FAKENAMESignature". The standard right boundary
+    ``(?![A-Za-z])`` fails because "S" IS a letter immediately after the seed.
+    Real output seen on liasse: "\u27e6NOM_0002\u27e7 <FORENAME>Signature" — the surname
+    was correctly masked, but the forename leaked because it was right-glued to the
+    next word by a PDF extraction artifact.
+
+    For the same raison_sociale_lone_seeds (KNOWN, length >= 6, not a common
+    surname), we also compile a right_glued_pattern with a loose RIGHT boundary
+    (no right-char restriction) but a strict LEFT boundary. We emit only when the
+    FOLLOWING char IS alphabetic — confirming a genuine right-glue artifact, not
+    a partial-word hit at the start of a longer token.
+
     Precision guard: lone-token seeds shorter than 6 chars or in
     _COMMON_FRENCH_SURNAMES are already excluded by _person_name_seeds(), so the
-    loose boundary never fires for "MARTIN", "PETIT", etc.
+    loose right boundary never fires for "MARTIN", "PETIT", "DUBOIS", etc.
+    The strict left boundary ``(?<![A-Za-z])`` prevents matching inside a longer
+    word on the left (e.g. if some token ends with the seed letters).
     """
     if not found:
         return []
@@ -878,7 +947,13 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
             for seed in _person_name_seeds(tokens):
                 seeds.add(seed)
                 # A lone token seed has no space and comes from a known company name
-                # -> eligible for the glued-token loose-left-boundary pass (#273).
+                # -> eligible for the glued-token loose-left-boundary pass (#273)
+                # AND the loose-right-boundary pass (#275).
+                # Fix #275 ship-blocker: exclude forenames from the right-glue pass —
+                # common French forenames (len>=6) are frequent word-prefixes in French
+                # (CLAIRE→clairement, JULIEN→julienne, ANDREA→ANDREAssistant) so the
+                # loose right boundary would over-mask legitimate French words.
+                # The left-glue (#273) and standard pass still fire for these seeds.
                 if " " not in seed and len(seed) >= 6:
                     raison_sociale_lone_seeds.add(seed)
 
@@ -924,6 +999,27 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
                 + r"(?![A-Za-z\xc0-\xff])",
                 re.UNICODE,
             )
+        # fix #275 -- loose-right-boundary pattern for RAISON_SOCIALE lone-token
+        # seeds (mirror of #273): the seed may be immediately followed by a letter
+        # with no space (right-glue artifact, e.g. "FAKENAMESignature").  The LEFT
+        # boundary stays strict so we don't match inside a longer token on the left.
+        #
+        # Ship-blocker guards (fix #275 v2):
+        #   1. Forename exclusion: seeds in _COMMON_FRENCH_FORENAMES do NOT get the
+        #      right-glue pass — forenames are common French word-prefixes
+        #      (CLAIRE→clairement, ANDREA→ANDREAssistant, JULIEN→julienne).
+        #   2. Uppercase-next-char guard: only emit when the FOLLOWING char is
+        #      UPPERCASE (CamelCase glue = real PDF artifact: "FAKENAMESignature",
+        #      "AMELSignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
+        #      "TESTONImania") is a legitimate French inflected word — never mask.
+        right_glued_pattern = None
+        if (seed in raison_sociale_lone_seeds
+                and seed.upper() not in _COMMON_FRENCH_FORENAMES):
+            right_glued_pattern = re.compile(
+                r"(?<![A-Za-z\xc0-\xff])"
+                + re.escape(seed),
+                re.UNICODE,
+            )
 
         def _collect(occ, _covered=covered, _extra=extra):
             span = (occ.start(), occ.end())
@@ -956,6 +1052,21 @@ def doc_level_person_repetition_matches(text: str, found: List[Match]) -> List[M
         if glued_pattern is not None:
             for occ in glued_pattern.finditer(text):
                 if occ.start() > 0 and re.match(r"[A-Za-z\xc0-\xff0-9]", text[occ.start() - 1]):
+                    _collect(occ)
+
+        # fix #275 -- right-glued-token pass (mirror of #273): scan with the
+        # loose-right pattern and emit only occurrences where the FOLLOWING char IS
+        # an UPPERCASE letter — confirming a genuine CamelCase PDF-glue artifact
+        # (e.g. "FAKENAMESignature", "AMELSignature" — capital S).
+        # A lowercase continuation ("CLAIREment", "ANTOINEtte", "TESTONImania")
+        # signals a real inflected French word — never mask those.
+        # (Ship-blocker fix #275 v2: uppercase-next-char guard.)
+        # The covered set is already updated by the standard + left-glue passes above,
+        # so spans already found are automatically skipped by _collect().
+        if right_glued_pattern is not None:
+            for occ in right_glued_pattern.finditer(text):
+                end = occ.end()
+                if end < len(text) and re.match(r"[A-Z\xc0-\xd6\xd8-\xde]", text[end]):
                     _collect(occ)
 
     return extra

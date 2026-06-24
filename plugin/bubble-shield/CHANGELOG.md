@@ -5,6 +5,100 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.16.3 — 2026-06-24 (fix #275: right-glued forename leak — mirror of #273)
+
+### Ship-blockers fixed (v2 — over-mask guards, 2026-06-24)
+
+Two over-masking regressions found in PR review. Both fixed in the same version
+(no version bump — SAME 1.16.3, hotfixed before merge):
+
+**Ship-blocker 1 — Forename over-mask** (ANDREA→ANDREAssistant, CLAIRE→CLAIREment):
+- Root cause: common French forenames (len≥6) are frequent word-prefixes in French.
+  The right-glue pass would fire for ANDREA in "ANDREAssistant" (next char 'A' = letter),
+  masking the legitimate French word instead of just the client name.
+- Fix: added `_COMMON_FRENCH_FORENAMES` exclusion set (~80 entries: CLAIRE, JULIEN,
+  ANTOINE, ANDREA, ISABELLE, NATHALIE, SANDRINE, CAROLINE, CHRISTELLE, SEBASTIEN,
+  FREDERIC, NICOLAS, STEPHANE, CATHERINE, VERONIQUE, DOMINIQUE, EMMANUEL, GUILLAUME,
+  etc.). Seeds in this set do NOT get the right-glue pass. Standard + left-glue (#273)
+  passes still fire for these seeds (they're still masked when isolated or left-glued).
+
+**Ship-blocker 2 — Seed-prefix-of-longer-word** (TESTONImania, TESTONIal):
+- Root cause: the right-glue check fired for ANY following alphabetic char, including
+  lowercase continuations that form a single inflected French word (TESTONImania,
+  CLAIREment, ANTOINEtte, JULIENne).
+- Fix: the right-glue pass now only fires when the FOLLOWING char is UPPERCASE
+  (`[A-Z\xc0-\xd6\xd8-\xde]`). CamelCase = PDF extraction glue artifact
+  ("FAKENAMESignature", "AMELSignature" — capital S). Lowercase continuation =
+  inflected French word — never mask.
+- `structured_ext.py` line: `re.match(r"[A-Z\xc0-\xd6\xd8-\xde]", text[end])`.
+
+**Both guards combined:** forename exclusion + uppercase-next-char.
+
+**Verified still masks (real artifact):** "FAKENAMESignature" (F, not a forename),
+"TESTONIDocument" (uppercase D), "AMELSignature" (AMEL len=4 < 6, still masked by
+standard pass anyway). "ANDREA DUPONT" pair still masked via standard pair-seed pass.
+
+**Verified does NOT mask (ship-blockers):** "ANDREAssistant" (ANDREA in forenames),
+"CLAIREment" (CLAIRE in forenames + lowercase), "JULIENne" (JULIEN in forenames),
+"ANTOINEtte" (ANTOINE in forenames), "TESTONImania" (lowercase 'm' next).
+
+### Bug fixed (v1) — FORENAME LEAK when right-glued to following word by PDF extraction artifact (risk:HIGH)
+
+- **Root cause:** the mirror of #273. PDF text extraction omits the space between
+  a known forename/surname ("FAKENAME") and the FOLLOWING word ("Signature"),
+  producing "FAKENAMESignature" with no whitespace. The standard right word-boundary
+  check `(?![A-Za-z])` fails because "S" IS a letter immediately after the seed, so
+  the known forename stayed in clear — the surname was already masked as a separate
+  token. Real output observed: `⟦NOM_0002⟧ FAKENAMESignature`.
+
+### Fix — Option B (detection fix) — `structured_ext.py` `doc_level_person_repetition_matches`
+
+- For RAISON_SOCIALE-derived lone-token seeds (len >= 6, not a common surname AND
+  not a common French forename), compile a `right_glued_pattern` with a loose RIGHT
+  boundary but a strict LEFT boundary `(?<![A-Za-z\xc0-\xff])`.
+- After the standard word-boundary + left-glue (#273) scans, run the right-glue
+  pattern and emit any occurrence whose FOLLOWING character IS an UPPERCASE letter —
+  confirming a genuine CamelCase PDF-glue artifact (not a French word continuation).
+- **Match value:** only the seed itself (e.g. "FAKENAME" — 8 chars), not the following
+  word ("Signature"). The following word survives in the anonymised output.
+- Precision guards:
+  1. Seeds shorter than 6 chars never enter `raison_sociale_lone_seeds`.
+  2. Seeds in `_COMMON_FRENCH_SURNAMES` excluded by `_person_name_seeds()`.
+  3. Seeds in `_COMMON_FRENCH_FORENAMES` excluded from right-glue pass (new, v2).
+  4. Following char must be UPPERCASE (new, v2).
+  5. Strict LEFT boundary: no partial-tail matches.
+- **Location:** `structured_ext.py` `doc_level_person_repetition_matches`
+  (right_glued_pattern gate + scanning loop, after the #273 left-glue pass).
+
+### Note on signataire label lines
+When `FAKENAMESignature` appears as the value of a signataire/gérant label
+("Signataire : FAKENAMESignature"), the `signataire_matches` recognizer correctly
+masks the ENTIRE value as NOM (it is the complete name field). The right-glue fix
+provides additional coverage for occurrences in free-text / unlabeled positions
+(headers, footers, free-text paragraphs).
+
+### Test `scripts/test_275_right_glue.py` — extended (47/47)
+- D1-D15: original right-glue tests (all pass).
+- D16-D21: forename exclusion set — CLAIRE/JULIEN/ANTOINE/ANDREA/ISABELLE in set;
+  FAKENAME NOT in set.
+- D22-D24: ANDREA forename does NOT over-mask ANDREAssistant / JULIENne.
+- D25-D26: ship-blocker 2 — TESTONImania NOT masked (lowercase next);
+  TESTONIDocument IS masked (uppercase next).
+- 47/47 passed.
+
+### Other
+- All 3 copies synced (root `bubble_shield/` → `plugin/bubble-shield/vendor/` →
+  `plugin/bubble-shield/mcpb/server/vendor/`). Test scripts synced to both
+  `scripts/` and `mcpb/server/scripts/`. MCPB re-packed at 1.16.3 (no .bak,
+  OCR 9 tools intact).
+- All suites green: `test_275_right_glue` 47/47, `test_273_glued_token` 32/32,
+  `test_266_person_name_corporate` 57/57, `test_264_repeated_company` 31/31,
+  `test_259_corporate_kyc` 20/20, `test_257_form_layout` 42/42,
+  `test_bubble_shield_mcp` 19/19, `test_posttool_anonymize` 19/19,
+  `test_256_daemon_path_fail_loud` 10/10, `test_260_ocr` green,
+  `test_option_b_e2e` pre-existing Python 3.9 compat skip (str|None syntax).
+  pytest 229/229.
+
 ## 1.16.2 — 2026-06-24 (fix #273: glued-token surname leak in liasse fiscale)
 
 ### Bug fixed — SURNAME LEAK when glued to preceding token by PDF extraction artifact (risk:HIGH)
