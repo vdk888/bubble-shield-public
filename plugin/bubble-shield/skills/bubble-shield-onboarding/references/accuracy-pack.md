@@ -1,8 +1,19 @@
-# Accuracy pack — "protect PII everywhere" (reference)
+# Accuracy pack — better DETECTION (reference) — NOT "everywhere" in Cowork
 
 The optional on-device ML layer. Read this when setting it up, troubleshooting,
 or answering a technical "how does it actually work" question. The client-facing
 flow is in `SKILL.md` ("The accuracy pack" section) — this is the detail.
+
+> ⚠️ **Scope correction (do not overclaim):** the pack's value is **better
+> detection quality** on content Bubble Shield reads through `bubble_shield_read` /
+> a marked folder / the anonymise skill. The "ambient / everywhere" behaviour
+> described below relies on the **PostToolUse** hook — which **does NOT fire on
+> Cowork's built-in Read or on third-party connectors** (proven: 0/19 Gmail calls;
+> built-in Read output isn't rewritten on any harness version). So **in Cowork the
+> ambient path is effectively a no-op** — it is a **CLI-only** capability. Never
+> tell a Cowork client the pack gives "anonymise everywhere" or auto-protects
+> e-mail. Reliable protection = the folder + `bubble_shield_read`; for e-mail, save
+> the file into the protected folder first.
 
 ## What it is
 
