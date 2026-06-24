@@ -1,6 +1,6 @@
 ---
 name: bubble-shield-onboarding
-description: Help a non-technical user (a CGP / financial advisor) understand, configure, and use the Bubble Shield Guard plugin — what it does, how to protect a client folder, how to show the before/after visually, how the masquer/conserver settings work, and how to set up the optional accuracy pack (better DETECTION, not magic everywhere-masking). Use this skill whenever the user asks "how does Bubble Shield work", "how do I set this up / configure it", "which folders are protected", "how do I anonymise a dossier", "how do I see the before/after", "what's the masquer/conserver table", "protect my data everywhere / not just one folder", "catch PII in my emails / everywhere", "turn on the smart/accurate detection", "install the AI detection", or seems unsure how to operate the tool — even if they don't name it. Lead with plain language, never jargon, because the user is not technical. CRITICAL HONESTY — do NOT tell a Cowork user that Bubble Shield anonymises everywhere automatically or that e-mail is auto-protected, because neither is true in Cowork (PostToolUse does not fire on built-in Read or connectors). The reliable protection is the marked FOLDER plus bubble_shield_read; for e-mail, SAVE the message into the protected folder first. The accuracy pack improves DETECTION on what is read through the folder, it does not add everywhere-coverage in Cowork.
+description: "Help a non-technical user (a CGP / financial advisor) understand, configure, and use the Bubble Shield Guard plugin — what it does, how to protect a client folder, how to show the before/after visually, how the masquer/conserver settings work, and how to set up the optional accuracy pack (better DETECTION, not magic everywhere-masking). Use this skill whenever the user asks 'how does Bubble Shield work', 'how do I set this up / configure it', 'which folders are protected', 'how do I anonymise a dossier', 'how do I see the before/after', 'what is the masquer/conserver table', 'protect my data everywhere / not just one folder', 'catch PII in my emails / everywhere', 'turn on the smart/accurate detection', 'install the AI detection', or seems unsure how to operate the tool — even if they don't name it. ALSO triggers on: 'démarrer', 'onboarding', 'montre-moi', 'première fois', 'prends-moi par la main' — launch the guided first-run demo flow (section below). Lead with plain language, never jargon, because the user is not technical. CRITICAL HONESTY — do NOT tell a Cowork user that Bubble Shield anonymises everywhere automatically or that e-mail is auto-protected, because neither is true in Cowork (PostToolUse does not fire on built-in Read or connectors). The reliable protection is the marked FOLDER plus bubble_shield_read; for e-mail, SAVE the message into the protected folder first. The accuracy pack improves DETECTION on what is read through the folder, it does not add everywhere-coverage in Cowork."
 ---
 
 # Bubble Shield — onboarding & operation (for a non-technical advisor)
@@ -13,6 +13,251 @@ setup steps for them rather than handing over commands to run.
 
 The golden rule to convey: **the client's real name, address, account numbers
 never leave this computer.** Everything else follows from that.
+
+---
+
+## Première prise en main — flux guidé (guided demo flow)
+
+**Trigger words:** "démarrer", "onboarding", "montre-moi", "première fois",
+"prends-moi par la main", "guide-moi", "configure Bubble Shield", or any
+first-session signal. When triggered, run the six steps below in order.
+
+Use **elicitation** for every decision gate — it renders as choice buttons in
+Cowork. Do NOT skip steps or merge them; each step is one confirm/enum elicit +
+a brief progress line.
+
+**Honesty invariant for the whole flow:** never claim "anonymise everywhere" or
+that e-mail is auto-protected. The flow teaches folder-first. The accuracy pack
+improves *detection quality* on what Bubble Shield already reads — nothing more.
+
+---
+
+### Étape 1 — Bienvenue et consentement
+
+Say this welcome message verbatim (adapt language to theirs if needed):
+
+> « Bienvenue dans Bubble Shield. Je vais vous installer en 5 minutes.
+> À la fin, je vous montrerai en direct que l'IA peut analyser un vrai
+> dossier sans jamais voir le nom du client — et produire le document
+> final avec le vrai nom, sans que je l'aie vu. Prêt ? »
+
+Then **elicit** (renders as buttons):
+
+```
+[Démarrer la configuration]   [Plus tard]
+```
+
+- If `[Plus tard]` → stop the flow here. Say: « Pas de problème — dites
+  "première prise en main" quand vous voulez recommencer. »
+- If `[Démarrer la configuration]` → continue to Étape 2.
+
+---
+
+### Étape 2 — Installer la détection avancée GLiNER (ML accuracy pack)
+
+Progress line first:
+> « **Étape 1/4 — Détection avancée.** J'installe GLiNER, un petit modèle
+> de reconnaissance d'entités nommées (NER) multilingue qui tourne 100 %
+> en local sur votre Mac. Il rend la détection plus fine — noms, adresses,
+> identifiants que les règles simples ratent. ~2 min, rien n'est envoyé sur
+> internet. »
+
+Call **`bubble_shield_setup_ml`** with `action: "start"`.
+Then poll **`bubble_shield_setup_ml`** with `action: "status"` every ~20 s
+until status is `ready` (or timeout after 5 min → error message).
+Keep company during the wait:
+> « J'installe la détection avancée… GLiNER multilingue se télécharge
+> (~400 Mo, une seule fois). »
+
+When `ready`:
+> « ✓ GLiNER est prêt. La détection est maintenant plus précise sur vos
+> documents. »
+
+**Elicit** to confirm readiness before continuing:
+
+```
+[Continuer vers l'OCR]   [Annuler le guidage]
+```
+
+- `[Annuler le guidage]` → stop gracefully.
+- `[Continuer vers l'OCR]` → Étape 3.
+
+---
+
+### Étape 3 — Installer l'OCR (pour les PDF scannés)
+
+Progress line:
+> « **Étape 2/4 — OCR.** J'installe le moteur de lecture de PDF scannés
+> (Docling + RapidOCR PP-OCRv6). Sans ça, un PDF image ne peut pas être
+> anonymisé — Bubble Shield le bloque pour ne rien rater. »
+
+Call **`bubble_shield_setup_ocr`** with `action: "start"`.
+Poll **`bubble_shield_setup_ocr`** with `action: "status"` every ~20 s until
+`ready`. Keep company:
+> « Installation OCR en cours (~200 Mo). »
+
+When `ready`:
+> « ✓ OCR prêt. Les PDF scannés seront maintenant lus et anonymisés. »
+
+**Elicit:**
+
+```
+[Continuer — marquer un dossier]   [Annuler le guidage]
+```
+
+---
+
+### Étape 4 — Marquer le dossier protégé (folder-first)
+
+Progress line:
+> « **Étape 3/4 — Dossier protégé.** La protection de Bubble Shield ne
+> s'active que sur les dossiers que vous lui montrez. On va marquer un
+> dossier de démonstration maintenant. »
+
+Ask:
+> « Quel est le chemin du dossier client à protéger pour la démo ?
+> (Exemple : `/Users/vous/Documents/Clients/DUPONT`) »
+
+Accept the path from the user (free text or via `AskUserQuestion`).
+If the user is following the demo exactly, the path will be the DUPONT
+client folder.
+
+Once you have the path:
+1. Request directory access with `request_cowork_directory` (the client
+   folder, never `~/.config` or `~`).
+2. Write the marker file `<dossier>/.bubble-shield.json`:
+   ```json
+   {
+     "allow_paths": ["clean"],
+     "allow_extensions": [".anon.txt"],
+     "block_bash": true,
+     "tripwire_enabled": true
+   }
+   ```
+3. Confirm out loud:
+   > « ✓ Dossier marqué. Tout fichier à l'intérieur est maintenant dans
+   > le coffre — l'assistant ne peut plus l'ouvrir directement. »
+
+**Elicit:**
+
+```
+[Lancer la démo sur le DCC]   [Annuler le guidage]
+```
+
+---
+
+### Étape 5 — Démo sur le DCC (deux temps)
+
+> « **Étape 4/4 — La démo.** Je vais maintenant lire un vrai document
+> de démonstration. Regardez bien : vous allez voir que l'IA ne reçoit
+> jamais le nom du client — et pourtant elle produit le document final
+> avec le vrai nom. »
+
+The demo file is:
+`DCC - Monsieur Jean DUPONT - 2026-02-19.pdf` (exemple — remplacez par votre vrai fichier client)
+(inside the DUPONT folder the user just marked in Étape 4).
+
+#### Temps A — « L'IA ne voit pas le nom »
+
+Call **`bubble_shield_read`** on the DCC file path.
+
+The tool returns the document content with all PII replaced by tokens
+(e.g. `⟦NOM_0001⟧`, `⟦ADRESSE_0001⟧`, `⟦DATE_NAISSANCE_0001⟧`).
+
+**Work only on what the tool returned** — do NOT use the filename as
+a source of client identity, and do NOT paste or mention any real
+personal data from the file. The AI at this point sees only tokens.
+
+Produce a 3–5 sentence summary of the DCC *using only the tokenised
+version* returned by the tool. Example phrasing:
+
+> « Voici le résumé du document : ⟦NOM_0001⟧ est ⟦PROFESSION_0001⟧,
+> né(e) le ⟦DATE_NAISSANCE_0001⟧, domicilié(e) à ⟦ADRESSE_0001⟧.
+> L'entretien du ⟦DATE_0001⟧ porte sur… »
+
+Then say to the user:
+> « Vous voyez ? Je viens de lire et résumer un vrai document — mais je
+> n'ai jamais reçu un seul nom réel. Tout ce que j'ai vu, ce sont des
+> étiquettes comme ⟦NOM_0001⟧. Les vraies valeurs sont restées dans le
+> coffre sur votre Mac. »
+
+**Elicit** before Temps B:
+
+```
+[Voir la magie — produire le vrai document]   [Arrêter ici]
+```
+
+- `[Arrêter ici]` → skip to Étape 6.
+- `[Voir la magie — produire le vrai document]` → continue.
+
+#### Temps B — « Mais elle produit le vrai document »
+
+Still using only tokens, draft a short (3–5 lines) cover note. Example
+(all PII in token form):
+
+```
+Paris, le ⟦DATE_0001⟧
+
+Objet : Synthèse de l'entretien de conseil — ⟦NOM_0001⟧
+
+Madame, Monsieur,
+
+Suite à notre entretien du ⟦DATE_0001⟧, nous vous confirmons
+avoir enregistré votre situation patrimoniale. Votre conseiller
+reste à votre disposition.
+
+Cordialement,
+Bubble Invest
+```
+
+Call **`bubble_shield_write`** with:
+- `path` = a file in the `clean/` sub-folder of the DUPONT folder,
+  e.g. `<dossier>/clean/note-de-synthese-demo.pdf` (or `.txt`).
+- `content` = the token-form draft above.
+
+The tool restores the real values locally and writes the file to disk.
+It returns ONLY a success confirmation — the real content is never
+shown in the conversation.
+
+Then say:
+> « ✓ Le fichier est écrit sur votre disque. Ouvrez-le :
+> `<dossier>/clean/note-de-synthese-demo.pdf` — vous verrez le vrai
+> nom du client en clair. »
+
+Punchline (say this explicitly):
+> « C'est ça la magie de Bubble Shield : j'ai rédigé ce document
+> entièrement en aveugle — je n'ai jamais vu le nom. Seul votre Mac
+> connaît l'identité. L'IA a travaillé sur des étiquettes ; votre
+> ordinateur a remis les vrais noms à la fin. »
+
+---
+
+### Étape 6 — Clôture et suite
+
+> « La configuration est terminée. Voici ce qui est en place :
+> ✓ GLiNER (détection avancée) installé
+> ✓ OCR (PDF scannés) installé
+> ✓ Dossier protégé marqué
+> ✓ Démo complète — l'IA travaille en aveugle, le Mac remet les vrais noms
+>
+> Que voulez-vous faire maintenant ? »
+
+**Elicit** (renders as three buttons):
+
+```
+[Protéger un autre dossier]   [Régler masquer/conserver]   [Terminé]
+```
+
+- `[Protéger un autre dossier]` → return to Étape 4 logic (new path,
+  same marker-drop procedure).
+- `[Régler masquer/conserver]` → continue to the masquer/conserver
+  section below.
+- `[Terminé]` → say:
+  > « Parfait. Bubble Shield est opérationnel. Pour refaire cette visite
+  > guidée : dites "première prise en main". Pour protéger un nouveau
+  > dossier client : dites "protège ce dossier". »
+
+---
 
 ## How Bubble Shield works — the one-paragraph version (say this first)
 

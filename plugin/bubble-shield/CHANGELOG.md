@@ -5,6 +5,35 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.17.3 — 2026-06-24 — fix/genericize-demo-client
+
+- **privacy**: replaced a real client name in the `bubble-shield-onboarding`
+  skill with a synthetic placeholder ("Jean DUPONT" / "DUPONT") — no real PII in
+  the public repo. Demo file example is now
+  `DCC - Monsieur Jean DUPONT - 2026-02-19.pdf` with a parenthetical clarifying
+  it is an example the operator swaps for their real client file. Skill text only;
+  no logic, tool, or flow changes.
+
+---
+
+## 1.17.2 — 2026-06-24 — feat/283-onboarding-demo-flow
+
+- **#283** (`feat/283-onboarding-demo-flow`): Added "Première prise en main"
+  guided demo flow to `bubble-shield-onboarding` skill — 6-step elicitation
+  sequence (GLiNER install → OCR install → folder marking → DCC demo, two beats:
+  AI reads blind, then produces the real document via `bubble_shield_write`).
+  Trigger words wired into skill description. Skill text only — no new tools,
+  no code, no widget. Honesty invariants preserved (folder-first; no
+  everywhere/mail overclaim).
+
+---
+
+## 1.17.1 — 2026-06-24 — fix/honesty-corrections
+
+See git history for v1.17.1 details.
+
+---
+
 ## 1.17.0 — 2026-06-24 — integrate/v1.17.0: #267+#269+#276+#280(rev3) composed
 
 Consolidated integration of 4 reviewed+approved features:
