@@ -5,6 +5,15 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.4 — 2026-06-27 — feat/326-known-pii-gazetteer (local self-improving known-PII gazetteer)
+
+Add a local self-improving known-PII gazetteer: once a name is confirmed as PII
+(high-confidence detection or explicit confirmation), it is masked deterministically
+in every subsequent document — including bare, low-context occurrences that the NER
+model alone scores below threshold. Anti-poisoning gate (only high-confidence/confirmed
+entries enter); the gazetteer is local, stored outside the repo, and never shared.
+Checksum-validated structured PII still takes precedence on overlaps.
+
 ## 1.18.3 — 2026-06-26 — fix/318-overlap-span-drop (name-recall leak + truncation)
 
 **Security: close trailing-forename leak on administrative forms; improve recall on bare names.**

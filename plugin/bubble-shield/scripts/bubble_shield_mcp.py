@@ -315,9 +315,20 @@ def _engine(text_for_daemon: str = "", filename_basename: str = ""):
     except Exception:
         pass
 
+    # #326 — known-PII deny-list: wire in as an extra_recognizer (zero-cost when
+    # empty; deterministic masking of cross-session confirmed PII).
+    extra_recs = list(_cr.load_custom_recognizers())
+    try:
+        from bubble_shield.known_pii_recognizer import make_known_pii_recognizer
+        kpr = make_known_pii_recognizer()
+        if kpr is not None:
+            extra_recs.append(kpr)
+    except Exception:
+        pass  # fail-open: gazetteer failure never breaks anonymisation
+
     engine = AnonymizationEngine(
         extra_detectors=detectors,
-        extra_recognizers=_cr.load_custom_recognizers(),
+        extra_recognizers=extra_recs,
         match_filter=_policy.make_match_filter(_policy.load_policy()))
     vpath = _vault_path()
     engine.vault = Vault.load(str(vpath)) if vpath.is_file() else Vault(mission=os.environ.get("BUBBLE_SHIELD_SESSION", "mcp-session"))
