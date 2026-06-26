@@ -5,6 +5,32 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.1 — 2026-06-26 — fix/gliner-nom-span-dropped
+
+**Privacy: close a name-recall leak where neural-NER (GLiNER) NOM spans were
+dropped by the profile-sweep trust gate.**
+
+Previously, when the soft-ML detector (GLiNER / OpenAI-PF, priority ≤ 5) returned
+a NOM span for an all-caps `SURNAME FORENAME` block on an administrative form — a
+pattern that carries no civility title and whose forename is absent from the
+gazetteer — the span was silently discarded by `ClientProfile.learn()` because its
+confidence score (0.45–0.70) fell below the 0.85 regex-NOM trust threshold.  As a
+result, the person's name detected in one section of the document was never seeded
+into the doc-level repetition sweep, so the same name block appearing verbatim in
+a separate address block (or page header) survived in clear.
+
+Fixes:
+- `DetectedEntity` now carries a `priority` field so the source recognizer's tier
+  is propagated all the way through to `profile_sweep.ClientProfile.learn()`.
+- `ClientProfile.learn()` trusts soft-ML NOM spans (priority ≤ 5) regardless of
+  score; it also normalises double-space and trailing-newline PDF extraction
+  artifacts in span boundaries before storing the value and deriving sweep tokens.
+- `engine._detect()` builds a mini `ClientProfile` from soft-ML NOM spans after
+  `resolve_overlaps`, sweeps the full document text for uncovered occurrences, and
+  folds them back into `raw` before the final re-resolve — ensuring the address-block
+  copy of an all-caps administrative name is masked even when it fell outside the
+  GLiNER chunk window.
+
 ## 1.18.0 — 2026-06-26 — fix/ner-fail-closed-gate
 **Security: fail-closed when fine-grained NER (GLiNER) is unavailable.** Previously,
 if the NER daemon was down, the anonymiser silently fell back to regex-only mode and

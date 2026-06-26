@@ -42,6 +42,13 @@ class DetectedEntity:
     score: float
     start: int
     end: int
+    # fix (gliner-nom-span-dropped): carry the source recognizer priority so that
+    # profile_sweep.ClientProfile.learn() can distinguish soft-ML NOM detections
+    # (priority ≤ 5, already threshold-filtered) from over-promiscuous regex NOM
+    # (priority 45/50, needs the 0.85 score trust gate).  Default=0 is conservative
+    # (treated as a high-priority source, i.e. trusted) for backward compatibility
+    # with any callers that construct DetectedEntity directly without this field.
+    priority: int = 0
 
 
 @dataclass
@@ -160,7 +167,41 @@ class AnonymizationEngine:
         for r in recs:
             raw.extend(r.find(text))
         raw.extend(extra)
-        return resolve_overlaps(raw)
+        resolved = resolve_overlaps(raw)
+
+        # fix (gliner-nom-span-dropped): soft-ML NOM sweep pass.
+        #
+        # A neural NER (GLiNER, OpenAI-PF, priority=5) may detect a name at one
+        # location in the document but miss a SECOND occurrence that has different
+        # surrounding whitespace or falls in a different chunk window.  The resolved
+        # match list at this point covers the detected offset but NOT the duplicate.
+        #
+        # This pass builds a mini ClientProfile from soft-ML NOM spans (priority ≤ 5),
+        # sweeps the text for uncovered occurrences, and adds them to the raw list
+        # before a second resolve_overlaps call.  It is:
+        #   - ADD-ONLY: only new spans (not already covered) are appended.
+        #   - RECALL-BIASED: same philosophy as doc_level_person_repetition_matches.
+        #   - CHEAP: sweep runs in O(n * m) where n = text length and m = name tokens,
+        #     both small for real KYC documents.
+        #   - SAFE: the profile.learn() call uses the same trust gate as two_pass_detect;
+        #     it refuses to learn common-word NOM tokens from low-confidence regex NOM
+        #     (those have priority 45-50, above the soft-ML ≤5 gate).
+        soft_ml_noms = [m for m in resolved
+                        if m.entity_type == "NOM" and m.priority <= 5]
+        if soft_ml_noms:
+            try:
+                from bubble_shield.profile_sweep import ClientProfile
+                profile = ClientProfile()
+                profile.learn(soft_ml_noms, min_score=0.0)  # threshold already applied by detector
+                sweep_matches = profile.sweep(text)
+                if sweep_matches:
+                    # Add sweep hits that are not already covered and re-resolve.
+                    raw2 = list(resolved) + sweep_matches
+                    resolved = resolve_overlaps(raw2)
+            except Exception:
+                pass  # fail-open: sweep failure never breaks anonymisation
+
+        return resolved
 
     def anonymize(self, text: str) -> AnonymizationResult:
         matches = self._detect(text)
@@ -188,7 +229,8 @@ class AnonymizationEngine:
             out = out[:m.start] + token + out[m.end:]
             entities.append(DetectedEntity(
                 entity_type=m.entity_type, value=m.value, token=token,
-                score=m.score, start=m.start, end=m.end))
+                score=m.score, start=m.start, end=m.end,
+                priority=m.priority))
             min_score = min(min_score, m.score)
         entities.sort(key=lambda e: e.start)
 

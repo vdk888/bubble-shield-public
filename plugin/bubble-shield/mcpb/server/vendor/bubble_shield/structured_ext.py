@@ -874,7 +874,7 @@ _COMMON_FRENCH_FORENAMES: frozenset = frozenset({
     "NICOLAS", "STEPHANE", "FLORENCE", "VIRGINIE", "LAURENCE",
     "BERTRAND", "CHRISTOPHE", "ALEXANDRE", "GUILLAUME",
     # ── 9-letter ──────────────────────────────────────────────────────────────
-    "THEOPHILE", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
+    "SEBASTIEN", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
     "CHRISTELLE", "FRANCOISE", "GENEVIEVE", "JACQUELINE",
     # ── 10+ letter ────────────────────────────────────────────────────────────
     "CHRISTOPHE", "CHRISTELLE", "MAXIMILIANE",
@@ -994,7 +994,7 @@ def extract_person_tokens_from_filename(basename: str) -> List[str]:
     """Extract person-name tokens from a CGP document filename (fix #280).
 
     Given "DURAND Théophile - DER 012026 - 2026-02-18.pdf", returns
-    ["DURAND", "THEOPHILE"] (normalised to upper-case).
+    ["DURAND", "THÉOPHILE"] (normalised to upper-case).
 
     Algorithm:
       1. Strip extension.
@@ -1302,7 +1302,7 @@ def doc_level_person_repetition_matches(
     word on the left (e.g. if some token ends with the seed letters).
 
     fix #280 rev 2 — filename_seeds parameter + CORROBORATION:
-    Person-name tokens extracted from the file basename (e.g. ["DURAND", "THEOPHILE"])
+    Person-name tokens extracted from the file basename (e.g. ["DURAND", "THÉOPHILE"])
     are injected into the body-wide repetition pass ONLY when CORROBORATED — i.e. only
     when the token also appears in an existing NOM match detected elsewhere in the
     document by an INDEPENDENT body recognizer (civility, form-label, signataire, etc.).
@@ -1454,7 +1454,7 @@ def doc_level_person_repetition_matches(
         #      (CLAIRE→clairement, ANDREA→ANDREAssistant, JULIEN→julienne).
         #   2. Uppercase-next-char guard: only emit when the FOLLOWING char is
         #      UPPERCASE (CamelCase glue = real PDF artifact: "FAKENAMESignature",
-        #      "FAKENAMESignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
+        #      "AMELSignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
         #      "TESTONImania") is a legitimate French inflected word — never mask.
         right_glued_pattern = None
         if (seed in raison_sociale_lone_seeds
@@ -1501,7 +1501,7 @@ def doc_level_person_repetition_matches(
         # fix #275 -- right-glued-token pass (mirror of #273): scan with the
         # loose-right pattern and emit only occurrences where the FOLLOWING char IS
         # an UPPERCASE letter — confirming a genuine CamelCase PDF-glue artifact
-        # (e.g. "FAKENAMESignature", "FAKENAMESignature" — capital S).
+        # (e.g. "FAKENAMESignature", "AMELSignature" — capital S).
         # A lowercase continuation ("CLAIREment", "ANTOINEtte", "TESTONImania")
         # signals a real inflected French word — never mask those.
         # (Ship-blocker fix #275 v2: uppercase-next-char guard.)

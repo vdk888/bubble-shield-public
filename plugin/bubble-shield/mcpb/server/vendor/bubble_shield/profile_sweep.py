@@ -124,6 +124,16 @@ class ClientProfile:
             an explicit family-member label), not a single bare capitalised word.
         Structured PII (IBAN/EMAIL/TEL/passport) is trusted verbatim — checksums /
         format make it safe; only NAMES carry the pollution risk.
+
+        fix (gliner-nom-span-dropped): soft ML detectors (GLiNER, OpenAI-PF) set
+        priority=5 and are already pre-filtered by their own threshold before their
+        spans reach the engine.  Their NOM predictions do NOT share the regex-NOM
+        over-fire problem (a neural NER asked to find person names rarely returns
+        "CARDIF" or "Contrat EUROPE").  Trust them regardless of score so we learn
+        ALL-CAPS surname+forename blocks that appear in administrative-form fields
+        with no civility title (e.g. "DUPONT  LUC" / "LEFEBVRE  HELENE") and
+        sweep every occurrence in the document — including the separate address-block
+        copy that GLiNER never saw because it was in a different chunk window.
         """
         for m in matches:
             if m.entity_type not in _SWEEPABLE_TYPES:
@@ -136,6 +146,25 @@ class ClientProfile:
             if allowlist is not None and allowlist.is_allowlisted(v):
                 continue  # firm / regulator / fund — never the client
             if m.entity_type == "NOM":
+                # fix (gliner-nom-span-dropped): normalize internal whitespace and
+                # strip newline-glued characters from soft-ML NOM values before
+                # learning.  PDF extraction artifacts embed double-spaces and trailing
+                # newline+char in GLiNER span boundaries (e.g. "DUPONT  MARC" or
+                # "LEFEBVRE  CLAIRE\nO").  Normalising to a clean single-space string
+                # ensures the sweep pattern and vault key match the clean document form.
+                if m.priority <= 5:
+                    # Soft ML span: collapse runs of whitespace (incl. newlines) to
+                    # a single space, then trim.  Keep only the part before any newline
+                    # that appears to be a glued-artifact (a lone char after \n is the
+                    # start of the NEXT line captured by offset arithmetic errors).
+                    v_parts = v.split("\n")
+                    if len(v_parts) > 1 and len(v_parts[-1]) <= 2:
+                        # trailing "O", "\nO", "\n3" etc. — the first non-whitespace
+                        # character(s) of the next line; drop them.
+                        v = " ".join(p.strip() for p in v_parts[:-1]).strip()
+                    v = re.sub(r"[ \t]+", " ", v).strip()
+                    if not v:
+                        continue
                 toks = _distinctive_tokens(v)
                 if not toks:
                     continue
@@ -145,8 +174,12 @@ class ClientProfile:
                 # dossier = catastrophic over-redaction. So a NOM is only learned
                 # if it looks like a person (civility title / gazetteer first name)
                 # OR a clean high-confidence source flagged it (score ≥ 0.85 — the
-                # civility + GLiNER layers; the greedy regex NOM is only 0.8).
-                trusted = _looks_like_person(v) or m.score >= 0.85
+                # civility regex NOM is only 0.8).
+                # fix (gliner-nom-span-dropped): also trust soft ML detectors
+                # (priority ≤ 5 = GLiNER / OpenAI-PF) — they are neural NERs that
+                # rarely over-fire on fund names; their pre-threshold filter is their
+                # own confidence gate, not the 0.85 guard designed for regex NOM.
+                trusted = _looks_like_person(v) or m.score >= 0.85 or m.priority <= 5
                 if len(toks) < 2:
                     # A single bare token (a lone surname, or a heading like "Contrat") is only learned if
                     # it came from a TRUSTED source — a lone surname after "M." is

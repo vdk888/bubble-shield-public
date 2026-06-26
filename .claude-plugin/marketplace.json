@@ -7,14 +7,14 @@
   },
   "metadata": {
     "description": "Fail-closed PII guard for Cowork — Bubble Shield local anonymiser enforcement",
-    "version": "1.18.0"
+    "version": "1.18.1"
   },
   "plugins": [
     {
       "name": "bubble-shield",
       "source": "./plugin/bubble-shield",
       "description": "PreToolUse guard that blocks reads of protected client folders until the data is anonymised through Bubble Shield. 100% local, reversible, fail-closed (RGPD art. 25 & 32).",
-      "version": "1.18.0",
+      "version": "1.18.1",
       "author": {
         "name": "Bubble Invest"
       },
