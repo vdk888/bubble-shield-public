@@ -142,12 +142,37 @@ def _extract_text(tool_response):
 
 
 def _daemon_up() -> bool:
+    """Return True only if the daemon is reachable AND its self-test passes.
+
+    Fix (daemon-onnx-detection): a daemon that answers /health with ok=true
+    but returns [] on every /detect call is "healthy but blind" — the worst
+    failure mode for a privacy tool.  We gate on self_test=="pass" from the
+    /health JSON so a blind daemon is treated as DOWN (fail-closed), not UP.
+
+    Backward compat: old daemon builds return plain "ok" bytes from /health
+    (not JSON).  In that case we can't check self_test, so we trust the 200
+    (same behaviour as before this fix — no regression on old builds).
+    """
     try:
-        urllib.request.urlopen(
+        resp = urllib.request.urlopen(
             urllib.request.Request(NERD_URL + "/health", method="GET"), timeout=0.4)
-        return True
+        body = resp.read(4096)
     except Exception:
         return False
+    try:
+        data = json.loads(body)
+    except Exception:
+        # Old build: plain text response — trust the 200
+        return True
+    if not data.get("ok"):
+        return False
+    st = data.get("self_test")
+    if st is None:
+        # warm-up not done yet (--no-warm flag) OR old build without self_test
+        # field — treat as UP (fail-open) since the daemon hasn't reported fail.
+        return True
+    # "pass" → UP; "fail" → DOWN (blind daemon, treat as missing)
+    return st == "pass"
 
 
 def _nerd_script() -> Path | None:

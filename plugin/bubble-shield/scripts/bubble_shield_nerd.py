@@ -51,6 +51,29 @@ _last_activity = time.time()
 _lock = threading.Lock()
 _warm = False
 
+# Self-test state — populated after warm-up (None = not yet run).
+# "pass" means the daemon returned a NOM match for the synthetic probe.
+# "fail" means it returned [] — daemon is blind, gate must treat it as DOWN.
+_SELF_TEST_PROBE = "Monsieur Jean DUPONT"
+_selftest_result: str | None = None  # None | "pass" | "fail"
+
+
+def _run_selftest(gliner_ext) -> str:
+    """Feed a known synthetic name through the detector and return "pass"/"fail".
+
+    Cheap: one tiny string, no I/O, cached after first run.  Never uses real
+    names — synthetic only, safe to commit.
+
+    Returns "pass" if at least one NOM match is returned, "fail" otherwise.
+    """
+    try:
+        matches = gliner_ext.gliner_matches(_SELF_TEST_PROBE)
+        if any(getattr(m, "entity_type", "") == "NOM" for m in matches):
+            return "pass"
+        return "fail"
+    except Exception:
+        return "fail"
+
 
 def _load_manifest() -> dict:
     if not MANIFEST.is_file():
@@ -58,11 +81,47 @@ def _load_manifest() -> dict:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
+def _gliner_model_id(man: dict) -> str:
+    """Return the model id to pass to GLiNER.from_pretrained().
+
+    The manifest always stores the LOCAL directory of whatever was downloaded.
+    For the onnx-community model family that directory only contains ONNX
+    weights (onnx/model_quantized.onnx) — no pytorch_model.bin or
+    model.safetensors — so GLiNER.from_pretrained(<local_dir>) raises
+    FileNotFoundError and _load_model() silently caches None, making every
+    predict_entities call return [] (the "healthy but blind" bug).
+
+    Fix: when the local model_dir lacks PyTorch weights we fall back to the
+    PyTorch HuggingFace id stored in the manifest (man["model_id"] points to
+    the *original* HF repo id, e.g. "onnx-community/gliner_multi_pii-v1").
+    gliner_ext resolves both HF ids and local paths the same way; the PyTorch
+    weights are fetched from cache (already downloaded by setup) or HF.
+
+    If no manifest model_id is present we fall back to the gliner_ext default
+    ("urchade/gliner_multi_pii-v1") which is known to load correctly.
+    """
+    model_dir = Path(man.get("model_dir", ""))
+    has_pytorch = (model_dir / "pytorch_model.bin").is_file() or \
+                  any(model_dir.glob("model*.safetensors"))
+    if has_pytorch:
+        return str(model_dir)   # local path, has weights → use as-is
+
+    # ONNX-only local dir: use the in-process PyTorch model path instead.
+    # Prefer the pytorch_model_id field (new manifests) → model_id field →
+    # hard default (the model proven to work in the in-process path).
+    return (man.get("pytorch_model_id")
+            or "urchade/gliner_multi_pii-v1")
+
+
 def _prepare_env(man: dict) -> None:
-    """Point gliner_ext and openai_pf_ext at local ONNX models from the manifest."""
-    # GLiNER: local model dir as the id (from_pretrained accepts a local path)
-    os.environ["BUBBLE_SHIELD_GLINER_MODEL"] = man["model_dir"]
-    os.environ["BUBBLE_SHIELD_GLINER_ONNX"] = man["onnx_file"]
+    """Point gliner_ext and openai_pf_ext at models from the manifest.
+
+    Fix (daemon-onnx-detection): uses _gliner_model_id() to select a model id
+    that GLiNER.from_pretrained() can actually load — the ONNX-only local dir
+    causes a silent FileNotFoundError that makes every detection return []."""
+    # GLiNER: must be a path with PyTorch weights, or a HF repo id (not ONNX-only dir)
+    os.environ["BUBBLE_SHIELD_GLINER_MODEL"] = _gliner_model_id(man)
+    os.environ["BUBBLE_SHIELD_GLINER_ONNX"] = man.get("onnx_file", "")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     # OpenAI PF: read from multi-model manifest if present (back-compat: old
@@ -88,15 +147,24 @@ def _import_vendor_modules():
 
 
 def warm_up(gliner_ext, openai_pf_ext, mode: str) -> None:
-    global _warm
+    global _warm, _selftest_result
     t = time.time()
     gliner_ext.gliner_matches("warmup Jean Dupont")  # forces GLiNER model load
     if mode in ("openai", "both"):
         # Warm up OpenAI model too — will silently fail-open if not installed
         openai_pf_ext.openai_pf_matches("warmup Jean Dupont")
     _warm = True
-    print(f"[bubble-shield-nerd] model(s) warm in {time.time()-t:.1f}s (mode={mode})",
-          flush=True)
+    # Run detection self-test so /health can expose "self_test": "pass"/"fail".
+    # A "fail" here means the model loaded but returns [] — the "healthy but
+    # blind" scenario that caused client data to leak through uncaught.
+    _selftest_result = _run_selftest(gliner_ext)
+    print(f"[bubble-shield-nerd] model(s) warm in {time.time()-t:.1f}s "
+          f"(mode={mode}, self_test={_selftest_result})", flush=True)
+    if _selftest_result != "pass":
+        print("[bubble-shield-nerd] WARNING: self-test FAILED — "
+              "detection returns [] on a known synthetic name. "
+              "Model may be ONNX-only without PyTorch weights. "
+              "Gate will treat this daemon as DOWN (fail-closed).", flush=True)
 
 
 def _custom_fields_path() -> Path:
@@ -167,9 +235,25 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             cfg_path = _custom_fields_path()
             mode = _load_detector_mode(cfg_path)
+            # self_test: "pass"/"fail"/null — null means warm-up hasn't run yet
+            # (--no-warm flag). A "fail" value is the gate signal: the daemon is
+            # UP but blind, so clients must treat it as DOWN (fail-closed).
             self._send(200, {"ok": True, "warm": _warm,
                              "model": os.environ.get("BUBBLE_SHIELD_GLINER_MODEL", ""),
-                             "mode": mode})
+                             "mode": mode,
+                             "self_test": _selftest_result})
+        elif self.path == "/selftest":
+            # On-demand self-test endpoint.  Returns {ok, self_test, probe}.
+            # "ok" mirrors whether self_test=="pass" so callers can gate on it.
+            result = _selftest_result
+            if result is None:
+                # warm-up not done yet — run the test now (lazy path)
+                if self.gliner_ext:
+                    result = _run_selftest(self.gliner_ext)
+            self._send(200 if result == "pass" else 503,
+                       {"ok": result == "pass",
+                        "self_test": result,
+                        "probe": _SELF_TEST_PROBE})
         elif self.path == "/labels":
             self._maybe_reload_config()
             try:
@@ -181,7 +265,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        global _last_activity
+        global _last_activity, _selftest_result
         if self.path != "/detect":
             self._send(404, {"error": "not found"})
             return
@@ -201,6 +285,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with _lock:
                 ms = self._detect(text, mode, cfg_path)
+                # Lazy self-test: if warm-up was skipped (--no-warm), run the
+                # detection self-test on the first real /detect call and cache
+                # the result so /health can report pass/fail truthfully.
+                # This closes the "healthy but blind" hole for --no-warm daemons:
+                # after this call, _daemon_up() will gate correctly on self_test.
+                if _selftest_result is None and self.gliner_ext is not None:
+                    _selftest_result = _run_selftest(self.gliner_ext)
+                    if _selftest_result != "pass":
+                        print(f"[bubble-shield-nerd] WARNING: lazy self-test FAILED "
+                              f"— detection returns [] on a known synthetic name "
+                              f"(--no-warm path). Gate will treat this daemon as DOWN.",
+                              flush=True)
             out = [{"entity_type": m.entity_type, "value": m.value,
                     "start": m.start, "end": m.end, "score": m.score}
                    for m in ms]

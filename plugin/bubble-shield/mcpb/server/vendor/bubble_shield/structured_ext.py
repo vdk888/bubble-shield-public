@@ -874,7 +874,7 @@ _COMMON_FRENCH_FORENAMES: frozenset = frozenset({
     "NICOLAS", "STEPHANE", "FLORENCE", "VIRGINIE", "LAURENCE",
     "BERTRAND", "CHRISTOPHE", "ALEXANDRE", "GUILLAUME",
     # ── 9-letter ──────────────────────────────────────────────────────────────
-    "SEBASTIEN", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
+    "CORENTIN", "CATHERINE", "VERONIQUE", "DOMINIQUE", "EMMANUEL",
     "CHRISTELLE", "FRANCOISE", "GENEVIEVE", "JACQUELINE",
     # ── 10+ letter ────────────────────────────────────────────────────────────
     "CHRISTOPHE", "CHRISTELLE", "MAXIMILIANE",

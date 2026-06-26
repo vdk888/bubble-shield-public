@@ -5,6 +5,45 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.2 — 2026-06-26 — fix/daemon-onnx-detection (lazy self-test hardening)
+
+**Security: close the "healthy but blind" daemon failure class for --no-warm starts.**
+
+The NER daemon could report healthy (`/health ok=true`) while detecting nothing.
+Two root causes:
+
+1. **ONNX-only model directory**: when the local model directory contained only
+   ONNX weights (`onnx/model_quantized.onnx`) with no PyTorch weights
+   (`pytorch_model.bin` / `model.safetensors`), `GLiNER.from_pretrained()` raised
+   `FileNotFoundError` which `_load_model()` swallowed, caching `None`. Every
+   subsequent `gliner_matches()` call returned `[]`. The daemon answered `/health`
+   with `ok=true, warm=true` while every `/detect` silently returned zero matches —
+   names leaked while the tool reported the document safe.
+
+2. **`--no-warm` blind-daemon hole**: even with the ONNX-fix in place, a daemon
+   started with `--no-warm` skipped the detection self-test, so `_selftest_result`
+   stayed `None`, `/health` reported `self_test: null`, and `_daemon_up()` treated
+   `null` as UP (fail-open). A `--no-warm` daemon with a broken model could therefore
+   answer `/detect` with `[]` while looking healthy.
+
+Fixes:
+- `_gliner_model_id()` — when the local model directory lacks PyTorch weights, fall
+  back to the PyTorch HuggingFace repo id stored in the manifest (`pytorch_model_id`
+  field, or hard default `urchade/gliner_multi_pii-v1`), which GLiNER can load
+  correctly. The daemon now selects a working model when the local dir is ONNX-only.
+- `warm_up()` — runs a detection self-test (a known synthetic name must produce a NOM
+  match) and stores the result in `_selftest_result`; `/health` exposes
+  `self_test: "pass"/"fail"`, and `_daemon_up()` gates on it — a daemon that answers
+  `/health` but cannot actually detect is now treated as DOWN and reads fail closed
+  instead of leaking.
+- **Lazy self-test on first `/detect`** (this release) — if the daemon started with
+  `--no-warm`, `_selftest_result` is `None` until the first real `/detect` call, at
+  which point the self-test runs lazily and caches the result. After the first
+  detection call, `/health` reports the real `pass`/`fail` state and `_daemon_up()`
+  gates correctly. This closes the blind-daemon hole for `--no-warm` starts without
+  changing the warm-path behavior. Production LaunchAgent does not pass `--no-warm`;
+  this fix hardens the edge case.
+
 ## 1.18.1 — 2026-06-26 — fix/gliner-nom-span-dropped
 
 **Privacy: close a name-recall leak where neural-NER (GLiNER) NOM spans were
