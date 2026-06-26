@@ -5,6 +5,25 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.0 — 2026-06-26 — fix/ner-fail-closed-gate
+**Security: fail-closed when fine-grained NER (GLiNER) is unavailable.** Previously,
+if the NER daemon was down, the anonymiser silently fell back to regex-only mode and
+still returned a "safe-looking" result — but regex alone cannot catch context-free
+name blocks (e.g. an all-caps `SURNAME FORENAME` line on an administrative form with
+no title or label), so identifying names could survive in clear while the tool reported
+the document safe. Now:
+- `bubble_shield_read` / `bubble_shield_anonymize_text` **fail closed** when the NER
+  daemon is down: they return an error (no anonymised body, no raw PII) instead of a
+  regex-only result. A document can never be certified safe without live fine-grained
+  detection.
+- New **`bubble_shield_status`** tool reports NER state (`ner`, `model`,
+  `ml_pack_installed`, `daemon_reachable`, `launchagent_loaded`) so the agent can
+  verify detection is active before processing, and to diagnose daemon liveness vs
+  reachability.
+- **SessionStart re-arm**: each new session health-checks and re-spawns the NER daemon
+  if down (fail-open on the spawn — never blocks session start; the per-call gate is
+  the safety guarantee).
+
 ## 1.17.3 — 2026-06-24 — fix/genericize-demo-client
 
 - **privacy**: replaced a real client name in the `bubble-shield-onboarding`

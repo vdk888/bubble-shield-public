@@ -108,6 +108,21 @@ GUARD_CMD = _wrapped_cmd("guard.py")
 TRIP_CMD = _wrapped_cmd("tripwire.py")
 POST_CMD = _wrapped_cmd("posttool_anonymize.py")
 
+# SessionStart re-arm: health-check NER daemon and re-spawn if down.
+# Inline Python so it works regardless of CLAUDE_PLUGIN_ROOT path. Fails open.
+_REARM_SCRIPT = (
+    "python3 -c \""
+    "import sys,os;"
+    "sys.path.insert(0,'{stable}/vendor');"
+    "sys.path.insert(0,'{stable}');"
+    "import posttool_anonymize as p;"
+    "p._try_spawn_daemon();"
+    "\" || true  # {marker}:rearm-daemon"
+).format(stable=STABLE_DIR, marker=MARKER)
+REARM_CMD = (
+    f"[ -f '{STABLE_DIR}/posttool_anonymize.py' ] && {_REARM_SCRIPT} || true"
+)
+
 
 def _in_cowork_vm() -> bool:
     """True ONLY when we are genuinely inside the Cowork (local-agent) sandbox VM.
@@ -229,6 +244,18 @@ def main() -> None:
             "hooks": [{"type": "command", "command": POST_CMD}],
         })
         hooks["PostToolUse"] = post
+
+        # --- SessionStart NER daemon re-arm ---
+        # Best-effort: health-check the NER daemon at session start and re-spawn
+        # if down. Fail-OPEN — a failed spawn must never block the session. This
+        # ensures every new Cowork session re-arms NER so the first
+        # bubble_shield_read call has a live daemon (not a stale/dead one).
+        sess = hooks.setdefault("SessionStart", [])
+        sess = [e for e in sess if not _entry_is_bubble_shield(e, "rearm-daemon")]
+        sess.append({
+            "hooks": [{"type": "command", "command": REARM_CMD}],
+        })
+        hooks["SessionStart"] = sess
 
         p.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception:

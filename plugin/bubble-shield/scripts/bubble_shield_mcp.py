@@ -55,6 +55,22 @@ _OCR_QUALITY_NOTE = (
 
 TOOLS = [
     {
+        "name": "bubble_shield_status",
+        "description": (
+            "Check the current operational status of Bubble Shield: whether the NER "
+            "(GLiNER ML) daemon is active or down, the model name if loaded, whether "
+            "the ML pack is installed, and liveness diagnostics (daemon reachable from "
+            "this process, LaunchAgent loaded). Use this to confirm that fine-grained "
+            "name/address detection is active before processing sensitive documents. "
+            "If NER is down, bubble_shield_read will refuse to process documents until "
+            "the daemon is re-armed."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
         "name": "bubble_shield_read",
         "description": (
             "Read a client file and return it ANONYMISED — names, IBANs, emails and "
@@ -236,12 +252,25 @@ def _vault_path() -> Path:
     return VAULT_DIR / f"{mission}.vault.json"
 
 
-_DEGRADED_WARNING = (
-    "⚠️ Détection dégradée (regex seul, NER hors-ligne) — des données identifiantes "
-    "en texte libre (noms, lieux de naissance, numéros de pièce) peuvent ne PAS être "
-    "masquées. Relancez bubble_shield_setup_ml(action='status') pour vérifier l'état "
-    "du pack ML, ou redémarrez la session pour réarmer le daemon NER.\n\n"
+_NER_DOWN_ERROR = (
+    "⛔ Bubble Shield — NER (détection fine) hors-ligne. "
+    "Ce document NE PEUT PAS être certifié sûr en mode dégradé (regex seul) : "
+    "des noms en texte libre (ex. DUPONT MARC) ne seraient pas masqués. "
+    "Le daemon NER est en cours de réarmement — réessayez dans quelques secondes. "
+    "Si le problème persiste, relancez bubble_shield_setup_ml(action='status')."
 )
+
+
+def _try_spawn_daemon_from_mcp() -> None:
+    """Best-effort daemon re-arm from the MCP server path. Fails open (never
+    blocks the error response). Delegates to posttool_anonymize._try_spawn_daemon
+    which already handles the ml.json / venv_python resolution."""
+    try:
+        sys.path.insert(0, str(_scripts_dir()))
+        import posttool_anonymize as _pt
+        _pt._try_spawn_daemon()
+    except Exception:
+        pass  # spawn failure is acceptable; the per-call gate is what enforces safety
 
 
 def _engine(text_for_daemon: str = "", filename_basename: str = ""):
@@ -340,30 +369,41 @@ def _guard_check(value: str, kind: str, confirm: bool = False) -> dict:
         return {"ok": False, "reason": f"guard error: {e}"}
 
 
+class NERDownError(RuntimeError):
+    """Raised by _anonymise_text/_anonymise_file when the NER daemon is offline.
+
+    Callers (the tools/call handler) must convert this to isError:true without
+    including any anonymized body or raw PII text — fail-closed contract.
+    """
+
+
 def _anonymise_text(text: str, filename_basename: str = "") -> str:
     """Anonymise a block of text. Used by bubble_shield_anonymize_text and bubble_shield_read.
 
-    When the NER daemon is down the output is REGEX-ONLY — free-text PII such as
-    names, birthplace, ID numbers may not be caught. A loud degraded-mode warning
-    is prepended to the result so the agent and user know protection is partial.
+    FAIL-CLOSED: raises NERDownError when the NER daemon is offline. Regex-only
+    mode CANNOT safely catch context-free all-caps name blocks (e.g. 'DUPONT MARC'),
+    so returning a partial result would let the agent certify a leaking document.
+    The caller must convert NERDownError to isError:true — no anonymized body, no
+    raw PII.
+
+    A re-arm spawn is triggered before raising so the NEXT call can succeed.
 
     fix #280 — filename_basename parameter:
     When provided (always set by _anonymise_file), the structured_ext detector is
     rebuilt with that basename so person-name tokens from the filename are seeded
-    into the doc-level repetition pass.  This masks the footer boilerplate
-    "...complémentaire au document DURAND Théophile" that contains the client name
-    as a quoted filename fragment with no recognizable label context.
+    into the doc-level repetition pass.
     """
     engine, vpath, daemon_up = _engine(text, filename_basename=filename_basename)
+    if not daemon_up:
+        # Kick the re-arm so the next call can succeed, then fail this one closed.
+        _try_spawn_daemon_from_mcp()
+        raise NERDownError(_NER_DOWN_ERROR)
     res = engine.anonymize(text)
     engine.vault.save(str(vpath))
-    # Degraded-mode warning: prepend when NER daemon is offline (regex-only).
-    # Never present regex-only output as fully clean.
-    degraded = "" if daemon_up else _DEGRADED_WARNING
     note = "" if res.safe_to_send else (
         "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
         "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
-    return degraded + res.anonymized + note
+    return res.anonymized + note
 
 
 def _anonymise_file(path: str) -> str:
@@ -384,6 +424,66 @@ def _anonymise_file(path: str) -> str:
         raise FileNotFoundError(f"no such file: {p}")
     text = extract_file(p)                            # fail-closed on scanned PDFs
     return _anonymise_text(text, filename_basename=p.name)
+
+
+def _ner_status() -> dict:
+    """Return NER daemon status + liveness diagnostics. Read-only; triggers a
+    best-effort re-arm spawn when the daemon is down (never blocks).
+
+    Returns a dict with keys:
+      ner           — "active" | "down"
+      model         — model name from ml.json, or null
+      ml_pack_installed — bool
+      daemon_reachable  — bool (HTTP /health reachable from this process)
+      launchagent_loaded — bool (launchctl list shows com.bubbleinvest.bubble-shield-nerd)
+      ml_json_exists    — bool (~/.bubble_shield/ml.json present)
+    """
+    import subprocess as _sp
+
+    ml_json = BUBBLE_SHIELD_HOME / "ml.json"
+    ml_pack_installed = ml_json.is_file()
+
+    model_name = None
+    if ml_pack_installed:
+        try:
+            man = json.loads(ml_json.read_text(encoding="utf-8"))
+            model_name = man.get("model") or man.get("model_id") or man.get("name")
+        except Exception:
+            pass
+
+    # Check if /health is reachable from THIS process (no import of posttool_anonymize needed)
+    try:
+        import urllib.request as _ur
+        _ur.urlopen(
+            _ur.Request(f"http://127.0.0.1:{int(os.environ.get('BUBBLE_SHIELD_NERD_PORT', '8723'))}/health",
+                        method="GET"), timeout=0.5)
+        daemon_reachable = True
+    except Exception:
+        daemon_reachable = False
+
+    # LaunchAgent check (macOS) — non-fatal on non-Mac / error
+    launchagent_loaded = False
+    try:
+        result = _sp.run(
+            ["launchctl", "list"],
+            capture_output=True, text=True, timeout=2)
+        launchagent_loaded = "com.bubbleinvest.bubble-shield-nerd" in result.stdout
+    except Exception:
+        pass
+
+    ner_active = daemon_reachable
+    if not ner_active:
+        # Best-effort re-arm (non-blocking)
+        _try_spawn_daemon_from_mcp()
+
+    return {
+        "ner": "active" if ner_active else "down",
+        "model": model_name,
+        "ml_pack_installed": ml_pack_installed,
+        "daemon_reachable": daemon_reachable,
+        "launchagent_loaded": launchagent_loaded,
+        "ml_json_exists": ml_pack_installed,
+    }
 
 
 def _deanonymise_to_file(path: str, content: str) -> dict:
@@ -585,7 +685,21 @@ def _handle(req: dict) -> None:
             _result(id_, {"content": [{"type": "text", "text": msg}], "isError": True})
 
         try:
-            if name == "bubble_shield_read":
+            if name == "bubble_shield_status":
+                st = _ner_status()
+                # Human-readable summary + machine-readable JSON
+                ner_label = "✅ NER actif" if st["ner"] == "active" else "⛔ NER hors-ligne"
+                model_label = st["model"] or "(inconnu)"
+                ml_label = "installé" if st["ml_pack_installed"] else "non installé"
+                la_label = "chargé" if st["launchagent_loaded"] else "non chargé"
+                summary = (
+                    f"{ner_label} | Pack ML : {ml_label} | Modèle : {model_label} | "
+                    f"LaunchAgent : {la_label} | "
+                    f"daemon /health : {'OK' if st['daemon_reachable'] else 'KO'}\n\n"
+                    + json.dumps(st, ensure_ascii=False, indent=2)
+                )
+                ok(summary)
+            elif name == "bubble_shield_read":
                 anon = _anonymise_file(args.get("path", ""))
                 # Surface OCR quality note when the text was extracted via OCR pack
                 if _OCR_TAG in anon[:30]:
@@ -724,6 +838,9 @@ def _handle(req: dict) -> None:
                     fail(f"kind inconnu: {kind}")
             else:
                 _error(id_, -32601, f"unknown tool: {name}")
+        except NERDownError as e:
+            # NER daemon is offline — fail-closed. No anonymized body, no raw PII.
+            fail(str(e))
         except Exception as e:
             if name == "bubble_shield_write":
                 fail(f"⛔ Bubble Shield n'a pas pu écrire le document : {e}. "
