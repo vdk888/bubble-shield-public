@@ -5,6 +5,31 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.3 — 2026-06-26 — fix/318-overlap-span-drop (name-recall leak + truncation)
+
+**Security: close trailing-forename leak on administrative forms; improve recall on bare names.**
+
+Fix a name-recall leak on administrative forms: when the detector returned overlapping
+person-name spans (a full SURNAME FORENAME FORENAME block scoring lower than a shorter
+sub-span), the overlap resolver kept the shorter span and a trailing forename leaked in
+clear. The resolver now extends a kept person-name span to cover the full overlapping
+name. Also reduced the GLiNER chunk size to eliminate silent token-window truncation on
+form-fill (dotted) sections, and lowered the name-detection threshold — both improve
+recall on bare/low-context names without over-masking.
+
+Fixes:
+- `_extend_nom_containment()` — after the NOM overlap resolver selects the winning span,
+  any overlapping NOM parent span that contains the winner is used to extend the winner's
+  end offset to cover the full name block; trailing forenames no longer leak.
+- `DEFAULT_CHUNK` reduced 1500 → 1000 chars — eliminates silent 384-token GLiNER
+  truncation on dotted form-fill sections; 1000 chars produces ≤~200 word-tokens after
+  dot-compression, safely within the model's 384-token context window.
+- Detection threshold reduced 0.45 → 0.30 — improves recall on bare/low-context names
+  (single forename, surname-only) without triggering measurable over-masking on the
+  regression suite.
+- Dot-compression — dotted sequences (…………) are collapsed before tokenisation, reducing
+  token count for form-fill sections and ensuring the name context is not crowded out.
+
 ## 1.18.2 — 2026-06-26 — fix/daemon-onnx-detection (lazy self-test hardening)
 
 **Security: close the "healthy but blind" daemon failure class for --no-warm starts.**
