@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Bubble Shield — pseudonymiseur local (réversible){% endblock %}
+{% block content %}
+{% if error %}<div class="notice">{{ error }}</div>{% endif %}
+<section class="intro">
+  <p class="kicker">Pseudonymisation réversible · 100&nbsp;% locale</p>
+  <h1>Mettez vos données au coffre avant de les confier à un LLM.</h1>
+  <p class="lede">
+    Les données identifiantes sont remplacées par des jetons réversibles, puis
+    restituées à la réponse. Le texte en clair et la table de correspondance ne
+    quittent jamais cette machine. Tant qu'une donnée identifiante subsiste, le
+    document n'est pas déclaré sûr à envoyer.
+  </p>
+  <p class="legal-note">
+    Au sens du RGPD, il s'agit d'une <strong>pseudonymisation réversible</strong>
+    (mesure de sécurité, art.&nbsp;32) — le coffre restant strictement local, le
+    texte transmis peut être considéré anonyme côté destinataire (LLM). Aide à la
+    décision, pas un avis juridique&nbsp;; la revue humaine reste requise.
+  </p>
+</section>
+
+<form id="anon-form" class="card" method="post" action="/anonymize" enctype="multipart/form-data">
+  <div class="field">
+    <label for="mission">Mission / client</label>
+    <input type="text" id="mission" name="mission" value="demo"
+           placeholder="ex. dossier-dupont-2026" autocomplete="off">
+    <p class="hint">Nomme le coffre — isolé par client / mission.</p>
+  </div>
+
+  <div class="field">
+    <label for="text">Texte à anonymiser</label>
+    <textarea id="text" name="text" rows="13" spellcheck="false"
+              placeholder="Collez ici le contenu du document…">{{ sample }}</textarea>
+  </div>
+
+  <div class="field">
+    <label for="document">…ou déposer un fichier</label>
+    <input type="file" id="document" name="document" accept=".pdf,.txt,.md,.csv,.json">
+    <p class="hint">PDF (texte), .txt, .md, .csv, .json. Les PDF scannés (image) ne sont pas pris en charge.</p>
+  </div>
+
+  <div class="actions">
+    <button type="submit" class="btn" id="anon-submit">Anonymiser</button>
+    <span class="hint">Le texte en clair n'est jamais envoyé ailleurs.</span>
+  </div>
+</form>
+
+{# ── Dossier mode — many files, one coherent anonymisation ───────────────── #}
+<form id="dossier-form" class="card card--dossier" method="post"
+      action="/anonymize-dossier" enctype="multipart/form-data">
+  <div class="field">
+    <label for="documents"><strong>Dossier complet</strong> — plusieurs fichiers à la fois</label>
+    <input type="file" id="documents" name="documents" multiple
+           accept=".pdf,.txt,.md,.csv,.json">
+    <p class="hint">
+      Déposez les 8&nbsp;documents d'un dossier (DER, DCC, profil, déclaration
+      d'adéquation, bulletin…). Le <strong>même client est anonymisé de façon
+      cohérente</strong> dans tous les fichiers&nbsp;: même jeton partout, et il
+      est rattrapé même là où un seul document le mentionne à peine. Vous récupérez
+      un <strong>.zip</strong> des documents anonymisés + la table de correspondance.
+    </p>
+  </div>
+  <div class="actions">
+    <button type="submit" class="btn btn--ghost" id="dossier-submit">Anonymiser le dossier&nbsp;→ .zip</button>
+    <span class="hint">Tout reste local. Seul le .zip anonymisé est produit.</span>
+  </div>
+</form>
+
+{# ── Live loading overlay ────────────────────────────────────────────────
+   The /anonymize POST is a single blocking request (extraction → regex →
+   local AI model → self-improving sweep). The first run also loads the local
+   model (~10 s). Without feedback the page just sits silently and looks
+   broken — bad in front of a client. This overlay appears on submit, runs an
+   animated bar and steps through the real stages so the wait reads as live
+   progress. Pure CSS+JS, no extra request; the normal POST still drives the
+   page. #}
+<div id="anon-overlay" class="anon-overlay" aria-hidden="true">
+  <div class="anon-overlay-card">
+    <div class="anon-spinner" aria-hidden="true"></div>
+    <p class="anon-stage" id="anon-stage">Préparation…</p>
+    <div class="anon-bar"><div class="anon-bar-fill" id="anon-bar-fill"></div></div>
+    <p class="anon-sub" id="anon-sub">Tout se passe en local — rien n'est envoyé ailleurs.</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var overlay = document.getElementById('anon-overlay');
+  var stageEl = document.getElementById('anon-stage');
+  var barEl   = document.getElementById('anon-bar-fill');
+  var subEl   = document.getElementById('anon-sub');
+
+  // Stages reflect what the backend actually does. First run loads the model.
+  var single = [
+    { t: 'Extraction du texte…',            sub: 'Lecture du document (PDF / texte).',                 pct: 12, ms: 700  },
+    { t: 'Détection structurée…',           sub: 'IBAN, e-mails, n° fiscaux, dates — avec checksums.', pct: 28, ms: 900  },
+    { t: 'Chargement du modèle IA local…',  sub: 'Première fois ≈ 10 s, ensuite quasi instantané.',    pct: 55, ms: 6000 },
+    { t: 'Analyse contextuelle (noms)…',    sub: 'Modèle local — aucune donnée ne quitte la machine.', pct: 78, ms: 2500 },
+    { t: 'Passe auto-apprenante…',          sub: 'Reprise des occurrences détachées.',                 pct: 92, ms: 1500 },
+    { t: 'Finalisation…',                   sub: 'Construction du coffre et du verdict.',               pct: 98, ms: 1500 }
+  ];
+  var dossier = [
+    { t: 'Extraction des documents…',       sub: 'Lecture de chaque fichier du dossier.',              pct: 10, ms: 1500 },
+    { t: 'Chargement du modèle IA local…',  sub: 'Première fois ≈ 10 s, ensuite quasi instantané.',    pct: 35, ms: 6000 },
+    { t: 'Découverte du client (tour 1)…',  sub: 'On apprend qui est le client sur tout le dossier.',  pct: 60, ms: 4000 },
+    { t: 'Anonymisation cohérente (tour 2)…', sub: 'Même jeton partout, rattrapé dans chaque fichier.', pct: 85, ms: 4000 },
+    { t: 'Compression du .zip…',            sub: 'Documents anonymisés + table de correspondance.',     pct: 96, ms: 2000 }
+  ];
+
+  function wire(formId, btnId, stages, busyLabel) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+    var btn = document.getElementById(btnId);
+    form.addEventListener('submit', function () {
+      overlay.classList.add('is-on');
+      overlay.setAttribute('aria-hidden', 'false');
+      if (btn) { btn.disabled = true; btn.textContent = busyLabel; }
+      var i = 0;
+      (function step() {
+        if (i >= stages.length) return;
+        var s = stages[i++];
+        stageEl.textContent = s.t; subEl.textContent = s.sub;
+        barEl.style.width = s.pct + '%';
+        setTimeout(step, s.ms);
+      })();
+      setTimeout(function creep() {
+        var w = parseFloat(barEl.style.width) || 0;
+        if (w < 99) { barEl.style.width = Math.min(99, w + 0.5) + '%'; setTimeout(creep, 600); }
+      }, 13000);
+      // The dossier route returns a file download (not a navigation), so the
+      // overlay would otherwise hang. Hide it after a grace period.
+      if (formId === 'dossier-form') {
+        setTimeout(function () {
+          overlay.classList.remove('is-on');
+          if (btn) { btn.disabled = false; btn.textContent = 'Anonymiser le dossier → .zip'; }
+        }, 60000);
+      }
+    });
+  }
+  wire('anon-form', 'anon-submit', single, 'Anonymisation…');
+  wire('dossier-form', 'dossier-submit', dossier, 'Traitement du dossier…');
+})();
+</script>
+
+<p class="layers-note">
+  Détection en couches&nbsp;: regex&nbsp;+ checksums (active) · NER Presidio (option) · LLM local via Ollama (option).
+</p>
+{% endblock %}

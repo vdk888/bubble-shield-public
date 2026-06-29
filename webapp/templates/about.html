@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block title %}Comment ça marche — Bubble Shield{% endblock %}
+{% block content %}
+
+<section class="intro">
+  <p class="kicker">Comment ça marche · en clair</p>
+  <h1>Vos données au coffre avant de parler à une&nbsp;IA.</h1>
+  <p class="lede">
+    Les données qui identifient vos clients sont remplacées par des jetons
+    anonymes <em>sur votre machine</em>. L'IA travaille sur la version
+    anonymisée&nbsp;; on remet les vrais noms dans sa réponse à la fin.
+    <strong>Le vrai nom de votre client ne quitte jamais cet ordinateur.</strong>
+  </p>
+</section>
+
+<div class="about">
+
+  <section class="about-block">
+    <h2>Le principe du coffre — réversible</h2>
+    <p>
+      Imaginez un <strong>vestiaire de théâtre</strong>. À l'entrée, chaque
+      manteau (donnée sensible) reçoit un numéro&nbsp;:
+    </p>
+    <ul class="about-map">
+      <li><span class="av">Jean Dupont</span><span class="ar">→</span><code>⟦NOM_0001⟧</code></li>
+      <li><span class="av">15 avenue des Tilleuls</span><span class="ar">→</span><code>⟦ADRESSE_0001⟧</code></li>
+      <li><span class="av">jean.dupont@…</span><span class="ar">→</span><code>⟦EMAIL_0001⟧</code></li>
+    </ul>
+    <p>
+      L'IA ne voit que les numéros. Elle fait tout son travail (vérifier la
+      cohérence d'un dossier, rédiger une déclaration d'adéquation)
+      <strong>sans jamais savoir de qui il s'agit</strong>. Quand elle rend sa
+      copie, on échange les numéros contre les vrais manteaux. La
+      <strong>table vestiaire — vos noms ↔ les numéros — reste dans un tiroir
+      fermé sur votre machine</strong>, jamais envoyée nulle part.
+    </p>
+    <p class="about-note">
+      Réversible (un sens à l'aller, l'autre au retour) et éphémère — aucune base
+      de données fantôme à entretenir.
+    </p>
+  </section>
+
+  <section class="about-block">
+    <h2>Comment il trouve les données sensibles — 4 couches</h2>
+    <p>
+      Le vrai défi n'est pas «&nbsp;trouver des noms&nbsp;» — c'est
+      <strong>distinguer VOS clients du reste</strong> (votre cabinet, l'AMF, les
+      sociétés de gestion sont partout dans un dossier, et ça, il ne faut
+      <em>pas</em> l'anonymiser). Quatre couches travaillent ensemble&nbsp;:
+    </p>
+    <table class="about-table">
+      <thead><tr><th>Couche</th><th>Ce qu'elle attrape</th><th>Comment</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Motifs + clés de contrôle</strong></td>
+          <td>IBAN, n° fiscal, e-mail, n° de sécu, dates</td>
+          <td>Règles précises + vérification mathématique (un IBAN a une clé de contrôle — on la recalcule). <em>Certitude.</em></td>
+        </tr>
+        <tr>
+          <td><strong>IA locale</strong> <span class="tag">le cerveau</span></td>
+          <td>Noms, adresses, noms de famille, <strong>enfants</strong> — ce que les règles ne voient pas</td>
+          <td>Un petit modèle d'IA qui tourne <strong>sur votre Mac, hors ligne</strong>. Il comprend le contexte («&nbsp;ceci est une personne&nbsp;»).</td>
+        </tr>
+        <tr>
+          <td><strong>Lecture de formulaire</strong></td>
+          <td>Lieux de naissance, noms dans la mise en page des fiches KYC</td>
+          <td>Règles adaptées à la forme de vos documents métier</td>
+        </tr>
+        <tr>
+          <td><strong>Liste blanche cabinet</strong></td>
+          <td><em>Retire</em> REDACTEDFIRM, vos conseillers, l'AMF, les fonds…</td>
+          <td>Ce qui appartient au cabinet ou aux régulateurs n'est jamais anonymisé</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="about-block">
+    <h2>Les deux astuces qui le rendent fiable</h2>
+    <div class="about-cards">
+      <div class="about-card">
+        <p class="ac-h">Plusieurs passes plutôt qu'une</p>
+        <p>
+          Un petit modèle local a une «&nbsp;vue&nbsp;» limitée (il ne lit qu'un
+          bout de page à la fois). On découpe donc le document en fenêtres qui se
+          chevauchent et on passe plusieurs fois — on ne rate rien sur les coupures.
+        </p>
+      </div>
+      <div class="about-card">
+        <p class="ac-h">Auto-apprentissage dans le dossier</p>
+        <p>
+          Une fois «&nbsp;le client = Mme X&nbsp;» identifié, on réutilise cette
+          connaissance sur les 8 documents du dossier — y compris là où son nom
+          n'apparaît qu'en pied de page. Découvrir une fois, anonymiser partout,
+          de façon <strong>cohérente</strong> (le même client, toujours le même jeton).
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="about-block">
+    <h2>La règle d'or — «&nbsp;fail-closed&nbsp;»</h2>
+    <p>
+      Le système <strong>se re-vérifie lui-même</strong>&nbsp;: après
+      anonymisation, il relit sa propre copie. S'il reste le moindre doute, il
+      vous le <strong>signale pour un coup d'œil</strong> plutôt que de déclarer
+      «&nbsp;tout va bien&nbsp;» à tort. On préfère sur-protéger que laisser
+      fuir. <strong>Vous gardez le dernier mot</strong> — l'outil assiste,
+      l'humain valide.
+    </p>
+  </section>
+
+  <section class="about-block">
+    <h2>Le bon mot juridique&nbsp;: pseudonymisation, pas anonymisation</h2>
+    <p>
+      Au sens du RGPD, remplacer un nom par un jeton <em>réversible</em> et garder
+      la correspondance dans un coffre, c'est une <strong>pseudonymisation</strong>
+      (art.&nbsp;4&nbsp;§5) — une <strong>mesure de sécurité</strong> (art.&nbsp;32),
+      pas une «&nbsp;anonymisation&nbsp;» qui ferait sortir la donnée du RGPD. La
+      nuance compte&nbsp;: le document d'origine et le coffre restent des données
+      personnelles à protéger.
+    </p>
+    <p>
+      Là où c'est puissant&nbsp;: l'identifiabilité s'apprécie <strong>destinataire
+      par destinataire</strong> (CJUE <em>Breyer</em>&nbsp;; <em>SRB</em>, sept.
+      2025). Le coffre ne quittant jamais votre poste, le LLM n'a
+      <strong>aucun moyen raisonnable</strong> de ré-identifier&nbsp;: le texte
+      transmis peut être considéré <strong>anonyme dans ses mains</strong>, tout en
+      restant pseudonymisé (donc personnel) chez vous.
+    </p>
+  </section>
+
+  <section class="about-block">
+    <h2>Pourquoi c'est une bonne mesure RGPD par construction</h2>
+    <ul class="about-list">
+      <li><strong>100&nbsp;% local</strong> — pas d'appel réseau, pas de cloud, rien ne sort de la machine.</li>
+      <li><strong>Réversible sans base parallèle</strong> — pas de second fichier clients à sécuriser.</li>
+      <li>Le coffre (noms ↔ jetons) <strong>ne quitte jamais votre poste</strong>, et il est <strong>chiffré au repos</strong>.</li>
+      <li>Même si votre prestataire IA était piraté demain, <strong>il n'aurait jamais vu de vrais noms</strong>.</li>
+      <li><strong>Effacement &amp; expiration</strong>&nbsp;: on peut purger un client, et le coffre expire automatiquement.</li>
+    </ul>
+    <p class="about-note">
+      Bubble Shield est une <strong>mesure de conformité, pas une exonération</strong>&nbsp;:
+      il ne remplace ni le contrat de sous-traitance (DPA) avec le fournisseur IA,
+      ni l'analyse d'impact (DPIA), ni la revue humaine. L'outil assiste&nbsp;; la
+      responsabilité reste la vôtre.
+    </p>
+  </section>
+
+  <section class="about-block about-takeaway">
+    <p>
+      «&nbsp;Vos données sensibles sont mises au coffre sur votre machine avant
+      de parler à l'IA. L'IA travaille à l'aveugle sur des jetons&nbsp;; vous
+      récupérez le résultat avec les vrais noms remis en place. Le coffre ne sort
+      jamais de chez vous, et l'outil vous signale tout doute plutôt que de le
+      cacher.&nbsp;»
+    </p>
+  </section>
+
+  <p class="about-back"><a href="/" class="btn">← Essayer maintenant</a></p>
+
+</div>
+{% endblock %}

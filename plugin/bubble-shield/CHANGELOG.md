@@ -5,6 +5,38 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.6 — 2026-06-29 — re-vendor #348 precision-filter + #345 atomic-vault
+
+**Re-vendor of the #348 precision filter and the #345 atomic vault save into the
+shipped bundle.** The engine fixes had landed in the repo-root `bubble_shield/` but
+were not yet vendored into the plugin bundle, so the shipped server ran stale code.
+This release re-vendors the engine and re-packs the MCPB.
+
+- #348 — precision filter: gazetteer-wins precedence across all negative filters and
+  word-boundary org matching, closing a substring false-positive leak. Ships the new
+  `common_words.py` and `safe_words.py` stoplists, the word-boundary-aware
+  `allowlist.py` (`_short_token_allowlists`), the augmented `policy.py`, and the
+  daemon `bubble_shield_mcp.py` `_apply_negative_filters` / `_composed_match_filter`.
+- #345 — atomic vault save: `vault.py` now writes to a `.tmp` sidecar then
+  `os.replace()`s it into place, eliminating the truncated-vault window on crash/interrupt.
+
+## 1.18.5 — 2026-06-27 — feat/desktop-tier2-integration (Tier-2 desktop app groundwork)
+
+Desktop app Tier-2 groundwork: candidate-signal sidecar (sub-threshold spans recorded
+host-side for human review, agent output unchanged) + local review-queue store. The
+companion config/review desktop app is a separate host-native artifact.
+
+- `candidate_sidecar.py`: after each anonymization, entities detected below the confidence
+  threshold are written to `~/.bubble_shield/candidates/<mission>.candidates.json` (host-only,
+  chmod 600, atomic write, fail-open — the agent-facing output is never touched).
+- `review_queue.py`: local SQLite-backed store for the HITL review queue; confirm/dismiss
+  actions feed the gazetteer and drain the queue (webapp/desktop-app component).
+- Phase 2 native launcher: pywebview window wrapping the existing config/review webapp.
+- Phase 3 review-queue UI: HITL inbox + audit log (Tier-2 UX, desktop-app component).
+- Warning banner when policy keeps identifying types (NOM, etc.) visible (#334).
+- Fix: test isolation — test_334 now loads the real posttool_anonymize (not a stub)
+  when the module is importable, preventing NERD_URL attribute error in daemon tests.
+
 ## 1.18.4 — 2026-06-27 — feat/326-known-pii-gazetteer (local self-improving known-PII gazetteer)
 
 Add a local self-improving known-PII gazetteer: once a name is confirmed as PII

@@ -40,6 +40,25 @@ DOCX_MAGIC = b"PK\x03\x04"  # docx is a zip
 
 _OCR_TAG = "[OCR]"  # prepended to signal OCR-sourced text to callers
 
+# Image formats we route through OCR. Detection is by extension OR magic bytes,
+# so a mislabelled/extensionless image still gets caught (a .png renamed .dat
+# must NOT fall through to the UTF-8 decoder — that returns a multi-MB binary
+# blob as "text" and crashes/bloats the MCP response; #338).
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif")
+_IMAGE_MAGICS = (
+    b"\x89PNG\r\n\x1a\n",        # PNG
+    b"\xff\xd8\xff",            # JPEG
+    b"BM",                       # BMP
+    b"GIF87a", b"GIF89a",       # GIF
+    b"II*\x00", b"MM\x00*",     # TIFF (little / big endian)
+)
+
+# Downscale cap: a 7.6 MP RGBA image crashed the MCP server (#338). Cap the long
+# edge so OCR doesn't blow memory/time. Above the HARD pixel cap (and unable to
+# downscale) we fail closed rather than attempt OCR on a pathological image.
+_IMAGE_MAX_LONG_EDGE = 4000      # px — downscale anything longer than this
+_IMAGE_HARD_MAX_PIXELS = 50_000_000  # 50 MP — refuse outright (can't even open safely)
+
 
 class ExtractionError(Exception):
     """Raised when a file can't be turned into usable text."""
@@ -51,6 +70,19 @@ def looks_like_pdf(filename: str, raw: bytes) -> bool:
 
 def looks_like_docx(filename: str, raw: bytes) -> bool:
     return filename.lower().endswith(".docx") and raw[:4].startswith(DOCX_MAGIC)
+
+
+def looks_like_image(filename: str, raw: bytes) -> bool:
+    """True if the bytes/extension look like a raster image we should OCR.
+
+    Magic-byte first (authoritative), extension second (covers truncated reads).
+    A WEBP is a RIFF container: "RIFF"<size>"WEBP"."""
+    head = raw[:16]
+    if any(head.startswith(m) for m in _IMAGE_MAGICS):
+        return True
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True
+    return (filename or "").lower().endswith(_IMAGE_EXTS)
 
 
 def _ocr_pack_python() -> "Path | None":
@@ -132,6 +164,97 @@ def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
             os.unlink(tmp_pdf)
         except Exception:
             pass
+
+
+def _ocr_image_if_pack_present(raw: bytes, suffix: str) -> "str | None":
+    """OCR a raw image (.png/.jpg/...) via docling's IMAGE pipeline.
+
+    Returns the OCR'd text (prefixed with _OCR_TAG) on success, None otherwise.
+    Mirrors _ocr_pdf_if_pack_present but routes through InputFormat.IMAGE with an
+    ImageFormatOption (same RapidOCR engine as the scanned-PDF path).
+
+    The downscale runs INSIDE the ocr-env subprocess (Pillow is guaranteed there,
+    not in the host plugin venv): a large image is shrunk to <= _IMAGE_MAX_LONG_EDGE
+    on its long edge before OCR so a 7.6 MP RGBA screenshot can't blow memory/time
+    and crash the MCP server (#338). An image over _IMAGE_HARD_MAX_PIXELS is
+    refused there (the subprocess exits non-zero) so we fail closed, not crash.
+
+    PRIVACY: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE forced — no runtime HF fetch."""
+    py = _ocr_pack_python()
+    if py is None:
+        return None
+    import subprocess
+    import tempfile
+    import os
+    with tempfile.NamedTemporaryFile(suffix=suffix or ".png", delete=False) as tf:
+        tf.write(raw)
+        tmp_img = tf.name
+    try:
+        code = (
+            "import sys, warnings; warnings.filterwarnings('ignore');"
+            "from PIL import Image;"
+            f"MAX={_IMAGE_MAX_LONG_EDGE}; HARD={_IMAGE_HARD_MAX_PIXELS};"
+            f"path={tmp_img!r};"
+            "im=Image.open(path); im.load();"
+            # Refuse pathological images outright -> non-zero exit -> fail closed.
+            "sys.exit(7) if (im.width*im.height) > HARD else None;"
+            # Downscale long edge to MAX, preserving aspect; re-save in place.
+            "longest=max(im.size);"
+            "im2=(im.resize((max(1,round(im.width*MAX/longest)), max(1,round(im.height*MAX/longest)))) if longest>MAX else im);"
+            "im2=im2.convert('RGB');"
+            "im2.save(path, format='PNG');"
+            "from docling.document_converter import DocumentConverter, ImageFormatOption;"
+            "from docling.datamodel.base_models import InputFormat;"
+            "from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions;"
+            "opts = PdfPipelineOptions();"
+            "opts.do_ocr = True;"
+            "opts.ocr_options = RapidOcrOptions();"
+            "opts.do_table_structure = True;"
+            "conv = DocumentConverter(allowed_formats=[InputFormat.IMAGE], format_options={InputFormat.IMAGE: ImageFormatOption(pipeline_options=opts)});"
+            "res = conv.convert(path);"
+            "print(res.document.export_to_markdown(), end='')"
+        )
+        env = dict(os.environ)
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+        r = subprocess.run([str(py), "-c", code],
+                           capture_output=True, text=True, timeout=300, env=env)
+        if r.returncode == 0 and r.stdout.strip():
+            return _OCR_TAG + " " + r.stdout.strip()
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_img)
+        except Exception:
+            pass
+
+
+def extract_image_text(raw: bytes, filename: str) -> str:
+    """OCR a raw image file (.png/.jpg/...) → text, or raise ExtractionError.
+
+    FAIL-CLOSED (#338): an image that can't be OCR'd (pack absent, docling error,
+    image too large to downscale) raises ExtractionError with a clear FR message
+    — NEVER a UTF-8-decoded binary blob, NEVER an unhandled crash that kills the
+    MCP server. _main maps ExtractionError → exit 2 so the caller fails closed."""
+    ext = ""
+    if filename:
+        dot = filename.rfind(".")
+        if dot != -1:
+            ext = filename[dot:].lower()
+    if ext not in _IMAGE_EXTS:
+        ext = ".png"  # detected by magic bytes but no usable extension
+    try:
+        text = _ocr_image_if_pack_present(raw, ext)
+    except Exception:
+        text = None
+    if text:
+        return text
+    raise ExtractionError(
+        "OCR image indisponible — document non vérifié. "
+        "Image illisible, trop volumineuse, ou pack OCR (bubble_shield_setup_ocr) absent. "
+        "Réduisez l'image ou collez le texte manuellement.")
 
 
 def _is_garbled_extraction(text: str) -> bool:
@@ -313,13 +436,19 @@ def extract_docx_text(raw: bytes) -> str:
 
 
 def extract_text(filename: str, raw: bytes) -> str:
-    """Dispatch on file type. PDF -> pypdf, .docx -> python-docx, else UTF-8 decode."""
+    """Dispatch on file type. PDF -> pypdf, .docx -> docx, image -> OCR, else UTF-8.
+
+    The image branch (#338) runs BEFORE the UTF-8 fallback: a raw .png/.jpg must
+    never be UTF-8-decoded (that yields a multi-MB binary blob as "text" and
+    crashes the MCP server). Images fail CLOSED via extract_image_text."""
     if not raw:
         return ""
     if looks_like_pdf(filename or "", raw):
         return extract_pdf_text(raw)
     if looks_like_docx(filename or "", raw):
         return extract_docx_text(raw)
+    if looks_like_image(filename or "", raw):
+        return extract_image_text(raw, filename or "")
     return raw.decode("utf-8", errors="replace")
 
 

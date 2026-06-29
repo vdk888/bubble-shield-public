@@ -16,3 +16,13 @@ FR76 3000 6000 0112 3456 7890 189
 switham_github@mac-guyver.com
 # example.com is a reserved doc domain (RFC 2606) — synthetic by definition.
 jean.martin@example.com
+jean.dupont@example.com
+your@email.com
+
+# "Sébastien" is a common French FORENAME in the engine's public first-name
+# gazetteer (bubble_shield/gazetteer.py) — the detector's own dictionary, used to
+# RECOGNISE first names. It also appears as an illustrative example in a webapp/app.py
+# code comment. It collides with a hashed-denylist forename only because a real
+# client shares that common given name; the gazetteer is generic public data,
+# shipped in every release (already public since v1.18.4). Not client data.
+Sébastien

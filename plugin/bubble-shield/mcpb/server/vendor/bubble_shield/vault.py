@@ -234,8 +234,14 @@ class Vault:
     def save(self, path: str | Path) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
-                     encoding="utf-8")
+        # Atomic write (#345): write to a temp file then os.replace() into place,
+        # so a crash mid-write can never truncate the existing vault — the one
+        # store holding the reversible token<->cleartext-PII map. Mirrors
+        # known_pii_store._save_raw.
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, p)
         try:
             p.chmod(0o600)  # vault holds the real PII — keep it private
         except OSError:

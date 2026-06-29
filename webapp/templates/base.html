@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Bubble Shield — pseudonymiseur local (réversible){% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <a href="/" class="brand"><span class="brk">⟦</span>&nbsp;Bubble Shield&nbsp;<span class="brk">⟧</span></a>
+      <nav class="top-nav">
+        <a href="/about" class="top-link">Comment ça marche</a>
+        <a href="/dashboard" class="top-link">Contrôle &amp; réglages</a>
+        <a href="/review" class="top-link">File de révision</a>
+        <a href="/gazetteer" class="top-link">Liste connue</a>
+        <a href="/vault" class="top-link">Coffres</a>
+        <span class="badge"><span class="badge-dot"></span>Traitement 100&nbsp;% local</span>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="foot">
+    Bubble Shield — pseudonymisation PII réversible et locale (jetons + coffre), à validation fail-closed, pour les workflows LLM.
+  </footer>
+</body>
+</html>

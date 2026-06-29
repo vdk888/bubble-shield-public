@@ -1,24 +1,24 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "bubble-shield",
   "owner": {
     "name": "Bubble Invest",
-    "url": "https://github.com/vdk888/bubble-shield-public"
+    "email": "bubbleinvest.ai@gmail.com"
   },
   "metadata": {
     "description": "Fail-closed PII guard for Cowork — Bubble Shield local anonymiser enforcement",
-    "version": "1.18.4"
+    "version": "1.18.12"
   },
   "plugins": [
     {
       "name": "bubble-shield",
       "source": "./plugin/bubble-shield",
-      "description": "PreToolUse guard that blocks reads of protected client folders until the data is anonymised through Bubble Shield. 100% local, reversible, fail-closed (RGPD art. 25 & 32).",
-      "version": "1.18.4",
+      "description": "Fail-closed PII guard for Cowork — blocks Claude from reading protected client folders until the data is run through Bubble Shield's local, reversible anonymiser.",
+      "version": "1.18.12",
       "author": {
-        "name": "Bubble Invest"
+        "name": "Bubble Invest",
+        "email": "bubbleinvest.ai@gmail.com"
       },
-      "homepage": "https://bubbleinvest.com/bubble_shield",
+      "homepage": "https://bubbleinvest.com/bubble-shield",
       "license": "MIT",
       "keywords": [
         "pii",
@@ -27,7 +27,9 @@
         "gdpr",
         "guard",
         "hook",
-        "cowork"
+        "cowork",
+        "finance",
+        "cgp"
       ],
       "category": "security",
       "tags": [

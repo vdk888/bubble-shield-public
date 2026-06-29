@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Journal des archivés — Bubble Shield{% endblock %}
+{% block content %}
+
+<section class="intro">
+  <p class="kicker">Révision HITL · journal d'audit</p>
+  <h1>Candidats archivés</h1>
+  <p class="lede">
+    Journal immuable de tous les candidats résolus : confirmés (ajoutés au masquage automatique),
+    ignorés manuellement, ou expirés automatiquement après 30 jours.
+    <strong>Lecture seule.</strong>
+  </p>
+</section>
+
+<div class="review-queue-header">
+  <p class="review-queue-count">
+    {% if dismissed_count == 0 %}
+      Aucune entrée archivée.
+    {% elif dismissed_count == 1 %}
+      <strong>1</strong> entrée archivée.
+    {% else %}
+      <strong>{{ dismissed_count }}</strong> entrées archivées.
+    {% endif %}
+  </p>
+  <a href="/review" class="btn btn--ghost btn--sm">Retour à la file</a>
+</div>
+
+{% if dismissed %}
+<table class="about-table dash-table rq-log-table">
+  <thead>
+    <tr>
+      <th>Valeur</th>
+      <th>Type</th>
+      <th>Statut</th>
+      <th>Motif</th>
+      <th>Résolu le</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in dismissed %}
+    <tr class="rq-log-row rq-log-row--{{ item.status }}">
+      <td class="rq-log-value">{{ item.value }}</td>
+      <td><code>{{ item.entity_type }}</code></td>
+      <td>
+        {% if item.status == "confirmed" %}
+          <span class="verdict verdict--safe">confirmé</span>
+        {% elif item.status == "dismissed" %}
+          <span class="verdict">ignoré</span>
+        {% else %}
+          <span class="verdict verdict--err">{{ item.status }}</span>
+        {% endif %}
+      </td>
+      <td class="rq-log-reason">
+        {% if item.dismiss_reason %}
+          {{ item.dismiss_reason }}
+        {% elif item.status == "confirmed" %}
+          Ajouté au masquage automatique
+        {% else %}
+          —
+        {% endif %}
+      </td>
+      <td class="dt-time">{{ item.resolved_at[:10] if item.resolved_at else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="rq-empty">
+  <p>Aucune entrée archivée pour le moment. Confirmez ou ignorez des candidats depuis la file de révision pour les voir apparaître ici.</p>
+  <a href="/review" class="btn btn--ghost btn--sm">Aller à la file de révision</a>
+</div>
+{% endif %}
+
+{% endblock %}

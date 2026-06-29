@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Liste connue — Bubble Shield{% endblock %}
+{% block content %}
+<h1>Données connues (gazetteer)</h1>
+<p>{{ count }} entrée(s) confirmée(s). Retirer une entrée = les futurs documents ne la masqueront plus automatiquement.</p>
+{% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+<table>
+  <thead><tr><th>Donnée (masquée)</th><th>Type</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.masked }}</td>
+      <td>{{ r.entity_type }}</td>
+      <td>
+        <form method="post" action="/gazetteer/remove"
+              onsubmit="return confirm('Retirer cette donnée de la liste connue ? Les futurs documents ne la masqueront plus automatiquement.');">
+          <input type="hidden" name="value_b64" value="{{ r.value_b64 }}">
+          <button type="submit">Supprimer</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,6 +1,6 @@
 ---
 name: bubble-shield-onboarding
-description: "Help a non-technical user (a CGP / financial advisor) understand, configure, and use the Bubble Shield Guard plugin — what it does, how to protect a client folder, how to show the before/after visually, how the masquer/conserver settings work, and how to set up the optional accuracy pack (better DETECTION, not magic everywhere-masking). Use this skill whenever the user asks 'how does Bubble Shield work', 'how do I set this up / configure it', 'which folders are protected', 'how do I anonymise a dossier', 'how do I see the before/after', 'what is the masquer/conserver table', 'protect my data everywhere / not just one folder', 'catch PII in my emails / everywhere', 'turn on the smart/accurate detection', 'install the AI detection', or seems unsure how to operate the tool — even if they don't name it. ALSO triggers on: 'démarrer', 'onboarding', 'montre-moi', 'première fois', 'prends-moi par la main' — launch the guided first-run demo flow (section below). Lead with plain language, never jargon, because the user is not technical. CRITICAL HONESTY — do NOT tell a Cowork user that Bubble Shield anonymises everywhere automatically or that e-mail is auto-protected, because neither is true in Cowork (PostToolUse does not fire on built-in Read or connectors). The reliable protection is the marked FOLDER plus bubble_shield_read; for e-mail, SAVE the message into the protected folder first. The accuracy pack improves DETECTION on what is read through the folder, it does not add everywhere-coverage in Cowork."
+description: "Help a non-technical CGP / financial advisor understand, set up, and use Bubble Shield — protecting a client folder, the before/after, the masquer/conserver settings, the optional accuracy pack (better DETECTION, not everywhere-masking). Triggers when the user asks how it works, how to set up / configure it, which folders are protected, how to anonymise a dossier, see the before/after, the masquer/conserver table, protect data everywhere or catch PII in emails, turn on the smart detection — or seems unsure how to operate it, even without naming it. Also 'démarrer', 'onboarding', 'montre-moi', 'première fois' launch the guided first-run demo. Plain language, no jargon. CRITICAL HONESTY: do NOT claim it anonymises everywhere or that e-mail is auto-protected in Cowork (PostToolUse does not fire on built-in Read/connectors). Reliable protection = the marked FOLDER + bubble_shield_read; for e-mail, save the message into the folder first."
 ---
 
 # Bubble Shield — onboarding & operation (for a non-technical advisor)
@@ -53,74 +53,82 @@ Then **elicit** (renders as buttons):
 
 ---
 
-### Étape 2 — Installer la détection avancée GLiNER (ML accuracy pack)
+### Étape 2 — Installer TOUS les modèles en une seule passe (détection + OCR)
 
 Progress line first:
-> « **Étape 1/4 — Détection avancée.** J'installe GLiNER, un petit modèle
-> de reconnaissance d'entités nommées (NER) multilingue qui tourne 100 %
-> en local sur votre Mac. Il rend la détection plus fine — noms, adresses,
-> identifiants que les règles simples ratent. ~2 min, rien n'est envoyé sur
-> internet. »
+> « **Étape 1/3 — Installation des modèles.** J'installe en une seule fois
+> tout ce dont Bubble Shield a besoin, 100 % en local sur votre Mac :
+> • **GLiNER** — détection fine des noms/adresses/identifiants (NER multilingue) ;
+> • **OpenAI Privacy Filter** — détection PII renforcée ;
+> • **OCR** — lecture des PDF scannés (Docling + RapidOCR).
+> ~900 Mo au total, une seule fois, rien n'est envoyé sur internet. Les
+> modèles déjà présents sont ignorés (pas de re-téléchargement). »
 
-Call **`bubble_shield_setup_ml`** with `action: "start"`.
+Call **`bubble_shield_setup_ml`** with `action: "start"`. This single call
+pulls **GLiNER + OpenAI Privacy Filter + OCR** in one pass — there is no
+separate "voulez-vous aussi installer X ?" step afterwards.
+
 Then poll **`bubble_shield_setup_ml`** with `action: "status"` every ~20 s
-until status is `ready` (or timeout after 5 min → error message).
-Keep company during the wait:
-> « J'installe la détection avancée… GLiNER multilingue se télécharge
-> (~400 Mo, une seule fois). »
+until status is `ready` (or timeout after ~10 min → error message). The status
+returns a **per-model line** naming each model and its state — relay it to the
+user verbatim. Examples:
+
+> « 📦 GLiNER ↓ téléchargement · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement »
+
+then later:
+
+> « 📦 GLiNER ✓ déjà présent · OpenAI-PF ✓ prêt · OCR ✓ prêt »
+
+Keep company during the wait, naming what's downloading from the status line:
+> « J'installe les modèles… (ceux déjà présents sur votre Mac sont ignorés). »
 
 When `ready`:
-> « ✓ GLiNER est prêt. La détection est maintenant plus précise sur vos
-> documents. »
+> « ✓ Tout est prêt : GLiNER + OpenAI Privacy Filter + OCR. La détection est à
+> son maximum et les PDF scannés seront lus et anonymisés. Vous ne serez plus
+> jamais sollicité pour installer un modèle. »
+
+> Note : `bubble_shield_setup_ocr` existe encore (compatibilité), mais l'onboarding
+> n'en a PAS besoin — `bubble_shield_setup_ml(action='start')` installe déjà l'OCR
+> dans la même passe.
 
 **Elicit** to confirm readiness before continuing:
 
 ```
-[Continuer vers l'OCR]   [Annuler le guidage]
+[Continuer — marquer un dossier]   [Annuler le guidage]
 ```
 
 - `[Annuler le guidage]` → stop gracefully.
-- `[Continuer vers l'OCR]` → Étape 3.
-
----
-
-### Étape 3 — Installer l'OCR (pour les PDF scannés)
-
-Progress line:
-> « **Étape 2/4 — OCR.** J'installe le moteur de lecture de PDF scannés
-> (Docling + RapidOCR PP-OCRv6). Sans ça, un PDF image ne peut pas être
-> anonymisé — Bubble Shield le bloque pour ne rien rater. »
-
-Call **`bubble_shield_setup_ocr`** with `action: "start"`.
-Poll **`bubble_shield_setup_ocr`** with `action: "status"` every ~20 s until
-`ready`. Keep company:
-> « Installation OCR en cours (~200 Mo). »
-
-When `ready`:
-> « ✓ OCR prêt. Les PDF scannés seront maintenant lus et anonymisés. »
-
-**Elicit:**
-
-```
-[Continuer — marquer un dossier]   [Annuler le guidage]
-```
+- `[Continuer — marquer un dossier]` → Étape 4.
 
 ---
 
 ### Étape 4 — Marquer le dossier protégé (folder-first)
 
 Progress line:
-> « **Étape 3/4 — Dossier protégé.** La protection de Bubble Shield ne
+> « **Étape 2/3 — Dossier protégé.** La protection de Bubble Shield ne
 > s'active que sur les dossiers que vous lui montrez. On va marquer un
 > dossier de démonstration maintenant. »
 
-Ask:
-> « Quel est le chemin du dossier client à protéger pour la démo ?
-> (Exemple : `/Users/vous/Documents/Clients/DUPONT`) »
+Say:
+> « Cliquez et choisissez le dossier client à protéger — une fenêtre du
+> Finder va s'ouvrir. »
 
-Accept the path from the user (free text or via `AskUserQuestion`).
-If the user is following the demo exactly, the path will be the DUPONT
-client folder.
+Then **open a native Finder folder picker** so the user CLICKS the folder
+instead of typing a path. Call Bash with:
+
+```bash
+osascript -e 'POSIX path of (choose folder with prompt "Choisissez le dossier client à protéger")'
+```
+
+- On success it prints the chosen folder's POSIX path (e.g.
+  `/Users/vous/Documents/Clients/DUPONT/`) — use that as the path.
+- If the user clicks Cancel, osascript exits non-zero with
+  `User canceled` on stderr → say « Pas de souci » and re-offer the picker
+  (or `[Annuler le guidage]`). Never crash.
+- **Fallback only if osascript is unavailable** (rare, e.g. headless): ask
+  for the path as free text, example `/Users/vous/Documents/Clients/DUPONT`.
+
+If the user is following the demo exactly, they pick the DUPONT client folder.
 
 Once you have the path:
 1. Request directory access with `request_cowork_directory` (the client
@@ -148,7 +156,7 @@ Once you have the path:
 
 ### Étape 5 — Démo sur le DCC (deux temps)
 
-> « **Étape 4/4 — La démo.** Je vais maintenant lire un vrai document
+> « **Étape 3/3 — La démo.** Je vais maintenant lire un vrai document
 > de démonstration. Regardez bien : vous allez voir que l'IA ne reçoit
 > jamais le nom du client — et pourtant elle produit le document final
 > avec le vrai nom. »
@@ -207,8 +215,12 @@ avoir enregistré votre situation patrimoniale. Votre conseiller
 reste à votre disposition.
 
 Cordialement,
-Bubble Invest
+Votre conseiller
 ```
+
+> Signature : utilisez « Votre conseiller » (ou le nom du cabinet du client
+> s'il est connu, depuis `deployment_allowlist.json`). Ne signez JAMAIS
+> « Bubble Invest » dans une démo client — c'est notre société, pas la leur.
 
 Call **`bubble_shield_write`** with:
 - `path` = a file in the `clean/` sub-folder of the DUPONT folder,
@@ -235,7 +247,7 @@ Punchline (say this explicitly):
 ### Étape 6 — Clôture et suite
 
 > « La configuration est terminée. Voici ce qui est en place :
-> ✓ GLiNER (détection avancée) installé
+> ✓ GLiNER + OpenAI Privacy Filter (détection avancée) installés
 > ✓ OCR (PDF scannés) installé
 > ✓ Dossier protégé marqué
 > ✓ Démo complète — l'IA travaille en aveugle, le Mac remet les vrais noms
@@ -359,12 +371,43 @@ masquer/conserver toggle table. Generate it with the `bubble-shield-anonymize` s
 "Show the before/after visually" step (`scripts/make_artifact.py`) and present
 it. For a demo, use a fictional sample — never real client data.
 
-> **Why not "a web app"?** Bubble Shield also ships a local webapp, but it's a
-> *run-on-your-own-computer-in-a-terminal* tool: it starts a small server on
-> `127.0.0.1`. That can't work inside Cowork (Cowork runs in a sandbox, so its
-> localhost isn't the user's machine). The artifact above is the Cowork-native
-> equivalent and shows the same view. Only mention the standalone webapp to a
-> technical user who runs Bubble Shield on their own machine (see `references/run-webapp.md`).
+> **In-chat view vs. the desktop app.** The artifact above is the quick
+> Cowork-native view (the in-chat HTML can't be a live server — Cowork's sandbox
+> localhost isn't the user's machine). For ongoing **review / vault / gazetteer
+> management**, the user has a separate **Bubble Shield desktop app** (see below).
+
+## The Bubble Shield desktop app — the human review surface (on their Mac)
+
+**Bubble Shield is TWO pieces:** (1) this plugin inside Cowork = the *protection*
+(it anonymises), and (2) a small **"Bubble Shield" app on the user's Mac** = the
+*human control surface*. They are separate because the Cowork sandbox can't open
+a window on the host — the app runs natively on the Mac.
+
+**The app has three screens the user will need:**
+- **File de révision** — the inbox of **low-confidence candidates** Bubble Shield
+  wasn't sure about (e.g. a bare first name, a partial address that scored under
+  the threshold). The user clicks **Confirmer** (→ it's masked everywhere after)
+  or **Ignorer** (→ never masked). **This is the human safety net for the
+  near-misses** — without it, sub-threshold data the model wasn't sure about
+  stays in clear. ALWAYS tell the user this app exists and that they should open
+  it periodically to clear the review queue.
+- **Coffre** — the token↔value table per dossier (masked, reveal-on-click);
+  correct or forget a mapping (RGPD).
+- **Liste connue** — the gazetteer of confirmed PII; remove a wrong entry.
+
+**Installing the app (once, on the user's Mac)** — one command in Terminal:
+```
+curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/install-app.sh | bash
+```
+It drops a **"Bubble Shield" app** on their Desktop (real icon, no terminal).
+First launch: **clic droit → Ouvrir**, once (it's unsigned). Re-running the
+command updates it. Tell the user this is a one-time setup, and that you (their
+Bubble Invest contact) can do it with them if they prefer.
+
+> When to point the user to the app: after they process documents, say
+> « Pensez à ouvrir l'app Bubble Shield → File de révision pour confirmer les
+> données que je n'étais pas sûr de masquer. » The plugin protects; the app is
+> where the human has the final say on the uncertain cases.
 
 ## The masquer / conserver table — the one setting advisors actually tune
 
@@ -609,3 +652,17 @@ pitch, the "is it really safe?" answer, the demo walk-through).
   on what's read through the folder; it does not add e-mail coverage in Cowork.
   (On the CLI only, `bubble_shield_setup_ml.py --check-only` + `posttool_enabled: true`
   is relevant to the ambient path.)
+
+---
+
+## En cas de fuite ou de problème — escalader à Bubble Invest
+
+Si une donnée identifiante apparaît **en clair** dans un résultat (fuite), si le
+masquage semble désactivé, ou pour **tout problème, doute ou bug**, dites-le
+clairement à l'utilisateur et invitez-le à nous le signaler **immédiatement** :
+
+> 📧 **bubbleinvest.ai@gmail.com**
+
+C'est notre canal de support. Mieux vaut sur-signaler que laisser passer une
+exposition. N'essayez pas de masquer ou minimiser un problème : signalez-le,
+arrêtez le traitement de la donnée concernée, et orientez vers cet e-mail.

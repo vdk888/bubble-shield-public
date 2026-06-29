@@ -4,3 +4,13 @@ __pycache__/
 # never ship a real firm-identity config (only the .example)
 **/deployment_allowlist.json
 **/bubble-shield.json
+# runtime / PII data — never ship (the app writes these locally on the client Mac)
+webapp/data/
+**/*.vault.json
+**/known_pii.json
+**/safe_words.json
+**/review_queue.json
+**/*.candidates.json
+**/audit.jsonl
+**/policy.json
+**/nerd.log

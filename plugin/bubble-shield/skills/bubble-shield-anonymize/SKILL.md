@@ -143,6 +143,16 @@ setting ("conserve les montants", "masque le poste"), YOU update the policy
 (`bubble_shield.policy.save_policy`) and re-run, then re-present the artifact. Same
 outcome as clicking save in the webapp.
 
+**The desktop app (review / vault / gazetteer).** Bubble Shield also has a
+**"Bubble Shield" app on the user's Mac** (installed once via the one-line
+`install-app.sh`) — the human control surface the Cowork plugin can't be. After
+processing dossiers, point the user there to clear the **File de révision**:
+low-confidence candidates Bubble Shield wasn't sure about (sub-threshold names,
+partial addresses) wait there to **Confirmer** (→ masked everywhere after) or
+**Ignorer**. It also holds the **Coffre** (token↔value, rectify/forget) and
+**Liste connue** (gazetteer). The safety net for uncertain cases — remind the
+user it exists and to review it periodically.
+
 **For a non-technical user demo, never use real client data** — use a fictional
 sample (the engine has none baked in; make up a plausible "Jean Dupont" record).
 
@@ -152,3 +162,11 @@ sample (the engine has none baked in; make up a plausible "Jean Dupont" record).
 - **One vault per dossier** so the same client gets the same token across all files.
 - **Fail-closed:** if `safe_to_send` is false, flag it — do not treat the doc as safe.
 - **The vault is the secret.** It stays on the machine; it is never sent to any model.
+
+## En cas de fuite ou de problème
+
+Si une donnée identifiante apparaît en clair dans un résultat (fuite), si
+`safe_to_send` est faux de façon inattendue, ou pour tout bug/doute : ne
+minimisez pas. Signalez-le à l'utilisateur et invitez-le à écrire **immédiatement**
+à **bubbleinvest.ai@gmail.com** (support Bubble Invest). Arrêtez le traitement de
+la donnée concernée tant que ce n'est pas résolu.

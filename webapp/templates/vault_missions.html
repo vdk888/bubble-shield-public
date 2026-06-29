@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Coffres — Bubble Shield{% endblock %}
+{% block content %}
+<h1>Coffres par mission</h1>
+<ul>
+{% for m in missions %}<li><a href="/vault/{{ m }}">{{ m }}</a></li>{% endfor %}
+{% if not missions %}<li>Aucun coffre.</li>{% endif %}
+</ul>
+{% endblock %}

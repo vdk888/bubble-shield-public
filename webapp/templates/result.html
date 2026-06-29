@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Résultat — Bubble Shield{% endblock %}
+{% block content %}
+
+{# ── Verdict — 3-part, operator-friendly ──────────────────────────────────
+   Lead with the WIN (N identifiers protected). Then, calmly, the items to
+   glance at (low-confidence — usually form labels). True residual leaks (rare
+   now) get the only serious warning. This replaces the confusing binary
+   "DON'T SEND" that flagged the intentionally-kept advisor + form labels. #}
+{% set has_review = to_review and to_review|length > 0 %}
+{% set has_leak = result.residual and result.residual|length > 0 %}
+<div class="verdict {{ 'verdict--warn' if has_leak else ('verdict--review' if has_review else 'verdict--ok') }}">
+  <span class="verdict-mark">{{ '!' if has_leak else ('✓' if not has_review else '✓') }}</span>
+  <div class="verdict-body">
+    <span class="verdict-text">
+      {% if has_leak %}
+        Donnée identifiante encore en clair — à corriger avant envoi.
+      {% else %}
+        {{ n_confident }} identifiant{{ '' if n_confident == 1 else 's' }} protégé{{ '' if n_confident == 1 else 's' }} et remplacé{{ '' if n_confident == 1 else 's' }} par des jetons réversibles.
+      {% endif %}
+    </span>
+    <span class="verdict-meta">
+      {% if has_review %}{{ to_review|length }} élément(s) à vérifier d'un coup d'œil ci-dessous · {% endif %}restauration {{ 'vérifiée' if roundtrip_ok else 'à vérifier' }} · tout reste local
+    </span>
+  </div>
+</div>
+
+{# ── #334 — Policy kept-identifying warning ─────────────────────────────────
+   Shown when the active policy keeps one or more IDENTIFYING entity types.
+   The client keeps full autonomy (no hard floor); we just make the choice LOUD.
+   Non-identifying types kept (MONTANT, ISIN…) never trigger this banner. #}
+{% if kept_identifying and kept_identifying|length > 0 %}
+<div class="kept-identifying-warn">
+  <span class="kept-identifying-icon">⚠️</span>
+  <div class="kept-identifying-body">
+    <strong>Masquage désactivé pour&nbsp;: {{ kept_identifying | join(", ") }}</strong>
+    <p>Ces données identifiantes restent <strong>en clair</strong> dans le résultat selon votre configuration actuelle. Vérifiez votre <a href="/dashboard">politique de confidentialité</a> si ce n'est pas voulu.</p>
+  </div>
+</div>
+{% endif %}
+
+{# ── Before / after ── #}
+<div class="cols">
+  <section class="col">
+    <p class="col-h"><span class="col-k">Avant</span> document en clair — reste local</p>
+    <pre class="doc">{{ before_html|safe }}</pre>
+  </section>
+  <section class="col">
+    <p class="col-h"><span class="col-k">Après</span> ce qui serait envoyé au LLM</p>
+    <pre class="doc">{{ after_html|safe }}</pre>
+  </section>
+</div>
+
+{# True residual leak — rare, serious. Only real PII still in clear. #}
+{% if has_leak %}
+<div class="residual">
+  <p class="residual-h">⚠ Donnée identifiante encore en clair</p>
+  <div class="residual-chips">
+    {% for m in result.residual %}<code>{{ m.entity_type }}: {{ m.value }}</code>{% endfor %}
+  </div>
+  <p class="hint">Sécurité&nbsp;: à corriger avant d'envoyer ce document.</p>
+</div>
+{% endif %}
+
+{# Low-confidence items — anonymised, but worth a human glance (often form
+   labels the model guessed at). Calm, not alarming. #}
+{% if has_review %}
+<div class="review">
+  <p class="review-h">À vérifier d'un coup d'œil — {{ to_review|length }} détection(s) moins sûre(s)</p>
+  <p class="review-sub">Déjà remplacées par des jetons (donc protégées). Souvent des libellés de formulaire&nbsp;; un coup d'œil confirme.</p>
+  <div class="review-chips">
+    {% for e in to_review %}<code title="confiance {{ '%.2f'|format(e.score) }}">{{ e.entity_type }}: {{ e.value|truncate(28) }}</code>{% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Mapping table (the vault — local only) ── #}
+<section class="mapping">
+  <p class="col-h"><span class="col-k">Coffre</span> table de correspondance — jamais envoyée</p>
+  {% if result.entities %}
+  <table>
+    <thead><tr><th>Jeton</th><th>Type</th><th>Valeur réelle</th><th class="num">Confiance</th></tr></thead>
+    <tbody>
+      {% for e in result.entities %}
+      <tr class="{{ 'row--low' if e.score < result.threshold else '' }}">
+        <td><code class="jeton">{{ e.token }}</code></td>
+        <td><span class="tag">{{ e.entity_type }}</span></td>
+        <td class="val">{{ e.value }}</td>
+        <td class="num">{{ '%.2f'|format(e.score) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">Aucune entité détectée — rien à anonymiser.</p>
+  {% endif %}
+</section>
+
+<p class="back"><a href="/" class="btn btn--ghost">← Anonymiser un autre document</a></p>
+{% endblock %}

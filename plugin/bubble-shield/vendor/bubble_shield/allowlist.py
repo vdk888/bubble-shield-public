@@ -55,6 +55,44 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+# A "short single token" allowlist phrase (e.g. "axa", "eres", "corum") is one
+# word and ≤ this many chars. Such tokens are dangerous as substrings — they hide
+# inside real surnames ("Eres Martin", "Corumbel Dupont"). They must match a WHOLE
+# token, never an arbitrary substring. Multi-word phrases (firm names, addresses,
+# "autorité des marchés financiers") keep the safe substring/phrase matching.
+_SHORT_TOKEN_MAX = 6
+# Split a value into alphabetic tokens on whitespace AND punctuation (so
+# "Marie-Axandre" → ["marie", "axandre"], not one token containing "axa").
+_TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _tokens(s: str) -> List[str]:
+    return _TOKEN_RE.findall(s)
+
+
+def _short_token_allowlists(phrase: str, value: str) -> bool:
+    """Word-boundary match for a short single-token org phrase.
+
+    The org token allowlists `value` ONLY when it appears as a whole token AND
+    `value` carries no OTHER capitalised, name-like token. This keeps
+    "ERES"/"souscription ERES" allowlisted (the org is the only name there) but
+    drops "Eres Martin" (Martin is a real surname) — the substring leak #348.
+    """
+    raw_tokens = _TOKEN_RE.findall(value)
+    norm_tokens = [t.lower() for t in raw_tokens]
+    if phrase not in norm_tokens:
+        return False
+    # Reject if any token (other than the org token) looks like a proper name —
+    # i.e. starts with an uppercase letter in the ORIGINAL value. Generic
+    # lowercase context words ("souscription") are fine.
+    for raw in raw_tokens:
+        if raw.lower() == phrase:
+            continue
+        if raw[:1].isupper():
+            return False
+    return True
+
+
 @dataclass
 class Allowlist:
     """Entities known NOT to be the client. A detection is dropped if its
@@ -91,6 +129,15 @@ class Allowlist:
         for p in self._phrases:
             if not p:
                 continue
+            # #348 — a SHORT SINGLE-TOKEN org phrase (axa/eres/corum) must match a
+            # WHOLE token, not an arbitrary substring: "eres" must not allow-list
+            # "Eres Martin" (Martin is a real surname). Multi-word phrases stay on
+            # substring matching — they're safe (full firm names, addresses,
+            # "autorité des marchés financiers") and intended.
+            if " " not in p and len(p) <= _SHORT_TOKEN_MAX:
+                if _short_token_allowlists(p, value):
+                    return True
+                continue
             # substring either way: detected "Jean CONSEILLER" vs phrase
             # "jean conseiller"; or detected "12, rue de l'Exemple, 75000 PARIS"
             # vs phrase "rue de l'exemple". (Names no longer span newlines — see the
@@ -119,12 +166,15 @@ PUBLIC_THIRD_PARTIES = Allowlist(
         "amf", "autorité des marchés financiers", "acpr", "cnil",
         "place de la bourse", "place de budapest", "place de fontenoy",
         "cmap", "avenue franklin d", "orias",
+        # Public professional associations (boilerplate in every CGP dossier — the
+        # advisor's mandatory affiliation, not a client-specific identity)
+        "aspim", "anacofi", "cncgp", "la compagnie des cgp",
         # Major fund houses / platforms (boilerplate lists in the DER/LM)
         "corum", "nortia", "primonial", "generali", "swiss life", "axa",
         "edmond de rothschild", "la française", "vatel capital", "m capital",
         "inter invest", "june reim", "tilvest", "alpheys", "cardif", "bnp paribas",
         "abeille", "april", "entoria", "eres", "one life", "lombard", "utwin",
-        "mma",
+        "mma", "amundi",
     ),
 )
 
@@ -250,6 +300,14 @@ def remove_allowlist_entry(kind: str, value: str, path: "Path | None" = None) ->
     data[key] = [v for v in data[key] if v != value]
     _atomic_write(p, data)
     return True
+
+
+def is_allowlisted(value: str) -> bool:
+    """Module-level convenience: is `value` allow-listed by the PUBLIC third
+    parties (regulators / fund houses) shipped in source? Does NOT include the
+    per-deployment firm config (use load_deployment_allowlist().is_allowlisted
+    for that). Handy for tests and quick membership checks."""
+    return PUBLIC_THIRD_PARTIES.is_allowlisted(value)
 
 
 # The active allowlist for this deployment. Importers use this; the firm-specific

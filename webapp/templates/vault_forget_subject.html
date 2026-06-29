@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Oublier une personne — {{ mission }}{% endblock %}
+{% block content %}
+<p><a href="/vault/{{ mission }}" class="top-link">← Retour au coffre</a></p>
+<h1>Oublier une personne (RGPD) — {{ mission }}</h1>
+<p>Cela supprimera <strong>{{ count }}</strong> jeton(s) correspondant à « {{ q }} ».
+Les documents déjà anonymisés avec ces jetons ne pourront plus être restaurés.</p>
+{% if count > 0 %}
+<form method="post" action="/vault/{{ mission }}/forget-subject"
+      onsubmit="var t=prompt('Tapez OUBLIER pour confirmer :'); if(t==='OUBLIER'){this.confirm.value='OUBLIER';return true;}return false;">
+  <input type="hidden" name="q" value="{{ q }}">
+  <input type="hidden" name="confirm" value="">
+  <button type="submit">Confirmer la suppression de {{ count }} jeton(s)</button>
+</form>
+{% endif %}
+{% endblock %}

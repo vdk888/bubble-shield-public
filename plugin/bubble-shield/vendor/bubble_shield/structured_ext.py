@@ -364,6 +364,111 @@ def form_piece_identite_matches(text: str) -> List[Match]:
     return out
 
 
+# ── STANDALONE COMMUNE + POSTCODE recognizer (fix #395) ──────────────────────
+#
+# The full-address ADRESSE recognizer (recognizers.py, priority 55) requires a
+# STREET NUMBER + voie ("15 RUE DES SOURCES …"), so it catches a commune+postcode
+# ONLY when it sits inside a full address. A BARE commune+postcode with no street
+# — "MONTBOURG-LES-PINS 99000" standing alone — falls through every layer: GLiNER
+# does not reliably flag FR communes as LIEU/ADRESSE, so it produces NO detection,
+# no sub-threshold candidate, no review-queue entry → a silent leak with no human
+# safety net (verified in Joris's stores, 2026-06-29).
+#
+# This recognizer catches exactly that shape: a town-name-shaped span IMMEDIATELY
+# followed by a 5-digit French postcode. The ADJACENCY is the precision signal —
+# a town next to a FR postcode is almost certainly an address fragment. Emits an
+# ADRESSE Match so it masks under the existing ADRESSE policy (+ the #392 floor
+# makes ADRESSE always-cloak). ADDITIVE to the full-address path — it does not
+# touch it (the full-address recognizer still fires first inside a real address).
+#
+# Precision discipline (ties to the #348 NOM-filter discipline):
+#   - Only fires when a TOWN-NAME token (capitalised, alpha, ≥2 chars) sits right
+#     before the postcode. A lone 5-digit number with no town token before it is
+#     NOT matched — so "le montant est 45000 euros" (lowercase "montant") and
+#     "référence 12345" (lowercase "référence") never fire.
+#   - Postcode validated to a plausible FR range (floor 01000) — rejects 00xxx.
+#   - \b\d{5}\b adjacency avoids SIREN/SIRET fragments (9/14 digits) and most
+#     amounts (the amount-word before is lowercase, not a town token).
+#   - A small stop-set blocks ALL-CAPS heading words that can precede a 5-digit
+#     number but aren't a commune (FACTURE, MONTANT, TOTAL, REFERENCE…).
+#   - Org names (regulators / fund houses) that happen to precede a postcode are
+#     dropped DOWNSTREAM by the engine allowlist (a town after an org is anyway
+#     implausible) — we keep this recognizer self-contained and cheap.
+
+# A French postcode: exactly 5 digits as a standalone token.
+_FR_POSTCODE = r"\b(\d{5})\b"
+# A commune name: one or more capitalised/uppercase tokens (accents, hyphens,
+# apostrophes), allowing internal lowercase particles glued by hyphens or spaces
+# — "MONTBOURG-LES-PINS", "Saint-Germain-en-Laye", "AIX EN PROVENCE", "Le Havre".
+# Each leading token starts uppercase; we allow up to 5 tokens so long compound
+# commune names ("SAINT-RÉMY-DE-PROVENCE") fit. Particles (de/en/sur/le/la/les/du)
+# are joined by hyphen/space inside the name.
+_COMMUNE_TOKEN = r"[A-ZÉÈÀÂÎÔÛÇ][A-Za-zÀ-ÿ''\-]+"
+_COMMUNE_NAME = (
+    rf"{_COMMUNE_TOKEN}"
+    rf"(?:[ \-](?:de|du|des|en|et|sur|sous|le|la|les|aux?|lès|l['']"
+    rf"|{_COMMUNE_TOKEN})){{0,5}}"
+)
+# Commune name IMMEDIATELY followed (small gap: spaces/comma, no newline) by a
+# 5-digit postcode. The town span is captured separately from the postcode so the
+# emitted Match covers the WHOLE commune+postcode shape.
+_COMMUNE_POSTCODE_RE = re.compile(
+    rf"(?P<commune>{_COMMUNE_NAME})[ ,]{{1,3}}{_FR_POSTCODE}"
+)
+
+# ALL-CAPS heading / boilerplate words that can precede a 5-digit number but are
+# NOT a commune. A commune span ENDING in one of these (its last token) is dropped.
+_NOT_A_COMMUNE = {
+    "FACTURE", "MONTANT", "TOTAL", "REFERENCE", "RÉFÉRENCE", "NUMERO", "NUMÉRO",
+    "DOSSIER", "CLIENT", "CONTRAT", "POLICE", "COMPTE", "CODE", "PAGE", "ARTICLE",
+    "TEL", "FAX", "FACTURE", "DEVIS", "BON", "COMMANDE", "LOT", "REF",
+}
+
+
+def commune_postcode_matches(text: str) -> List[Match]:
+    """Find a STANDALONE 'COMMUNE-NAME + 5-digit FR postcode' shape (fix #395).
+
+    Catches the bare commune+postcode the full-address ADRESSE recognizer misses
+    (it requires a leading street number). Emits ADRESSE so the span masks under
+    the existing ADRESSE policy / #392 floor.
+
+    Precision: only fires when a town-name token sits IMMEDIATELY before the
+    postcode (a lone 5-digit number, or one preceded by lowercase prose like
+    'montant'/'référence', is NOT matched), and the postcode is in the plausible
+    FR range (floor 01000, rejecting 00xxx).
+    """
+    out: List[Match] = []
+    for m in _COMMUNE_POSTCODE_RE.finditer(text):
+        commune = m.group("commune").strip()
+        postcode = m.group(2)
+        # Postcode must be a plausible FR commune postcode. Floor 01000 rejects
+        # 00xxx; ceiling 99999 keeps overseas/forces postcodes (98xxx) AND the
+        # synthetic 99000 test fixtures in range (real metropolitan codes are
+        # 01000–95999; 97/98xxx are DOM-TOM; 99xxx reserved/synthetic).
+        pc = int(postcode)
+        if pc < 1000:
+            continue
+        # The last commune token must be a real town-name word, not a heading/
+        # boilerplate word that merely happens to precede a postcode.
+        last_token = re.split(r"[ \-]", commune)[-1].upper()
+        if last_token in _NOT_A_COMMUNE:
+            continue
+        # First token must be a town-name word too (defensive: skip if it's a
+        # pure heading word like "MONTANT 45000" that slipped through as 1 token).
+        first_token = re.split(r"[ \-]", commune)[0].upper()
+        if first_token in _NOT_A_COMMUNE:
+            continue
+        # Require at least one alpha town word of length ≥ 2.
+        if not re.search(r"[A-Za-zÀ-ÿ]{2,}", commune):
+            continue
+        start = m.start("commune")
+        end = m.end(2)  # span covers commune + postcode
+        out.append(Match(start=start, end=end,
+                         entity_type="ADRESSE", value=text[start:end],
+                         score=0.85, priority=56))  # > GLiNER, ~ form recognizers
+    return out
+
+
 # ── DÉNOMINATION / RAISON SOCIALE label lines (fix #259, extended fix #264) ───
 #
 # Corporate form lines like:
@@ -739,6 +844,11 @@ def make_structured_detector(filename_basename: str = ""):
             pass
         try:
             matches += form_piece_identite_matches(text)
+        except Exception:
+            pass
+        # ── fix #395: standalone commune + postcode ('TOWN 99000') ───────────
+        try:
+            matches += commune_postcode_matches(text)
         except Exception:
             pass
         try:

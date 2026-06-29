@@ -38,11 +38,19 @@ code:
 
 ```bash
 # from plugin/bubble-shield/
-rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' --exclude='test_*.py' \
+# NOTE: rsync --delete will NOT remove a destination file that matches an
+# --exclude pattern, so if a test/pyc file ever lands in mcpb/server/, delete it
+# explicitly (rm) — the exclude only stops re-copying, not re-removing. The test
+# globs cover test_*.py, _test_*.py and *_test.py (e.g. _test_mock_daemon.py).
+rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
+  --exclude='test_*.py' --exclude='_test_*.py' --exclude='*_test.py' \
   scripts/ mcpb/server/scripts/
 rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='deployment_allowlist.json' \
   vendor/ mcpb/server/vendor/
+# belt-and-suspenders: purge any pycache/test that an exclude couldn't delete
+find mcpb/server -name __pycache__ -type d -prune -exec rm -rf {} +
+find mcpb/server \( -name '*.pyc' -o -name 'test_*.py' -o -name '_test_*.py' -o -name '*_test.py' \) -delete
 # keep mcpb/manifest.json "version" in sync with plugin.json, then pack:
 npx --yes @anthropic-ai/mcpb validate mcpb/manifest.json
 npx --yes @anthropic-ai/mcpb pack mcpb/ mcpb/bubble-shield.mcpb

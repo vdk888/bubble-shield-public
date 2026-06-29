@@ -18,10 +18,18 @@ progress so the operator can watch. It does NOT start the daemon or touch
 launchd — that's bubble_shield_nerd.py / a separate install step. This script only
 makes the model + runtime exist and verifies they load.
 
-PHASE 2 — OpenAI Privacy Filter support (--openai flag)
-  The OpenAI model is NOT downloaded by default. Pass --openai to fetch it.
-  It uses a SEPARATE models/ dir entry and extends ml.json with a "models"
-  block for multi-model support, back-compat with the flat single-model format.
+ONBOARDING DEFAULT (#387) — download ALL models in one pass
+  As of #387 the onboarding/default path pulls BOTH the GLiNER model AND the
+  OpenAI Privacy Filter in a single setup pass, so the client is never asked to
+  install a model later. The OpenAI-PF download is ON by default now; the
+  legacy --openai flag is kept for back-compat (--no-openai opts OUT). Each
+  model is SKIPPED if its files are already on disk, and the setup reports a
+  clear PER-MODEL status (present | downloading | done) per model by name.
+
+PHASE 2 — OpenAI Privacy Filter support (--openai / --no-openai)
+  The OpenAI model uses a SEPARATE models/ dir entry and extends ml.json with a
+  "models" block for multi-model support, back-compat with the flat
+  single-model format.
 
   OpenAI model ONNX sizes:
     onnx/model_q4.onnx + .onnx_data   → ~917 MB  (recommended for M4)
@@ -42,6 +50,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import venv
@@ -57,6 +66,14 @@ DEFAULT_ONNX = "onnx/model_quantized.onnx"   # int8; smaller variants: model_q4.
 
 OPENAI_DEFAULT_MODEL = "openai/privacy-filter"
 OPENAI_DEFAULT_ONNX = "onnx/model_q4.onnx"   # ~917MB, best M4 fit
+
+# Models DROPPED from the product that must never be left behind in the HF hub
+# cache (each is benchmark-only / superseded — see the issue numbers).
+#   fastino/gliner2-privacy-filter-PII-multi  → dropped in #348 (bench-only now)
+# The daemon's PyTorch GLiNER fallback (_gliner_model_id in bubble_shield_nerd.py)
+# loads "urchade/gliner_multi_pii-v1" from the hub cache, so urchade is
+# LOAD-BEARING and is deliberately NOT in this list.
+DROPPED_HUB_MODELS = ["fastino/gliner2-privacy-filter-PII-multi"]
 
 # Phase 2: add `tokenizers` for the OpenAI fast tokenizer (onnxruntime-only path
 # doesn't bring tokenizers transitively). GLiNER deps unchanged.
@@ -154,15 +171,28 @@ def ensure_deps(py: Path, need_openai: bool = False) -> None:
             f"   pip error: {r.stderr[:300]}")
 
 
+def model_present(model_id: str, onnx_file: str) -> bool:
+    """True iff the model's chosen onnx file already exists on disk.
+
+    This is the skip-if-present predicate (#387): a model whose onnx file is
+    present is considered installed and is NOT re-downloaded. Pure function of
+    BUBBLE_SHIELD_HOME / MODELS_DIR — safe to call without a venv, so the MCP
+    status path and the unit tests can use it directly."""
+    return (_local_dir(model_id) / onnx_file).is_file()
+
+
 def download_model(py: Path, model_id: str, onnx_file: str,
-                   extra_patterns: list | None = None) -> None:
+                   extra_patterns: list | None = None) -> str:
     """Download the model snapshot (incl. the chosen onnx file) into MODELS_DIR.
 
     For the OpenAI model, pass extra_patterns to include the .onnx_data sidecar
     (onnxruntime loads it automatically from the same directory).
 
     Runs inside the venv so it uses the venv's huggingface_hub. Stores under a
-    stable local dir so the daemon loads from disk (no network at run time)."""
+    stable local dir so the daemon loads from disk (no network at run time).
+
+    Returns the resulting per-model state: "present" if it was already on disk
+    (skipped, no download) or "done" if it was downloaded this run (#387)."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     local = MODELS_DIR / model_id.replace("/", "__")
     # Default patterns for any model
@@ -184,18 +214,159 @@ def download_model(py: Path, model_id: str, onnx_file: str,
         "print(p)"
     )
     if (local / onnx_file).exists():
-        log(f"✓ model already downloaded: {local}")
-        return
+        log(f"✓ model already downloaded (skip): {local}")
+        return "present"
     log(f"• downloading model {model_id} ({onnx_file}) → {local} …")
     subprocess.run([str(py), "-c", code], check=True)
     if not (local / onnx_file).exists():
         raise SystemExit(f"✗ model downloaded but {onnx_file} missing under {local}")
     sz = sum(f.stat().st_size for f in local.rglob("*") if f.is_file()) / 1e6
     log(f"✓ model ready ({sz:.0f} MB on disk)")
+    # #386: stop the double-store. snapshot_download(local_dir=…) on modern
+    # huggingface_hub (>=1.0) downloads straight into local_dir and does NOT
+    # populate the hub cache. But older hub versions (and any from_pretrained
+    # that ran first) leave a redundant models--<org>--<name> copy in the hub
+    # cache — pure dead weight once the subset is localized here. Purge it now
+    # that the local copy is confirmed on disk, so only ~/.bubble_shield/models/
+    # remains for this model. Belt-and-suspenders: a no-op when the cache copy
+    # never existed.
+    freed = _purge_hub_cache_model(model_id)
+    if freed:
+        log(f"✓ purged redundant HF hub-cache copy of {model_id} "
+            f"({freed/1e6:.0f} MB reclaimed)")
+    return "done"
 
 
 def _local_dir(model_id: str) -> Path:
     return MODELS_DIR / model_id.replace("/", "__")
+
+
+def _hub_cache_dir(hub_cache: Path | None = None) -> Path:
+    """Resolve the HF hub cache root (where snapshot_download stages models--<org>--<name>).
+
+    Order of precedence mirrors huggingface_hub: explicit arg > HF_HUB_CACHE >
+    HF_HOME/hub > ~/.cache/huggingface/hub. Pure path resolution — does not
+    create or touch anything. Tests pass an explicit tmp path so the real cache
+    is never read or written."""
+    if hub_cache is not None:
+        return Path(hub_cache)
+    env_cache = os.environ.get("HF_HUB_CACHE")
+    if env_cache:
+        return Path(env_cache)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _hub_cache_model_dir(model_id: str, hub_cache: Path | None = None) -> Path:
+    """Path of a model's staging dir inside the HF hub cache (models--<org>--<name>)."""
+    return _hub_cache_dir(hub_cache) / f"models--{model_id.replace('/', '--')}"
+
+
+def _purge_hub_cache_model(model_id: str, hub_cache: Path | None = None) -> int:
+    """Delete a model's HF hub-cache staging dir + its .locks entry. Returns bytes freed.
+
+    Safe no-op if the dir is absent. Only ever touches the hub cache — never
+    MODELS_DIR / the local store. Caller is responsible for confirming the model
+    is safe to purge (localized elsewhere, or known-dropped)."""
+    cache_dir = _hub_cache_dir(hub_cache)
+    model_dir = _hub_cache_model_dir(model_id, hub_cache)
+    freed = 0
+    if model_dir.is_dir():
+        freed += sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+        shutil.rmtree(model_dir, ignore_errors=True)
+    # The matching lock dir (models--<org>--<name>) under .locks/ is dead too.
+    lock_dir = cache_dir / ".locks" / f"models--{model_id.replace('/', '--')}"
+    if lock_dir.is_dir():
+        shutil.rmtree(lock_dir, ignore_errors=True)
+    return freed
+
+
+def _localized_model_ids() -> set[str]:
+    """HF repo ids that are already localized under MODELS_DIR.
+
+    A subdir `models/<org>__<name>/` that contains at least one *.onnx file is
+    considered a localized model whose hub-cache staging copy is redundant. We
+    require an actual onnx weight (not just config) so a half-written dir never
+    licenses deleting the hub copy."""
+    out: set[str] = set()
+    if not MODELS_DIR.is_dir():
+        return out
+    for sub in MODELS_DIR.iterdir():
+        if not sub.is_dir():
+            continue
+        if not any(sub.rglob("*.onnx")):
+            continue
+        # <org>__<name>  → <org>/<name>  (model ids never contain "__")
+        out.add(sub.name.replace("__", "/"))
+    return out
+
+
+def gc(hub_cache: Path | None = None, dry_run: bool = False) -> dict:
+    """Reclaim disk: remove redundant HF hub-cache copies + dropped models.
+
+    What it deletes (HF HUB CACHE ONLY — never MODELS_DIR / the local store):
+      (a) hub-cache copies of models already localized under MODELS_DIR
+          (confirmed by an .onnx weight present in the local dir), and
+      (b) known-DROPPED models (DROPPED_HUB_MODELS, e.g. fastino #348).
+
+    Conservative by construction: a hub-cache model is removed ONLY if it is
+    confirmed-localized OR explicitly in the dropped list. The live local model
+    and everything under ~/.bubble_shield/models/ are never touched. Unrelated
+    third-party models in the shared HF cache (FLUX, whisper, …) are left alone.
+    Load-bearing fallbacks (urchade — the daemon's PyTorch GLiNER path) are not
+    in the dropped list and won't be localized as ONNX, so they survive.
+
+    Returns a summary dict; pass dry_run=True to report without deleting."""
+    cache_dir = _hub_cache_dir(hub_cache)
+    removed: list[dict] = []
+    total_freed = 0
+
+    def _consider(model_id: str, reason: str) -> None:
+        nonlocal total_freed
+        model_dir = _hub_cache_model_dir(model_id, hub_cache)
+        if not model_dir.is_dir():
+            return
+        sz = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+        removed.append({"model_id": model_id, "reason": reason, "bytes": sz})
+        total_freed += sz
+        if not dry_run:
+            _purge_hub_cache_model(model_id, hub_cache)
+
+    localized = _localized_model_ids()
+    for model_id in sorted(localized):
+        _consider(model_id, "localized-duplicate")
+    for model_id in DROPPED_HUB_MODELS:
+        _consider(model_id, "dropped")
+
+    summary = {
+        "hub_cache": str(cache_dir),
+        "dry_run": dry_run,
+        "removed": removed,
+        "bytes_freed": total_freed,
+    }
+    return summary
+
+
+def run_gc(hub_cache: Path | None = None, dry_run: bool = False) -> int:
+    """CLI entrypoint for `--gc`. Prints a human-readable report. Returns 0."""
+    log("Bubble Shield — model garbage collection (#386)")
+    log(f"  hub cache: {_hub_cache_dir(hub_cache)}")
+    log(f"  local store: {MODELS_DIR}")
+    if dry_run:
+        log("  mode: DRY RUN (nothing will be deleted)")
+    summary = gc(hub_cache=hub_cache, dry_run=dry_run)
+    if not summary["removed"]:
+        log("✓ nothing to reclaim — no redundant hub-cache copies or dropped models")
+        return 0
+    for r in summary["removed"]:
+        verb = "would remove" if dry_run else "removed"
+        log(f"  {verb}: {r['model_id']} ({r['reason']}, {r['bytes']/1e6:.0f} MB)")
+    total_mb = summary["bytes_freed"] / 1e6
+    log(f"✓ {'would reclaim' if dry_run else 'reclaimed'} {total_mb:.0f} MB "
+        f"({len(summary['removed'])} model(s)). Local store untouched.")
+    return 0
 
 
 def write_manifest(
@@ -329,17 +500,30 @@ def main() -> int:
     ap.add_argument("--onnx", default=DEFAULT_ONNX)
     ap.add_argument("--check-only", action="store_true",
                     help="only verify an existing install, do not create/download")
+    ap.add_argument("--gc", action="store_true",
+                    help="reclaim disk: purge redundant HF hub-cache copies of "
+                         "localized models + dropped benchmark models (#386). "
+                         "Never touches ~/.bubble_shield/models/")
+    ap.add_argument("--gc-dry-run", action="store_true",
+                    help="report what --gc would remove without deleting anything")
     ap.add_argument("--no-launchd", action="store_true",
                     help="skip installing the login LaunchAgent (hook lazy-starts the daemon instead)")
-    # Phase 2 flags
-    ap.add_argument("--openai", action="store_true",
-                    help="also fetch the OpenAI Privacy Filter model (Phase 2, default OFF)")
+    # Phase 2 / #387 flags. As of #387 the OpenAI Privacy Filter is fetched by
+    # DEFAULT (the onboarding pulls all models in one pass). --openai is kept as
+    # a harmless no-op for back-compat; --no-openai opts OUT (GLiNER only).
+    ap.add_argument("--openai", action="store_true", default=True,
+                    help="fetch the OpenAI Privacy Filter model (default ON since #387)")
+    ap.add_argument("--no-openai", dest="openai", action="store_false",
+                    help="skip the OpenAI Privacy Filter (GLiNER only — back-compat opt-out)")
     ap.add_argument("--openai-model", default=OPENAI_DEFAULT_MODEL,
                     help=f"OpenAI model HF id (default: {OPENAI_DEFAULT_MODEL})")
     ap.add_argument("--openai-onnx", default=OPENAI_DEFAULT_ONNX,
                     help=f"OpenAI ONNX file to use (default: {OPENAI_DEFAULT_ONNX} ~917MB; "
                          "alternative: onnx/model_quantized.onnx ~1.62GB)")
     args = ap.parse_args()
+
+    if args.gc or args.gc_dry_run:
+        return run_gc(dry_run=args.gc_dry_run)
 
     log("Bubble Shield — ML accuracy pack setup")
     log(f"  home: {BUBBLE_SHIELD_HOME}")
@@ -358,26 +542,36 @@ def main() -> int:
         return 0 if ok else 1
 
     ok = False
+    # Per-model state, surfaced as a structured line the MCP/onboarding parses.
+    states: dict[str, str] = {}
     try:
         py = ensure_venv()
         ensure_deps(py, need_openai=args.openai)
-        download_model(py, args.model, args.onnx)
+        states["gliner"] = download_model(py, args.model, args.onnx)
 
         openai_model_id = None
         openai_onnx_file = None
         if args.openai:
             openai_model_id = args.openai_model
             openai_onnx_file = args.openai_onnx
-            # OpenAI model needs the .onnx_data sidecar for external-data ONNX
-            download_model(
-                py, openai_model_id, openai_onnx_file,
-                extra_patterns=[
-                    "viterbi_calibration.json",
-                    "tokenizer.json",
-                    "config.json",
-                    f"{openai_onnx_file}_data",
-                ]
-            )
+            # OpenAI model needs the .onnx_data sidecar for external-data ONNX.
+            # Fail-open per model: if the OpenAI-PF download fails, report it but
+            # don't abort — the daemon falls back to GLiNER (#387).
+            try:
+                states["openai"] = download_model(
+                    py, openai_model_id, openai_onnx_file,
+                    extra_patterns=[
+                        "viterbi_calibration.json",
+                        "tokenizer.json",
+                        "config.json",
+                        f"{openai_onnx_file}_data",
+                    ]
+                )
+            except Exception as e:  # noqa: BLE001 — fail-open on one model
+                states["openai"] = "error"
+                log(f"⚠️ OpenAI-PF download failed (continuing GLiNER-only): {e}")
+                openai_model_id = None
+                openai_onnx_file = None
 
         write_manifest(args.model, args.onnx, openai_model_id, openai_onnx_file)
         ok = verify(py, args.model, args.onnx)
@@ -391,6 +585,16 @@ def main() -> int:
     except Exception as e:
         log(f"✗ setup error: {e}")
         return 1
+
+    # Structured per-model status line (#387) — machine-readable for the MCP /
+    # onboarding so it can name each model + its state to the user.
+    _label = {"present": "déjà présent", "done": "téléchargé",
+              "error": "échec", "absent": "absent"}
+    parts = [f"GLiNER {_label.get(states.get('gliner', 'absent'))}"]
+    if args.openai:
+        parts.append(f"OpenAI-PF {_label.get(states.get('openai', 'absent'))}")
+    log("MODEL_STATUS " + json.dumps(states))
+    log("📦 Modèles : " + " · ".join(parts))
 
     if ok:
         openai_note = " + OpenAI Privacy Filter" if args.openai else ""

@@ -68,6 +68,16 @@ PIP_DEPS = ["docling", "onnxruntime"]
 _LAYOUT_MODEL_SENTINEL = BUBBLE_SHIELD_HOME / "layout_model_cached.flag"
 
 
+def ocr_models_present() -> bool:
+    """True iff the OCR models (layout + TableFormer) are already cached.
+
+    Skip-if-present predicate (#387): the sentinel is written only after BOTH
+    models are confirmed cached, so its presence means OCR is installed and the
+    download is skipped. Pure function of BUBBLE_SHIELD_HOME — the MCP status
+    path and unit tests can call it without a venv or network."""
+    return _LAYOUT_MODEL_SENTINEL.is_file()
+
+
 def log(msg: str) -> None:
     print(msg, flush=True)
 
@@ -330,6 +340,8 @@ def main() -> int:
         return 0 if ok else 1
 
     ok = False
+    # #387: report whether OCR models were already present (skipped) or fetched.
+    ocr_state = "present" if ocr_models_present() else "done"
     try:
         py = ensure_venv()
         ensure_deps(py)
@@ -342,6 +354,10 @@ def main() -> int:
     except Exception as e:
         log(f"✗ setup error: {e}")
         return 1
+
+    log("MODEL_STATUS " + json.dumps({"ocr": ocr_state}))
+    _ocr_label = {"present": "déjà présent", "done": "téléchargé"}
+    log("📦 Modèle : OCR " + _ocr_label.get(ocr_state, ocr_state))
 
     if ok:
         log(f"\n✅ OCR pack ready. Models (layout + TableFormer) downloaded once at "

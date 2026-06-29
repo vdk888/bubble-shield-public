@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Dossier anonymisé — Bubble Shield{% endblock %}
+{% block content %}
+
+{# ── Verdict headline ── #}
+<div class="verdict {{ 'verdict--ok' if all_safe else 'verdict--review' }}">
+  <span class="verdict-mark">✓</span>
+  <div class="verdict-body">
+    <span class="verdict-text">
+      Dossier «&nbsp;{{ mission }}&nbsp;» — {{ n_files }} document{{ '' if n_files == 1 else 's' }}
+      pseudonymisé{{ '' if n_files == 1 else 's' }}, {{ total_entities }} identifiant{{ '' if total_entities == 1 else 's' }} protégé{{ '' if total_entities == 1 else 's' }}.
+    </span>
+    <span class="verdict-meta">
+      {% if not all_safe %}Certains documents sont à revoir d'un coup d'œil avant envoi · {% endif %}coffre unifié de {{ vault_size }} entrées · tout reste local
+    </span>
+  </div>
+</div>
+
+{# ── The cross-file consistency win ── #}
+{% if consistency.client_in_files >= 2 %}
+<div class="dossier-win">
+  <p class="dossier-win-h">Cohérence sur tout le dossier</p>
+  <p>
+    Le même client est pseudonymisé <strong>de façon identique</strong> dans
+    {{ consistency.client_in_files }} des {{ consistency.total_files }} fichiers —
+    {% if surrogate %}même substitut partout{% else %}même jeton partout{% endif %} —
+    et il est rattrapé même là où un document ne le mentionne qu'en passant.
+    Un seul coffre, une seule identité par personne&nbsp;: {{ consistency.persons }}
+    personne{{ '' if consistency.persons == 1 else 's' }} distincte{{ '' if consistency.persons == 1 else 's' }} sur l'ensemble.
+  </p>
+</div>
+{% endif %}
+
+{# ── Download ── #}
+<div class="dossier-download">
+  <a href="/dossier-download/{{ download_id }}" class="btn">⬇ Télécharger le .zip anonymisé</a>
+  <span class="hint">
+    Documents pseudonymisés + table de correspondance (coffre, locale) + notice.
+    Les noms de fichiers sont eux aussi dé-identifiés.
+  </span>
+</div>
+
+{# ── Per-file: each row expands to its before/after, like single-file mode ── #}
+<section class="dossier-files">
+  <p class="col-h"><span class="col-k">Fichiers</span> cliquez un document pour voir l'avant / après</p>
+  {% for f in file_rows %}
+  <details class="doc-item">
+    <summary class="doc-summary">
+      <span class="doc-name">{{ f.name }}</span>
+      <span class="doc-meta">
+        <span class="doc-count">{{ f.entities }} protégés</span>
+        {% if f.to_review %}<span class="doc-review">{{ f.to_review }} à vérifier</span>{% endif %}
+        {% if f.safe %}<span class="pill pill--ok">prêt</span>{% else %}<span class="pill pill--review">à revoir</span>{% endif %}
+        <span class="doc-chevron" aria-hidden="true">▸</span>
+      </span>
+    </summary>
+    <div class="doc-cols">
+      <section class="col">
+        <p class="col-h"><span class="col-k">Avant</span> document en clair — reste local</p>
+        <pre class="doc">{{ f.before_html|safe }}</pre>
+      </section>
+      <section class="col">
+        <p class="col-h"><span class="col-k">Après</span> ce qui serait envoyé au LLM</p>
+        <pre class="doc">{{ f.after_html|safe }}</pre>
+      </section>
+    </div>
+  </details>
+  {% endfor %}
+</section>
+
+{% if skipped %}
+<div class="review">
+  <p class="review-h">{{ skipped|length }} fichier(s) non lisible(s)</p>
+  <p class="review-sub">PDF scannés (image) ou chiffrés — l'OCR n'est pas couvert. À traiter à part ou coller le texte manuellement.</p>
+  <div class="review-chips">
+    {% for name, why in skipped %}<code title="{{ why }}">{{ name|truncate(40) }}</code>{% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<p class="about-back" style="margin-top:26px;">
+  <a href="/" class="discreet-link">← Anonymiser un autre dossier</a>
+</p>
+{% endblock %}

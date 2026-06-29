@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}File de révision — Bubble Shield{% endblock %}
+{% block content %}
+
+<section class="intro">
+  <p class="kicker">Révision HITL · données à confirmer</p>
+  <h1>Données signalées pour validation humaine</h1>
+  <p class="lede">
+    Ces candidats ont été détectés sous le seuil de confiance automatique.
+    Confirmez ceux qui sont effectivement des données personnelles —
+    ils seront masqués automatiquement dans tous les futurs documents.
+    <strong>Ces valeurs sont visibles ici uniquement, sur votre machine.
+    Elles ne quittent jamais ce poste.</strong>
+  </p>
+</section>
+
+{% if flash == "confirme" %}
+<p class="notice notice--ok">Donnée confirmée et ajoutée au répertoire de masquage automatique.</p>
+{% elif flash == "ignore" %}
+<p class="notice notice--ok">Candidat ignoré et archivé dans le journal.</p>
+{% elif flash == "erreur" %}
+<p class="notice">Une erreur est survenue lors de la résolution. Veuillez réessayer.</p>
+{% endif %}
+
+<div class="review-queue-header">
+  <p class="review-queue-count">
+    {% if pending_count == 0 %}
+      Aucun candidat en attente.
+    {% elif pending_count == 1 %}
+      <strong>1</strong> candidat en attente de validation.
+    {% else %}
+      <strong>{{ pending_count }}</strong> candidats en attente de validation.
+    {% endif %}
+  </p>
+  <a href="/review/dismissed" class="btn btn--ghost btn--sm">Journal des archivés</a>
+</div>
+
+{% if pending %}
+<ul class="rq-list">
+  {% for item in pending %}
+  <li class="rq-item">
+    <div class="rq-item-header">
+      <span class="rq-value">{{ item.value }}</span>
+      <span class="rq-badge rq-badge--type">{{ item.entity_type }}</span>
+      <span class="rq-badge rq-badge--count">{{ item.occurrence_count }} occurrence{% if item.occurrence_count > 1 %}s{% endif %}</span>
+    </div>
+
+    {% if item.doc_refs %}
+    <div class="rq-docs">
+      <span class="rq-docs-label">Documents :</span>
+      <span class="review-chips">
+        {% for doc in item.doc_refs %}
+        <code>{{ doc }}</code>
+        {% endfor %}
+      </span>
+    </div>
+    {% endif %}
+
+    <div class="rq-meta">
+      <span class="rq-date">Premier vu : {{ item.first_seen[:10] }}</span>
+      {% if item.last_seen and item.last_seen != item.first_seen %}
+      <span class="rq-date">Dernier vu : {{ item.last_seen[:10] }}</span>
+      {% endif %}
+    </div>
+
+    <div class="rq-actions">
+      <form method="post" action="/review/confirm" style="display:inline">
+        <input type="hidden" name="normalized" value="{{ item.normalized }}">
+        <button type="submit" class="btn btn--confirm">Confirmer (donnée personnelle)</button>
+      </form>
+      <form method="post" action="/review/dismiss" style="display:inline">
+        <input type="hidden" name="normalized" value="{{ item.normalized }}">
+        <button type="submit" class="btn btn--ghost btn--sm">Ignorer</button>
+      </form>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="rq-empty">
+  <p>La file de révision est vide. Les prochains documents traités alimenteront automatiquement cette liste si des candidats sont détectés sous le seuil de confiance.</p>
+  <a href="/" class="btn btn--ghost btn--sm">Anonymiser un document</a>
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,334 @@
+{% extends "base.html" %}
+{% block title %}Contrôle des risques & réglages — Bubble Shield{% endblock %}
+{% block content %}
+
+<section class="intro">
+  <p class="kicker">Contrôle des risques · après-coup</p>
+  <h1>Ce qui a été anonymisé — et ce que vous choisissez de garder.</h1>
+  <p class="lede">
+    Un journal local de toutes les anonymisations (application web <em>et</em>
+    assistant Claude), pour vérifier après-coup que rien d'identifiant n'est
+    parti en clair. Plus un tableau pour décider, type par type, ce qui est
+    masqué ou conservé. <strong>Aucune valeur réelle n'est stockée ici — seulement
+    des compteurs.</strong>
+  </p>
+</section>
+
+{% if saved %}
+<p class="notice notice--ok">✅ Réglages enregistrés. Ils s'appliquent aux prochaines anonymisations.</p>
+{% endif %}
+{% if detector_saved %}
+<p class="notice notice--ok">✅ Mode détecteur enregistré.</p>
+{% endif %}
+{% if field_saved %}
+<p class="notice notice--ok">✅ Champ personnalisé ajouté. Il sera actif à la prochaine anonymisation.</p>
+{% endif %}
+{% if field_error %}
+<p class="notice">⛔ {{ field_error }}</p>
+{% endif %}
+
+<!-- ===== Risk-control stats ===== -->
+<section class="dash-stats">
+  {% if not stats.has_data %}
+    <p class="about-note">Aucune anonymisation enregistrée pour l'instant. Lancez-en une depuis la page d'accueil ou via l'assistant, puis revenez ici.</p>
+  {% else %}
+  <div class="stat-cards">
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.total_runs }}</div>
+      <div class="stat-lbl">anonymisations</div>
+    </div>
+    <div class="stat-card{% if stats.unsafe_runs %} stat-card--warn{% endif %}">
+      <div class="stat-num">{{ stats.unsafe_runs }}</div>
+      <div class="stat-lbl">à relire (PII résiduelle possible)</div>
+    </div>
+    <div class="stat-card{% if stats.error_runs %} stat-card--warn{% endif %}">
+      <div class="stat-num">{{ stats.error_runs }}</div>
+      <div class="stat-lbl">erreurs</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num">{{ (stats.safe_rate * 100) | round(0) | int }}%</div>
+      <div class="stat-lbl">sûr à envoyer</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.total_entities }}</div>
+      <div class="stat-lbl">données masquées au total</div>
+    </div>
+  </div>
+
+  <h2 class="dash-h">Types de données rencontrés</h2>
+  <ul class="entity-bars">
+    {% for etype, n in stats.entity_totals.items() %}
+    <li class="entity-bar">
+      <code class="eb-type">{{ etype }}</code>
+      <span class="eb-count">{{ n }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <h2 class="dash-h">Derniers passages</h2>
+  <table class="about-table dash-table">
+    <thead><tr><th>Quand</th><th>Source</th><th>Données</th><th>Verdict</th></tr></thead>
+    <tbody>
+      {% for e in stats.recent %}
+      <tr>
+        <td class="dt-time">{{ e.timestamp }}</td>
+        <td>{{ e.event }}{% if e.file_count %} · {{ e.file_count }} fichier(s){% endif %}</td>
+        <td>{{ e.total | default(0) }}</td>
+        <td>
+          {% if e.event == "error" %}
+            <span class="verdict verdict--err">erreur</span>
+          {% elif e.safe_to_send %}
+            <span class="verdict verdict--ok">✓ sûr</span>
+          {% else %}
+            <span class="verdict verdict--warn">⚠ à relire</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<!-- ===== Config table (cloak / keep policy — built-in + custom) ===== -->
+<section class="dash-config">
+  <h2 class="dash-h">Réglages — masquer ou conserver</h2>
+  <p class="about-note">
+    Cochez ce qui doit être <strong>masqué</strong> (remplacé par un jeton).
+    Décochez ce que vous voulez <strong>conserver en clair</strong> — par exemple
+    les <em>montants en euros</em>, dont l'assistant a besoin pour vérifier la
+    cohérence entre l'allocation et le profil de risque. Les éléments
+    <span class="id-flag">identifiants</span> sont à masquer dans presque tous les cas.
+    Les <span class="custom-flag">champs personnalisés</span> apparaissent en bas du tableau.
+  </p>
+
+  <form method="post" action="/dashboard/policy">
+    <table class="about-table config-table">
+      <thead><tr><th>Type de donnée</th><th></th><th class="ct-toggle">Masquer ?</th></tr></thead>
+      <tbody>
+        {% for row in policy_rows %}
+        <tr{% if row.custom %} class="row--custom"{% endif %}>
+          <td>
+            {{ row.label }}
+            <code class="ct-code">{{ row.type }}</code>
+          </td>
+          <td>
+            {% if row.identifying %}<span class="id-flag">identifiant</span>{% endif %}
+            {% if row.custom %}<span class="custom-flag">personnalisé</span>{% endif %}
+          </td>
+          <td class="ct-toggle">
+            <label class="switch">
+              <input type="checkbox" name="cloak_{{ row.type }}" {% if row.cloak %}checked{% endif %}>
+              <span class="slider"></span>
+            </label>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="actions">
+      <button type="submit" class="btn">Enregistrer les réglages</button>
+    </div>
+  </form>
+  <p class="legal-note">
+    Conseil&nbsp;: garder un élément <span class="id-flag">identifiant</span> en
+    clair peut permettre de reconnaître la personne. À n'utiliser qu'en
+    connaissance de cause.
+  </p>
+</section>
+
+<!-- ===== Détecteur — mode gliner / openai / both ===== -->
+<section class="dash-detector">
+  <h2 class="dash-h">Détecteur — mode de reconnaissance</h2>
+  <p class="about-note">
+    Sélectionnez le moteur de détection NER utilisé en plus du noyau regex/checksums.
+    <strong>GLiNER</strong> tourne entièrement en local (modèle embarqué).
+    <strong>OpenAI</strong> utilise la couche de filtre onnxruntime
+    (requiert <code>onnxruntime&nbsp;&lt;&nbsp;1.27</code>).
+    <strong>Les deux</strong> active les deux en parallèle (union des détections).
+  </p>
+
+  <form method="post" action="/dashboard/detector" class="detector-form">
+    <div class="detector-options">
+      {% for m in detector.modes %}
+      <label class="detector-option{% if detector.mode == m %} detector-option--active{% endif %}">
+        <input type="radio" name="detector_mode" value="{{ m }}"
+               {% if detector.mode == m %}checked{% endif %}
+               {% if m != 'gliner' and not detector.openai_available %}disabled{% endif %}>
+        <span class="det-name">{{ m }}</span>
+        {% if m == 'gliner' %}
+          <span class="det-badge det-badge--ok">disponible · local</span>
+        {% elif detector.openai_available %}
+          <span class="det-badge det-badge--ok">disponible</span>
+        {% else %}
+          <span class="det-badge det-badge--warn">non disponible (onnxruntime &lt; 1.27 manquant)</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn btn--ghost">Enregistrer le mode</button>
+    </div>
+  </form>
+</section>
+
+<!-- ===== Champs personnalisés ===== -->
+<section class="dash-custom">
+  <h2 class="dash-h">Champs personnalisés</h2>
+  <p class="about-note">
+    Ajoutez des patterns spécifiques à votre cabinet (codes dossier, identifiants internes…).
+    <strong>Le garde-fou pii_guard vérifie chaque entrée</strong>&nbsp;: une valeur réelle
+    (IBAN, nom propre, e-mail) est refusée exactement comme sur le chemin MCP —
+    source de vérité unique, zéro dérive possible.
+    Config&nbsp;: <code class="ct-code">{{ custom.config_path }}</code>
+  </p>
+
+  {# ── Existing regex fields ── #}
+  {% if custom.regex_fields %}
+  <div class="custom-block">
+    <h3 class="custom-h">Patterns regex actifs</h3>
+    <table class="about-table">
+      <thead><tr><th>Entité</th><th>Label</th><th>Pattern</th><th>Priorité</th></tr></thead>
+      <tbody>
+        {% for f in custom.regex_fields %}
+        <tr>
+          <td><code class="ct-code">{{ f.entity_type }}</code></td>
+          <td>{{ f.label | default('—') }}</td>
+          <td><code class="pattern-code">{{ f.pattern }}</code></td>
+          <td>{{ f.priority | default(65) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {# ── Existing GLiNER labels ── #}
+  {% if custom.gliner_labels %}
+  <div class="custom-block">
+    <h3 class="custom-h">Étiquettes GLiNER actives</h3>
+    <ul class="entity-bars">
+      {% for g in custom.gliner_labels %}
+      <li class="entity-bar">
+        <code class="eb-type">{{ g.entity_type }}</code>
+        <span class="eb-count">{{ g.label }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {# ── Existing keep-list ── #}
+  {% if custom.keep_list %}
+  <div class="custom-block">
+    <h3 class="custom-h">Liste blanche (conserver en clair)</h3>
+    <ul class="entity-bars">
+      {% for v in custom.keep_list %}
+      <li class="entity-bar"><span class="eb-count">{{ v }}</span></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if not custom.regex_fields and not custom.gliner_labels and not custom.keep_list %}
+  <p class="about-note" style="margin-bottom:1rem;">Aucun champ personnalisé configuré.</p>
+  {% endif %}
+
+  {# ── Add new custom field form ── #}
+  <div class="custom-add card" style="margin-top:1.4rem;">
+    <h3 class="custom-h" style="margin-top:0;">Ajouter un champ</h3>
+    <p class="hint" style="margin-bottom:1.2rem;">
+      Tous les champs passent par <strong>pii_guard</strong>&nbsp;: une vraie valeur
+      (IBAN, nom propre, e-mail réel) est refusée avec le même message qu'en MCP.
+    </p>
+    <form method="post" action="/dashboard/custom-field">
+      <div class="field">
+        <label>Type de champ</label>
+        <div class="radio-row">
+          <label class="radio-opt">
+            <input type="radio" name="kind" value="regex" checked> Pattern regex
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="kind" value="gliner_label"> Étiquette GLiNER
+          </label>
+          <label class="radio-opt">
+            <input type="radio" name="kind" value="keep"> Liste blanche
+          </label>
+        </div>
+      </div>
+
+      <div class="field kind-regex kind-gliner_label">
+        <label>Identifiant d'entité <span class="hint">(ex&nbsp;: DOSSIER_CODE)</span></label>
+        <input type="text" name="field_type" placeholder="MON_CHAMP" autocomplete="off"
+               pattern="[A-Z][A-Z0-9_]{1,31}" title="Majuscules, chiffres et _ uniquement">
+      </div>
+
+      <div class="field kind-regex">
+        <label>Pattern regex <span class="hint">(ex&nbsp;: \\b[A-Z]{2}-\\d{5}\\b)</span></label>
+        <input type="text" name="value" id="custom-value" placeholder="\\b[A-Z]{2}-\d{5}\\b" autocomplete="off">
+        <p class="hint">Doit contenir des métacaractères — jamais une valeur réelle.</p>
+      </div>
+
+      <div class="field kind-gliner_label" style="display:none">
+        <label>Étiquette GLiNER <span class="hint">(ex&nbsp;: employer name)</span></label>
+        <input type="text" name="gliner_value" placeholder="employer name" autocomplete="off">
+      </div>
+
+      <div class="field kind-keep" style="display:none">
+        <label>Valeur à conserver en clair <span class="hint">(nom ou domaine de la firme)</span></label>
+        <input type="text" name="keep_value" placeholder="Bubble Invest" autocomplete="off">
+        <p class="hint">Réservé à l'identifiant propre de la firme — jamais une donnée client.</p>
+      </div>
+
+      <div class="field">
+        <label>Label affiché <span class="hint">(optionnel)</span></label>
+        <input type="text" name="label" placeholder="Description courte" autocomplete="off">
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn">Ajouter le champ</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<script>
+(function () {
+  // Sync the "value" field name with the selected kind so the backend gets the
+  // right value regardless of which radio is active.
+  var kindInputs = document.querySelectorAll('input[name="kind"]');
+  var valueInput = document.getElementById('custom-value');
+
+  function onKindChange() {
+    var kind = document.querySelector('input[name="kind"]:checked').value;
+
+    // Show / hide the per-kind input rows.
+    document.querySelectorAll('.field.kind-regex').forEach(function(el) {
+      el.style.display = (kind === 'regex') ? '' : 'none';
+    });
+    document.querySelectorAll('.field.kind-gliner_label').forEach(function(el) {
+      el.style.display = (kind === 'gliner_label') ? '' : 'none';
+    });
+    document.querySelectorAll('.field.kind-keep').forEach(function(el) {
+      el.style.display = (kind === 'keep') ? '' : 'none';
+    });
+
+    // For gliner_label and keep, copy the sub-field value into the main
+    // "value" input (hidden) so the backend always sees form.get("value").
+    if (kind === 'gliner_label') {
+      document.querySelector('input[name="gliner_value"]').addEventListener('input', function () {
+        valueInput.value = this.value;
+      });
+    } else if (kind === 'keep') {
+      document.querySelector('input[name="keep_value"]').addEventListener('input', function () {
+        valueInput.value = this.value;
+      });
+    }
+  }
+
+  kindInputs.forEach(function(inp) { inp.addEventListener('change', onKindChange); });
+  onKindChange(); // init state
+})();
+</script>
+
+{% endblock %}

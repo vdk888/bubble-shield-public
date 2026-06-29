@@ -69,8 +69,14 @@ from typing import List, Optional
 
 # ── location ──────────────────────────────────────────────────────────────────
 
-_DEFAULT_GAZETTEER_DIR = Path.home() / ".bubble_shield" / "gazetteer"
-_DEFAULT_GAZETTEER_FILE = _DEFAULT_GAZETTEER_DIR / "known_pii.json"
+
+def _shield_home() -> Path:
+    """The Bubble Shield store root, resolved AT CALL TIME from BUBBLE_SHIELD_HOME.
+
+    Resolving here (not at import) is what lets the autouse test fixture point the
+    gazetteer at a per-test tmp dir — so a test can never write the deny-list to
+    the real ~/.bubble_shield/ store (#382)."""
+    return Path(os.environ.get("BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield")))
 
 # ── anti-poisoning thresholds ─────────────────────────────────────────────────
 
@@ -129,7 +135,7 @@ class GazetteeredPII:
 def _resolve_path(path: Optional[str | Path]) -> Path:
     if path is not None:
         return Path(path)
-    return _DEFAULT_GAZETTEER_FILE
+    return _shield_home() / "gazetteer" / "known_pii.json"
 
 
 def _load_raw(path: Path) -> dict:
@@ -202,6 +208,51 @@ def add_confirmed_pii(
     })
     _save_raw(raw, p)
     return True
+
+
+def seed_vault_into_gazetteer(vault, *, path: Optional[str | Path] = None) -> int:
+    """#390 — seed every IDENTIFYING value in `vault` into the deny-list gazetteer.
+
+    A value sitting in the per-mission vault has already been masked → it IS
+    confirmed PII for this client. We add it to the gazetteer (via the no-gate
+    explicit-add path `add_confirmed_pii`, which is correct here — a vault value
+    is confirmed, not a probabilistic guess). The already-wired known-PII
+    recognizer then catches it DETERMINISTICALLY in every subsequent doc, even
+    if the probabilistic NER (GLiNER) misses it. This closes the leak where a
+    name vaulted on doc 1 leaked in clear on doc 2 because the NER missed it.
+
+    The vault stores token→value in `to_value`; the entity type is encoded in
+    the token (⟦NOM_0001⟧ → "NOM"). We seed ONLY identifying types, derived from
+    ENTITY_CATALOG (`identifying: True`) — never a hardcoded list — so kept /
+    non-identifying types (MONTANT, ISIN, DATE_EVENEMENT) are NOT seeded.
+
+    Returns the number of NEW gazetteer entries inserted. Per-entry failures are
+    swallowed: this enriches FUTURE recall, the current doc's masking already
+    happened, so a seeding failure must NEVER break or slow anonymisation.
+    """
+    try:
+        from bubble_shield.vault import TOKEN_RE
+        from bubble_shield.policy import ENTITY_CATALOG
+    except Exception:
+        return 0
+    added = 0
+    for token, value in dict(getattr(vault, "to_value", {})).items():
+        try:
+            m = TOKEN_RE.fullmatch(token)
+            if not m:
+                continue
+            etype = m.group(1)
+            meta = ENTITY_CATALOG.get(etype)
+            # Unknown/custom types: ENTITY_CATALOG misses them, but custom types
+            # are always identifying by construction (policy.py) → seed them too.
+            is_identifying = meta.get("identifying", True) if meta else True
+            if not is_identifying:
+                continue
+            if add_confirmed_pii(value, etype, path=path):
+                added += 1
+        except Exception:
+            continue  # fail-open per entry
+    return added
 
 
 def maybe_add_detection(

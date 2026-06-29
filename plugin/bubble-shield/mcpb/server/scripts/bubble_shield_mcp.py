@@ -133,14 +133,16 @@ TOOLS = [
     {
         "name": "bubble_shield_setup_ml",
         "description": (
-            "Install or check the optional on-device ML accuracy pack (better "
-            "detection of names/addresses the rules miss). Runs on the user's own "
-            "machine, nothing leaves it. action='start' begins the one-time install "
-            "in the background (downloads a model, a few hundred MB — takes a few "
-            "minutes) and returns immediately; action='status' reports progress "
-            "(installing / downloading / ready / error). After 'start', poll 'status' "
+            "Install or check ALL on-device models in ONE pass — GLiNER + OpenAI "
+            "Privacy Filter + OCR (docling). Runs on the user's own machine, "
+            "nothing leaves it. action='start' begins the one-time install in the "
+            "background (downloads ~900MB+ total — a few minutes) and returns "
+            "immediately; models already on disk are SKIPPED. action='status' "
+            "reports a PER-MODEL state, naming each model (GLiNER / OpenAI-PF / OCR) "
+            "with present / downloading / ready / error. After 'start', poll 'status' "
             "every ~20s and tell the user in plain language when it's ready. No "
-            "Terminal needed — this runs the setup for them."),
+            "Terminal needed — this runs the full setup for them, so the client is "
+            "never asked to install a model later."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -273,6 +275,76 @@ def _try_spawn_daemon_from_mcp() -> None:
         pass  # spawn failure is acceptable; the per-call gate is what enforces safety
 
 
+def _apply_negative_filters(matches, allowlist=None, known_pii_path=None):
+    """#348 — apply the three negative filters (org allowlist, common-words,
+    safe-list) with the gazetteer-ALWAYS-WINS precedence rule applied to ALL of
+    them, not just the safe-list step.
+
+    Spec rule: a value confirmed in the gazetteer (is_known_pii) must STAY MASKED
+    regardless of any negative list. Pre-fix the exemption lived only in the
+    safe-list step, so the allowlist and common-word steps could un-mask a
+    gazetteer-confirmed value (a real PII leak).
+
+    Approach: PARTITION up-front — pull out every match whose value is in the
+    gazetteer (FORCE-KEPT, exempt from all negative filters), run allowlist +
+    common-words + safe-list ONLY on the remainder, then re-add the exempt
+    matches (original order preserved). Every step is fail-open: a throwing
+    filter never breaks anonymisation (it just keeps the spans).
+
+    `known_pii_path` is for TESTS (point at a tmp gazetteer); in production it is
+    None so is_known_pii reads the default store — the correct daemon behaviour.
+    """
+    # 1) partition: gazetteer-confirmed values are exempt from ALL negative steps
+    exempt_idx = set()
+    try:
+        from bubble_shield.known_pii_store import is_known_pii
+        for i, m in enumerate(matches):
+            try:
+                if is_known_pii(getattr(m, "value", ""), path=known_pii_path):
+                    exempt_idx.add(i)
+            except Exception:
+                pass  # fail toward masking: on error, treat as non-exempt (still
+                      # subject to filters, which themselves fail-open to keeping)
+    except Exception:
+        pass  # gazetteer unavailable → no exemptions, filters still run fail-open
+
+    remainder = [m for i, m in enumerate(matches) if i not in exempt_idx]
+
+    # 2) org/firm/regulator allowlist (CORUM/AMF/Orias…)
+    if allowlist is not None:
+        try:
+            remainder = allowlist.filter(remainder)
+        except Exception:
+            pass  # flaky filter never breaks anonymise
+
+    # 3) common-words — drop NOM spans that are ordinary French words GLiNER
+    #    mis-flags as names (marchés, investissements…). Exact-token list only.
+    try:
+        from bubble_shield import common_words as _cw
+        remainder = _cw.filter_matches(remainder)
+    except Exception:
+        pass  # flaky filter never breaks anonymise
+
+    # 4) safe-list — drop NOM spans a reviewer marked "never mask". (Gazetteer
+    #    values were already partitioned out above, so this step only sees the
+    #    remainder; the redundant in-step guard is gone — precedence is uniform.)
+    try:
+        from bubble_shield import safe_words as _sw
+        def _safe_keep(m):
+            if getattr(m, "entity_type", "") != "NOM":
+                return True
+            return not _sw.is_safe(getattr(m, "value", ""))
+        remainder = [m for m in remainder if _safe_keep(m)]
+    except Exception:
+        pass  # flaky filter never breaks anonymise
+
+    # 5) re-assemble: keep original order — exempt matches stay where they were,
+    #    surviving remainder matches keep their relative position too.
+    kept_remainder_ids = {id(m) for m in remainder}
+    return [m for i, m in enumerate(matches)
+            if i in exempt_idx or id(m) in kept_remainder_ids]
+
+
 def _engine(text_for_daemon: str = "", filename_basename: str = ""):
     """Build the shared engine: regex core + structured_ext form detectors +
     (daemon NER if up) + policy + the consistent per-session vault.
@@ -326,10 +398,25 @@ def _engine(text_for_daemon: str = "", filename_basename: str = ""):
     except Exception:
         pass  # fail-open: gazetteer failure never breaks anonymisation
 
+    # #348 — composed match_filter: policy THEN the deployment allowlist (and,
+    # in Tasks 2-3, common-words + safe-list). Each step is fail-open: a flaky
+    # allowlist must never break anonymisation (mirrors engine.py:218-221).
+    def _composed_match_filter():
+        base = _policy.make_match_filter(_policy.load_policy())
+        try:
+            from bubble_shield.allowlist import load_deployment_allowlist
+            al = load_deployment_allowlist()
+        except Exception:
+            al = None
+        def _f(matches):
+            kept = base(matches)
+            return _apply_negative_filters(kept, allowlist=al)
+        return _f
+
     engine = AnonymizationEngine(
         extra_detectors=detectors,
         extra_recognizers=extra_recs,
-        match_filter=_policy.make_match_filter(_policy.load_policy()))
+        match_filter=_composed_match_filter())
     vpath = _vault_path()
     engine.vault = Vault.load(str(vpath)) if vpath.is_file() else Vault(mission=os.environ.get("BUBBLE_SHIELD_SESSION", "mcp-session"))
     return engine, vpath, daemon_up
@@ -403,6 +490,11 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
     When provided (always set by _anonymise_file), the structured_ext detector is
     rebuilt with that basename so person-name tokens from the filename are seeded
     into the doc-level repetition pass.
+
+    Phase 0 (Tier-2 desktop app): after the vault is saved, candidate spans
+    (sub-threshold / unsafe) are written to a local host-side sidecar file via
+    bubble_shield.candidate_sidecar.write_candidates().  This write is FAIL-OPEN
+    and NEVER changes the string returned to the agent.
     """
     engine, vpath, daemon_up = _engine(text, filename_basename=filename_basename)
     if not daemon_up:
@@ -411,9 +503,56 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
         raise NERDownError(_NER_DOWN_ERROR)
     res = engine.anonymize(text)
     engine.vault.save(str(vpath))
+
+    # #390 — seed the vault into the deny-list gazetteer. Every IDENTIFYING value
+    # now in the vault is confirmed PII for this client, so feed it to the wired
+    # known-PII recognizer: a later doc where the probabilistic NER MISSES a known
+    # name is then still masked deterministically (the leak this fix closes).
+    # MUST run AFTER vault.save so we read the vault's FINAL to_value/tokens for
+    # this mission. Fail-open: an enhancement to FUTURE recall — the current doc's
+    # masking already happened, so a seeding failure must never break anonymisation.
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield.known_pii_store import seed_vault_into_gazetteer
+        seed_vault_into_gazetteer(engine.vault)
+    except Exception:
+        pass  # fail-open: deny-list seeding never breaks/slows anonymisation
+
+    # Phase 0 — candidate sidecar (host-side, fail-open, never changes agent output).
+    # Sub-threshold / unsafe entities are written locally for the future HITL feeder.
+    # The agent-facing string below is byte-identical to the pre-Phase-0 code path.
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield.candidate_sidecar import write_candidates
+        mission = os.environ.get("BUBBLE_SHIELD_SESSION", "mcp-session")
+        write_candidates(res, mission=mission, source_doc=filename_basename)
+    except Exception:
+        pass  # fail-open: sidecar write never breaks anonymization
+
     note = "" if res.safe_to_send else (
         "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
         "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
+
+    # #334 — LOUD WARNING when an identifying type is set to KEEP in the policy.
+    # The client keeps full autonomy (no hard floor), but the kept types are named
+    # loudly so the leak is never silent. This is ADDITIVE — it never changes what
+    # gets masked. Separate from the NER-down error above (both can fire).
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield.policy import kept_identifying_types, load_policy as _load_pol
+        _kept = kept_identifying_types(_load_pol())
+        if _kept:
+            _types_str = ", ".join(_kept)
+            kept_warning = (
+                f"⚠️ Bubble Shield — MASQUAGE DÉSACTIVÉ pour : {_types_str} "
+                f"(selon votre configuration). Ces données identifiantes restent "
+                f"EN CLAIR dans le résultat. Vérifiez votre politique de "
+                f"confidentialité (policy.json) si ce n'est pas voulu.\n\n"
+            )
+            return kept_warning + res.anonymized + note
+    except Exception:
+        pass  # fail-open: warning failure must never break anonymization
+
     return res.anonymized + note
 
 
@@ -525,6 +664,48 @@ def _deanonymise_to_file(path: str, content: str) -> dict:
 _SETUP_MARKER = BUBBLE_SHIELD_HOME / "setup.status"          # progress breadcrumb
 _SETUP_LOG = BUBBLE_SHIELD_HOME / "setup.log"
 
+# Skip-if-present predicates (#387) — pure disk checks, mirror the setup
+# scripts' model_present() / ocr_models_present(). A model is "present" iff its
+# onnx file (ML) or the cache sentinel (OCR) exists on disk; the setup then
+# skips its download. Kept inline here so the MCP stays self-contained.
+_MODELS_DIR = BUBBLE_SHIELD_HOME / "models"
+_GLINER_DIR = "onnx-community__gliner_multi_pii-v1"
+_GLINER_ONNX = "onnx/model_quantized.onnx"
+_OPENAI_DIR = "openai__privacy-filter"
+_OPENAI_ONNX = "onnx/model_q4.onnx"
+_OCR_SENTINEL = BUBBLE_SHIELD_HOME / "layout_model_cached.flag"
+
+
+def _model_states() -> dict:
+    """Per-model present/absent map for GLiNER, OpenAI-PF, OCR (#387)."""
+    return {
+        "gliner": "present" if (_MODELS_DIR / _GLINER_DIR / _GLINER_ONNX).is_file() else "absent",
+        "openai": "present" if (_MODELS_DIR / _OPENAI_DIR / _OPENAI_ONNX).is_file() else "absent",
+        "ocr": "present" if _OCR_SENTINEL.is_file() else "absent",
+    }
+
+
+def _per_model_line(states: dict, downloading: bool = False) -> str:
+    """Render the per-model status the onboarding shows the user (#387).
+
+    e.g. "GLiNER ✓ déjà présent · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement"
+    A model already on disk shows "✓ déjà présent"; an absent one shows
+    "↓ téléchargement" while installing or "✓ prêt"/"absent" otherwise."""
+    names = {"gliner": "GLiNER", "openai": "OpenAI-PF", "ocr": "OCR"}
+    parts = []
+    for key in ("gliner", "openai", "ocr"):
+        st = states.get(key, "absent")
+        if st == "present":
+            tag = "✓ déjà présent"
+        elif st == "done":
+            tag = "✓ prêt"
+        elif st == "absent" and downloading:
+            tag = "↓ téléchargement"
+        else:
+            tag = "absent"
+        parts.append(f"{names[key]} {tag}")
+    return " · ".join(parts)
+
 
 def _setup_script() -> Path:
     for cand in (PLUGIN_ROOT / "scripts" / "bubble_shield_setup_ml.py",
@@ -535,40 +716,87 @@ def _setup_script() -> Path:
 
 
 def _setup_start() -> dict:
-    """Spawn the bootstrap DETACHED host-side and return immediately."""
-    if (BUBBLE_SHIELD_HOME / "ml.json").is_file():
-        return {"state": "ready", "message": "Le pack ML est déjà installé."}
+    """Spawn the ONE-PASS bootstrap DETACHED host-side and return immediately (#387).
+
+    Downloads ALL models — GLiNER + OpenAI Privacy Filter (ml setup) AND OCR
+    (docling, ocr setup) — in a single pass so the client is never prompted to
+    install a model later. Each model is skipped if already on disk. The reply
+    names every model + its current state.
+
+    Idempotent: if all three are already present, returns 'ready' with the
+    per-model "déjà présent" line and launches nothing."""
+    states = _model_states()
+    if all(v == "present" for v in states.values()):
+        return {"state": "ready",
+                "message": "Tous les modèles sont déjà installés.",
+                "models": states,
+                "per_model": _per_model_line(states)}
     script = _setup_script()
     if not script.is_file():
         return {"state": "error", "message": f"bootstrap introuvable: {script}"}
+    ocr_script = _ocr_setup_script()
     BUBBLE_SHIELD_HOME.mkdir(parents=True, exist_ok=True)
     _SETUP_MARKER.write_text("installing", encoding="utf-8")
+    _OCR_SETUP_MARKER.write_text("installing", encoding="utf-8")
     import subprocess
     logf = open(_SETUP_LOG, "a")
-    # wrapper writes the final state to the marker so /status can read it
+    # One detached wrapper runs BOTH setups in sequence (ML first, then OCR) so
+    # the whole model set is pulled in a single pass. Each setup is skip-if-
+    # present internally; the wrapper records each marker so /status can read
+    # them. ML default now pulls GLiNER + OpenAI-PF (no --openai flag needed).
+    ocr_part = ""
+    if ocr_script.is_file():
+        ocr_part = (
+            f"rc2=subprocess.run([sys.executable,{str(ocr_script)!r}]).returncode;"
+            f"open({str(_OCR_SETUP_MARKER)!r},'w').write('ready' if rc2==0 else 'error');"
+        )
     wrapper = (
         f"import subprocess,sys;"
         f"rc=subprocess.run([sys.executable,{str(script)!r}]).returncode;"
-        f"open({str(_SETUP_MARKER)!r},'w').write('ready' if rc==0 else 'error')"
+        f"open({str(_SETUP_MARKER)!r},'w').write('ready' if rc==0 else 'error');"
+        f"{ocr_part}"
     )
     subprocess.Popen([sys.executable, "-c", wrapper],
                      stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
                      start_new_session=True)
     return {"state": "installing",
-            "message": "Installation du pack ML démarrée (téléchargement du modèle, "
-                       "quelques minutes). Rappelle bubble_shield_setup_ml(action='status') "
-                       "pour suivre."}
+            "models": states,
+            "per_model": _per_model_line(states, downloading=True),
+            "message": "Installation des modèles démarrée en une seule passe "
+                       "(GLiNER + OpenAI-PF + OCR ; ~900 Mo+, quelques minutes ; "
+                       "les modèles déjà présents sont ignorés). Rappelle "
+                       "bubble_shield_setup_ml(action='status') pour suivre."}
 
 
 def _setup_status() -> dict:
-    if (BUBBLE_SHIELD_HOME / "ml.json").is_file():
-        return {"state": "ready", "message": "Pack ML prêt — détection fine active."}
-    state = _SETUP_MARKER.read_text(encoding="utf-8").strip() if _SETUP_MARKER.is_file() else "absent"
-    msgs = {"installing": "Installation en cours (téléchargement du modèle)…",
-            "ready": "Pack ML prêt.",
-            "error": "L'installation a échoué — voir ~/.bubble_shield/setup.log.",
-            "absent": "Pack ML non installé. Lance bubble_shield_setup_ml(action='start')."}
-    return {"state": state, "message": msgs.get(state, state)}
+    """Per-model status across the one-pass install (GLiNER + OpenAI-PF + OCR).
+
+    Reports each model by name with its present/downloading/ready/error state,
+    so the onboarding can show the user exactly what is installed vs in flight."""
+    states = _model_states()
+    ml_marker = _SETUP_MARKER.read_text(encoding="utf-8").strip() if _SETUP_MARKER.is_file() else "absent"
+    ocr_marker = _OCR_SETUP_MARKER.read_text(encoding="utf-8").strip() if _OCR_SETUP_MARKER.is_file() else "absent"
+    installing = ml_marker == "installing" or ocr_marker == "installing"
+
+    if all(v == "present" for v in states.values()):
+        state = "ready"
+        message = "Tous les modèles sont prêts (GLiNER + OpenAI-PF + OCR)."
+    elif installing:
+        state = "installing"
+        message = "Installation en cours (téléchargement des modèles)…"
+    elif "error" in (ml_marker, ocr_marker):
+        state = "error"
+        message = ("Une installation a échoué — voir ~/.bubble_shield/setup.log "
+                   "et ~/.bubble_shield/ocr-setup.log.")
+    elif any(v == "present" for v in states.values()):
+        state = "partial"
+        message = "Certains modèles sont prêts, d'autres restent à installer."
+    else:
+        state = "absent"
+        message = "Aucun modèle installé. Lance bubble_shield_setup_ml(action='start')."
+
+    return {"state": state, "message": message, "models": states,
+            "per_model": _per_model_line(states, downloading=installing)}
 
 
 # ---- OCR pack setup (async, host-side) --------------------------------------
@@ -729,7 +957,10 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_setup_ml":
                 action = args.get("action", "status")
                 r = _setup_start() if action == "start" else _setup_status()
-                ok(f"[{r['state']}] {r['message']}")
+                line = f"[{r['state']}] {r['message']}"
+                if r.get("per_model"):
+                    line += f"\n📦 {r['per_model']}"
+                ok(line)
             elif name == "bubble_shield_setup_ocr":
                 action = args.get("action", "status")
                 r = _ocr_setup_start() if action == "start" else _ocr_setup_status()

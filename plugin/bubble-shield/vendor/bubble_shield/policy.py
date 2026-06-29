@@ -55,10 +55,68 @@ ENTITY_CATALOG: Dict[str, Dict[str, Any]] = {
     "SECRET":         {"label": "Secret / credential",     "identifying": True,  "default_cloak": True},
 }
 
-DEFAULT_POLICY_PATH = os.environ.get(
-    "BUBBLE_SHIELD_POLICY",
-    str(Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield")) / "policy.json"),
-)
+def _env_policy_path() -> str:
+    """The env-derived policy.json path, computed AT CALL TIME.
+
+    Precedence: BUBBLE_SHIELD_POLICY (explicit file) → $BUBBLE_SHIELD_HOME/policy.json
+    → ~/.bubble_shield/policy.json. Resolving at call time (not import time) is
+    what lets the autouse test fixture redirect every store to a tmp home — and,
+    crucially, prevents a test from ever writing policy.json to the real store and
+    silently disabling masking on a production read (#382)."""
+    explicit = os.environ.get("BUBBLE_SHIELD_POLICY")
+    if explicit:
+        return explicit
+    home = os.environ.get("BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield"))
+    return str(Path(home) / "policy.json")
+
+
+# Module attribute: the path load_policy()/save_policy() use when no explicit
+# path= is passed. Captured at import for back-compat (some tests monkeypatch
+# this attribute directly). The live resolver _default_policy_path() prefers a
+# monkeypatched value but otherwise re-reads the env every call.
+DEFAULT_POLICY_PATH = _env_policy_path()
+_IMPORT_TIME_POLICY_PATH = DEFAULT_POLICY_PATH
+
+
+def _default_policy_path() -> str:
+    """Path used when no explicit path= is given.
+
+    If a test (or caller) has monkeypatched the module-level DEFAULT_POLICY_PATH
+    away from its import-time value, honor that override. Otherwise re-resolve
+    from the env every call, so the autouse BUBBLE_SHIELD_HOME=tmp fixture always
+    governs the default and a test can never hit the real store (#382)."""
+    if DEFAULT_POLICY_PATH != _IMPORT_TIME_POLICY_PATH:
+        return DEFAULT_POLICY_PATH
+    return _env_policy_path()
+
+
+def is_identifying(entity_type: str) -> bool:
+    """Whether an entity type identifies a person, per ENTITY_CATALOG.
+
+    Unknown types are treated as identifying (fail-closed): a type we don't
+    recognise must never be silently kept-in-clear. Derived from the catalog —
+    never a hardcoded list (#392)."""
+    meta = ENTITY_CATALOG.get(entity_type)
+    if meta is None:
+        return True
+    return bool(meta.get("identifying", True))
+
+
+def enforce_identifying_floor(policy: Mapping[str, bool]) -> Dict[str, bool]:
+    """Return a copy of ``policy`` with every IDENTIFYING type forced to CLOAK.
+
+    This is the #392 floor: an identifying entity type can NEVER be kept-in-clear,
+    regardless of what a policy file (hand-edited, polluted, or saved through an
+    all-unchecked form) says. The keep-list (cloak=False) only applies to
+    NON-identifying types (MONTANT, ISIN, DATE_EVENEMENT, URL…). Identifying is
+    derived from ENTITY_CATALOG via :func:`is_identifying`, never hardcoded.
+
+    Non-identifying types pass through unchanged, so the masquer/conserver toggle
+    still works for the values an advisor legitimately needs in clear."""
+    coerced: Dict[str, bool] = {}
+    for etype, cloak in policy.items():
+        coerced[etype] = True if is_identifying(etype) else bool(cloak)
+    return coerced
 
 
 def default_policy() -> Dict[str, bool]:
@@ -73,7 +131,7 @@ def load_policy(path: str | os.PathLike[str] | None = None) -> Dict[str, bool]:
     A missing or unreadable file → pure defaults (so the tool always works, and
     a corrupted policy can never accidentally turn cloaking OFF for a type)."""
     policy = default_policy()
-    p = Path(path or DEFAULT_POLICY_PATH)
+    p = Path(path or _default_policy_path())
     if not p.exists():
         return policy
     try:
@@ -84,7 +142,10 @@ def load_policy(path: str | os.PathLike[str] | None = None) -> Dict[str, bool]:
         for etype, cloak in raw.items():
             if etype in ENTITY_CATALOG:
                 policy[etype] = bool(cloak)
-    return policy
+    # #392 floor: a stored all-keep / partial / hand-edited policy can never
+    # represent an identifying-type-kept state. Coerce identifying types to cloak
+    # so what the caller sees can't bypass the floor.
+    return enforce_identifying_floor(policy)
 
 
 def save_policy(policy: Mapping[str, bool], path: str | os.PathLike[str] | None = None) -> None:
@@ -92,7 +153,11 @@ def save_policy(policy: Mapping[str, bool], path: str | os.PathLike[str] | None 
     written, so the file stays clean. Creates the parent dir if needed."""
     clean = {etype: bool(policy.get(etype, ENTITY_CATALOG[etype]["default_cloak"]))
              for etype in ENTITY_CATALOG}
-    p = Path(path or DEFAULT_POLICY_PATH)
+    # #392 floor: never persist an identifying-type-kept state. Even if the caller
+    # passes NOM=False, what lands on disk says NOM=cloak, so a saved policy file
+    # can't be the leak vector it was on 2026-06-29.
+    clean = enforce_identifying_floor(clean)
+    p = Path(path or _default_policy_path())
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -102,10 +167,47 @@ def make_match_filter(policy: Mapping[str, bool]) -> Callable[[List[Any]], List[
 
     The engine only substitutes the matches this returns, so dropping a match
     leaves that value in clear — exactly "keep this entity type". An unknown type
-    is cloaked (fail-closed: a type we don't recognise is treated as sensitive)."""
+    is cloaked (fail-closed: a type we don't recognise is treated as sensitive).
+
+    #392 FLOOR (load-bearing): an IDENTIFYING type is ALWAYS cloaked here,
+    regardless of what ``policy`` says. This is the runtime guarantee the engine
+    relies on — a hand-edited or polluted policy.json (or a policy dict built in
+    memory with NOM=False) can never un-mask an identifying type. Only
+    NON-identifying types honour the keep toggle. ``identifying`` is derived from
+    ENTITY_CATALOG, never hardcoded."""
+    coerced = enforce_identifying_floor(policy)
+
     def _filter(matches: List[Any]) -> List[Any]:
-        return [m for m in matches if policy.get(getattr(m, "entity_type", ""), True)]
+        out: List[Any] = []
+        for m in matches:
+            etype = getattr(m, "entity_type", "")
+            # Identifying (or unknown) types: always cloak → never dropped.
+            if is_identifying(etype):
+                out.append(m)
+            elif coerced.get(etype, True):
+                out.append(m)
+        return out
     return _filter
+
+
+def kept_identifying_types(policy: Mapping[str, bool]) -> List[str]:
+    """Return FR labels for IDENTIFYING entity types currently set to KEEP (False).
+
+    Derives "identifying" from ENTITY_CATALOG — never a hardcoded list.
+    Returns labels (not keys) so they are ready for display in a user-facing warning.
+    Returns an empty list when no identifying type is being kept (the normal case).
+
+    Example:
+        policy["NOM"] = False   # user said "keep names"
+        policy["EMAIL"] = False # user said "keep emails"
+        kept_identifying_types(policy)
+        → ["Nom / prénom", "E-mail"]
+    """
+    result = []
+    for etype, meta in ENTITY_CATALOG.items():
+        if meta.get("identifying") and not policy.get(etype, meta["default_cloak"]):
+            result.append(meta["label"])
+    return result
 
 
 def policy_view(policy: Mapping[str, bool]) -> List[Dict[str, Any]]:

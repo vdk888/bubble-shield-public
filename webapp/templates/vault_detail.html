@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Coffre {{ mission }} — Bubble Shield{% endblock %}
+{% block content %}
+<p><a href="/vault" class="top-link">← Tous les coffres</a></p>
+<h1>Coffre — {{ mission }}</h1>
+{% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+{% if missing %}<p>Coffre introuvable ou illisible.</p>{% else %}
+<table>
+  <thead><tr><th>Jeton</th><th>Valeur</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr data-token="{{ r.token_inner }}">
+      <td>{{ r.token }}</td>
+      <td><span class="masked">{{ r.masked }}</span>
+          <button type="button" onclick="reveal('{{ mission }}','{{ r.token_inner }}', this)">👁 révéler</button></td>
+      <td>
+        <form method="post" action="/vault/{{ mission }}/rectify" style="display:inline"
+              onsubmit="return true;">
+          <input type="hidden" name="token" value="{{ r.token_inner }}">
+          <input type="text" name="new_value" placeholder="corriger…" size="14">
+          <button type="submit">Corriger</button>
+        </form>
+        <form method="post" action="/vault/{{ mission }}/forget" style="display:inline"
+              onsubmit="return confirm('Oublier ce jeton ? Les documents déjà anonymisés avec ce jeton ne pourront plus être restaurés. Tapez OUBLIER pour confirmer.') && promptOublier(this);">
+          <input type="hidden" name="token" value="{{ r.token_inner }}">
+          <input type="hidden" name="confirm" value="">
+          <button type="submit">Oublier</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<hr>
+<h2>Oublier une personne (RGPD)</h2>
+<form method="get" action="/vault/{{ mission }}/forget-subject-count">
+  <input type="text" name="q" placeholder="nom à oublier" size="20">
+  <button type="submit">Prévisualiser</button>
+</form>
+{% endif %}
+<script>
+async function reveal(mission, token, btn) {
+  const r = await fetch(`/vault/${mission}/reveal/${token}`);
+  if (!r.ok) { btn.textContent = 'indisponible'; return; }
+  const d = await r.json();
+  btn.closest('td').querySelector('.masked').textContent = d.value;
+  btn.remove();
+}
+function promptOublier(form) {
+  const t = prompt('Tapez OUBLIER pour confirmer :');
+  if (t === 'OUBLIER') { form.querySelector('input[name=confirm]').value = 'OUBLIER'; return true; }
+  return false;
+}
+</script>
+{% endblock %}

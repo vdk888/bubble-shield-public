@@ -180,14 +180,89 @@ def _custom_fields_path() -> Path:
 
 
 def _load_detector_mode(cfg_path: Path) -> str:
-    """Read detector.mode from custom_fields.json. Default = "gliner" (production-safe)."""
+    """Read detector.mode from custom_fields.json. Default = "both" (#348).
+
+    "both" = the GLiNER∪OpenAI-PF union (merged via merge.py:merge_soft), proven
+    at 95% recall on real docs with OpenAI-PF's clean precision. When the
+    configured/default mode resolves to "both" but the OpenAI-PF weights are
+    unavailable, the runtime degrades to "gliner"-only — see
+    _resolve_runtime_mode(). The union ALWAYS degrades to the GLiNER core; it
+    never crashes detection.
+    """
     if not cfg_path.is_file():
-        return "gliner"
+        return "both"
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        return str(cfg.get("detector", {}).get("mode", "gliner")).lower()
+        return str(cfg.get("detector", {}).get("mode", "both")).lower()
     except Exception:
-        return "gliner"
+        return "both"
+
+
+def _openai_weights_present(man: dict) -> bool:
+    """True iff the OpenAI-PF ONNX weights named in the manifest exist on disk."""
+    try:
+        openai_cfg = man.get("models", {}).get("openai", {})
+        model_dir = openai_cfg.get("model_dir")
+        onnx_file = openai_cfg.get("onnx_file")
+        if not model_dir or not onnx_file:
+            return False
+        return (Path(model_dir) / onnx_file).is_file()
+    except Exception:
+        return False
+
+
+def _fetch_openai_weights(man: dict) -> bool:
+    """Attempt the documented on-demand fetch of the OpenAI-PF weights.
+
+    Invokes bubble_shield_setup_ml.py --openai (the documented fetch path) using
+    the ML-pack venv python from the manifest. Returns True iff the weights are
+    present afterwards. Never raises — any failure returns False so the caller
+    fails open to gliner-only.
+
+    NOTE: this is a ~900MB download; it only runs when mode=both AND the weights
+    are genuinely absent. In normal operation the weights are already installed.
+    """
+    try:
+        py = man.get("venv_python") or man.get("models", {}).get("gliner", {}).get("venv_python")
+        if not py or not Path(py).is_file():
+            return False
+        setup = Path(__file__).resolve().parent / "bubble_shield_setup_ml.py"
+        if not setup.is_file():
+            return False
+        import subprocess
+        subprocess.run([str(py), str(setup), "--openai"], check=True, timeout=3600)
+        return _openai_weights_present(man)
+    except Exception as e:
+        print(f"[bubble-shield-nerd] OpenAI-PF on-demand fetch failed: {e}", flush=True)
+        return False
+
+
+def _resolve_runtime_mode(mode: str, man: dict, _fetch=_fetch_openai_weights) -> str:
+    """Decide the EFFECTIVE runtime mode, fetching OpenAI-PF weights on demand.
+
+    If `mode` is "both" but the OpenAI-PF weights are absent, attempt the
+    documented fetch; if they still can't be made available (offline, error,
+    etc.) DEGRADE to "gliner"-only. The union always falls back to the GLiNER
+    core — detection keeps working, never crashes. `_fetch` is injectable for
+    testing so the fail-open logic is exercised without a live download.
+    """
+    if mode != "both":
+        return mode
+    if _openai_weights_present(man):
+        return "both"
+    # Weights absent → try the on-demand fetch. _fetch returns True only after
+    # it has confirmed the weights are present (via _openai_weights_present), so
+    # we trust its return value here. Fail open to gliner on False/raise.
+    try:
+        if _fetch(man):
+            return "both"
+    except Exception as e:
+        print(f"[bubble-shield-nerd] OpenAI-PF fetch raised, "
+              f"degrading to gliner-only: {e}", flush=True)
+    print("[bubble-shield-nerd] mode=both but OpenAI-PF weights unavailable — "
+          "degrading to gliner-only (union → GLiNER core, detection intact).",
+          flush=True)
+    return "gliner"
 
 
 def _load_viterbi_bias_override(cfg_path: Path):
@@ -306,7 +381,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": str(e), "matches": []})
 
     def _detect(self, text: str, mode: str, cfg_path: Path):
-        """Dispatch to the correct soft detector(s) based on mode."""
+        """Dispatch to the correct soft detector(s) based on mode.
+
+        Modes: "gliner" | "openai" | "both" (union, default). NOTE (#348): there is
+        deliberately NO "fastino"/gliner2 detector path here. Fastino was evaluated
+        in bench/ (eval_recall_boosters_329.py, realdoc_precision_330.py) and dropped
+        — 81% recall, slower, native-crash on large docs. It is bench-reference only
+        and is never wired as a core/default detector. Locked direction is the
+        GLiNER∪OpenAI-PF union + the NOM precision-filter.
+        """
         if mode == "openai":
             bias = _load_viterbi_bias_override(cfg_path)
             kwargs = {"viterbi_bias": bias} if bias else {}
@@ -342,9 +425,12 @@ def main() -> int:
     _prepare_env(man)
     gliner_ext, openai_pf_ext, merge_mod = _import_vendor_modules()
 
-    # Determine mode early so warm_up can decide which models to load
+    # Determine mode early so warm_up can decide which models to load.
+    # #348: default is now "both" (GLiNER∪OpenAI-PF). If the OpenAI-PF weights
+    # are absent we fetch on demand; if they can't be fetched, fail open to
+    # gliner-only (the union degrades to the GLiNER core, never crashes).
     cfg_path = _custom_fields_path()
-    mode = _load_detector_mode(cfg_path)
+    mode = _resolve_runtime_mode(_load_detector_mode(cfg_path), man)
 
     Handler.gliner_ext = gliner_ext
     Handler.openai_pf_ext = openai_pf_ext

@@ -27,20 +27,49 @@ This is **Jalon 2** of Bubble Shield: the engine (Jalon 1) anonymises; this plug
 - **Configurable.** Protected folders, allow-listed sub-paths, exempt
   extensions, and Bash scanning are all set per deployment.
 
-## Install (one command, from the Bubble marketplace)
+## Install the plugin in Cowork (Desktop)
+
+1. Open **Cowork** → **Customize** → **Plugins**.
+2. **Add from a repository** → paste:
+
+   ```
+   vdk888/bubble-shield-public
+   ```
+
+3. Install **bubble-shield**, toggle it on, and run **`/reload-plugins`** (or restart Cowork).
+
+No GitHub account needed (public repo); it runs fully offline afterwards.
+
+### Claude Code (CLI)
 
 ```
-/plugin marketplace add vdk888/bubble-shield
-/plugin install bubble-shield@bubble-shield
+/plugin marketplace add vdk888/bubble-shield-public
+/plugin install bubble-shield@bubble-shield-public
 ```
 
-Or test locally without installing:
+## Install the desktop app (review / vault / management)
+
+Bubble Shield is **two pieces**: the plugin above (the *protection*, inside Cowork)
+and a small **desktop app** on your Mac — the human control surface where you
+review uncertain detections, manage the vault, and the known-PII list. Install it
+once, in Terminal:
 
 ```bash
-claude --plugin-dir /path/to/bubble_shield/plugin/bubble-shield
+curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/install-app.sh | bash
 ```
 
-After install, run `/reload-plugins` (or restart the session) to load the hook.
+This drops a **Bubble Shield** app on your Desktop. First launch: **right-click →
+Open**, once (it's unsigned). Re-run the command any time to update.
+
+**The app's three screens:**
+- **File de révision** — confirm or ignore the *low-confidence* detections Bubble
+  Shield wasn't sure about (a bare first name, a partial address). This is the
+  human safety net — open it periodically to clear the queue.
+- **Coffre** — view/correct the token↔value mappings for a dossier (RGPD).
+- **Liste connue** — manage the gazetteer of confirmed PII.
+
+> New here? Just ask Claude *"how does Bubble Shield work / help me set it up"* — the
+> bundled onboarding skill walks you through it in plain language.
 
 ## Configure
 
