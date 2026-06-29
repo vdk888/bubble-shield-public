@@ -71,6 +71,23 @@ Open**, once (it's unsigned). Re-run the command any time to update.
 > New here? Just ask Claude *"how does Bubble Shield work / help me set it up"* — the
 > bundled onboarding skill walks you through it in plain language.
 
+## Uninstall
+
+Removing the plugin in Cowork (`/plugin uninstall`) leaves a **zombie**: the guard
+hooks in `~/.claude/settings.json` keep firing, and the app + data dirs stay on disk.
+Clean it up with the one-liner (symmetric with install):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/uninstall-app.sh | bash
+```
+
+This removes the local footprint (hooks, host scripts, LaunchAgent, caches, the desktop
+app). Your **vaults** in `~/.bubble_shield` are **kept** unless you add `--purge-data`
+(`… | bash -s -- --purge-data`). **Shared cabinet config** (a Dropbox folder marked
+`.bubble-shield.json`) is **never touched**. Afterwards, also remove the plugin in
+**Cowork → Customize → Plugins** (toggle off / remove) — that Cowork-side half is the one
+piece this host script can't reach.
+
 ## Configure
 
 **Cowork (recommended): drop a marker file in the client folder.** Put a

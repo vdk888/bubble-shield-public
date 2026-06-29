@@ -47,11 +47,29 @@ PYTHONPATH="$PWD:$PWD/plugin/bubble-shield/vendor" \
 
 ## Uninstall
 
+### One-line uninstall (recommended)
+
+Symmetric with the install one-liner — wraps the uninstaller below and also removes the
+app dir:
+
+```bash
+# remove local footprint, KEEP your vaults in ~/.bubble_shield
+curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/uninstall-app.sh | bash
+
+# also remove the LOCAL data dir (vaults + models) — you lose decloak ability
+curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/uninstall-app.sh | bash -s -- --purge-data
+```
+
+It works even if `~/.bubble_shield_app` is already gone (it fetches the uninstaller from the
+public repo). **Shared cabinet config is never touched.** Afterwards, also remove the plugin
+in **Cowork → Customize → Plugins** (toggle off / remove) — the host script can't reach that
+Cowork-side half.
+
 ### Full uninstall (plugin + host footprint)
 
 `/plugin uninstall` removes ONLY the marketplace entry — it leaves the active hooks, the
-host scripts, the LaunchAgent, the caches and your data behind. To remove the whole
-**local** footprint cleanly, run the uninstaller:
+host scripts, the LaunchAgent, the caches and your data behind. The one-liner above wraps
+this script; you can also run it directly:
 
 ```bash
 # remove local footprint, KEEP your vaults in ~/.bubble_shield
