@@ -15,7 +15,7 @@ import re
 import os
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -168,7 +168,12 @@ async def anonymize(
     request: Request,
     text: str = Form(""),
     mission: str = Form("demo"),
-    document: UploadFile | None = None,
+    # NOTE: must be `Optional[UploadFile]`, NOT `UploadFile | None`. FastAPI
+    # resolves endpoint signature annotations at app-construction time (even with
+    # `from __future__ import annotations`), and the `type | None` syntax raises
+    # TypeError on Python 3.9 — which stock macOS ships as /usr/bin/python3. Using
+    # typing.Optional keeps the desktop app importable on a bare client Mac (#396).
+    document: Optional[UploadFile] = None,
 ):
     if document is not None and document.filename:
         raw = await document.read()

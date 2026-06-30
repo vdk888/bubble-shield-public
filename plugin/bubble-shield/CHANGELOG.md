@@ -5,6 +5,71 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.14 — 2026-06-30 — SECURITY (P0): close the `block_bash` cwd-anchoring exfil gap
+
+**Highest-severity finding to date.** A real CGP client, security-testing Bubble
+Shield on his own initiative, found that `mcp__workspace__bash` (Cowork's sandboxed
+shell) could re-extract a real avis d'impôt (`file`, hex dump, then `tesseract`
+OCR) from a `block_bash:true`-marked folder — despite the native Read tool being
+correctly blocked. The bash command scan built its protected-path needles ONLY
+from `_discover_marker_roots(cwd)`, which is **cwd-anchored**: when the bash tool's
+`cwd` was an unrelated session/workspace root (the normal Cowork case), marker
+discovery found nothing, the needle-set was empty, and a command containing the
+literal absolute path to a marked file sailed through silently — `block_bash`
+became a no-op independent of the command's content.
+
+- **Fix:** the Bash scan now extracts path-shaped tokens (absolute `/…`, home
+  `~/…`, and slash-bearing relative paths) directly from the command string and
+  runs each through the SAME robust per-path marker walk-up the file-tool path uses
+  (`decide_block` → `_find_marker_root`), which is **cwd-INDEPENDENT** for absolute
+  paths. `tesseract /a/b/Dossier/avis.jpg stdout` with `cwd=/Users/joris` now
+  resolves the marker on the file's own ancestry and DENIES. The legacy
+  cwd-anchored needle scan is kept as defense-in-depth (it still catches relative
+  commands where cwd is informative). `allow_paths` / extension-exemption for Bash
+  inherit the same robust per-path resolution (no longer cwd-anchored either).
+- **Per-marker `block_bash`:** a `block_bash:false` set in a folder marker is now
+  honoured (previously only the GLOBAL config's `block_bash` was read, so the
+  documented folder-level setting was silently ignored). The read/write guard
+  still protects such a folder; only the deliberate bash opt-out is respected.
+- **Residual policy (documented):** a BARE filename with no slash (`cat avis.jpg`)
+  whose cwd is itself inside a marked folder is deliberately allowed — extracting
+  a bare word as a path is indistinguishable from any other shell token without a
+  real lexer, and fail-closing every bare word would brick routine shell use. The
+  dangerous absolute-path-from-unrelated-cwd case is always denied.
+- **Regression test:** `scripts/test_guard_bash_cwd_exfil.py` (22 cases) locks the
+  fix in — proven to FAIL on the pre-fix code (9 failures incl. the exfil case)
+  and pass after. Second time a bash-coverage gap bit a real client; this stays
+  bulletproof.
+
+## 1.18.13 — 2026-06-30 — #396 fix the "pypdf manquant" client bug (PDF/image read)
+
+**A real CGP client could not read PDFs/images** — Bubble Shield raised
+"pypdf manquant -- pip install pypdf" even though pypdf IS vendored in the
+published `.mcpb`. Two stacked causes, both masked on a contaminated dev machine
+(global `pypdf` + `typing_extensions` in user site-packages hid them):
+
+- **Path resolution:** `bubble_shield_mcp.py::_anonymise_file` inserted only
+  `_scripts_dir()` on `sys.path` before importing the extractor, never `_vendor()`
+  — so the extractor's import of the vendored pypdf relied on a single
+  `CLAUDE_PLUGIN_ROOT` env var resolving correctly. Now inserts `_vendor()` too,
+  matching every other call site in the file.
+- **Self-heal in the extractor:** `bubble_shield_extract.py`'s lazy
+  `from pypdf import PdfReader` now retries once after putting the file's *actual*
+  sibling vendor dirs on `sys.path`, instead of trusting one env var, before
+  raising "pypdf manquant".
+- **Missing vendored dependency:** the vendored pypdf (6.x) imports
+  `typing_extensions` (Self/TypeAlias/TypeGuard) on Python < 3.11, but
+  `typing_extensions` was NOT vendored — so on a clean client Mac (stock
+  /usr/bin/python3 3.9.6, no global typing_extensions) the import failed with the
+  same opaque "pypdf manquant" error. Now vendored as `vendor/typing_extensions.py`.
+- **Regression test (`tests/test_396_pypdf_vendor_selfheal.py`):** runs the
+  import/extraction in a subprocess via stock `/usr/bin/python3 -S` with a minimal
+  env and a deliberately-wrong `CLAUDE_PLUGIN_ROOT`, so a dev machine's global
+  packages can no longer mask this bug class on the next release.
+
+(The desktop-app installer fix — Python 3.9 gate + offline wheel vendoring,
+issue #396 Part 2 — ships in the app repo, not the plugin bundle.)
+
 ## 1.18.6 — 2026-06-29 — re-vendor #348 precision-filter + #345 atomic-vault
 
 **Re-vendor of the #348 precision filter and the #345 atomic vault save into the

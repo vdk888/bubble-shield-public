@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -240,6 +241,93 @@ def _candidate_paths(tool_name: str, tool_input: dict, cwd: str) -> list[Path]:
     return out
 
 
+# Path-shaped tokens inside a shell command. We are NOT a shell parser; we just
+# need to catch the realistic, path-bearing commands that exfiltrate a file —
+# `tesseract /Users/x/dossier/avis.jpg stdout`, `cat "~/Clients/Dupont/x.pdf"`,
+# `file '/path with spaces/secret.pdf'`, `xxd /a/b/c`. We pull every absolute
+# (`/…`) and home (`~/…`) token out of the command, then resolve each one and run
+# it through the SAME robust per-path marker walk-up that the file-tool path uses
+# (`decide_block` → `_find_marker_root`). This is cwd-INDEPENDENT for absolute
+# paths, which is the whole point: the old cwd-anchored `_discover_marker_roots`
+# missed a marker whenever the bash tool's cwd was the session/workspace root
+# rather than the connected client folder (the proven client exfil case).
+#
+# Tokenisation: split on unquoted whitespace and shell metacharacters, but keep
+# single/double-quoted runs intact (so a path with spaces survives). We then scan
+# each token for an absolute/home path substring. Common backslash-escaped spaces
+# (`/path\ with\ space/x`) are un-escaped. This is deliberately permissive — a
+# false candidate that doesn't resolve under a marker is simply ignored, so the
+# cost of over-matching is zero, while under-matching is a security hole.
+# Absolute / home path tokens (`/…`, `~/…`). These are resolvable WITHOUT a cwd,
+# so they are the security-critical case the cwd-anchored scan used to miss.
+_ABS_TOKEN_RE = re.compile(r"""
+    (?:^|[\s=:,;()<>&|"'`])          # a boundary before the path
+    (                                # capture the path
+      ~?/                            # absolute (/…) or home (~/…)
+      (?:\\.|[^\s'";`|&<>()])+       # path chars; \. consumes an escaped char
+    )
+""", re.VERBOSE)
+
+# Relative path tokens with at least one slash AND a file-extension-ish tail
+# (e.g. `Dupont/avis.jpg`, `sub/dir/secret.pdf`). Resolved against cwd. We keep
+# this tight (must contain a `/` and end in a short alnum extension) so we don't
+# treat every bare word / flag value as a path — relative resolution is only
+# meaningful when cwd anchors it, and over-emitting plain words would be noise.
+_REL_TOKEN_RE = re.compile(r"""
+    (?:^|[\s=:,;()<>&|"'`])
+    (
+      (?:\./)?                        # optional leading ./
+      (?:\\.|[^\s'";`|&<>()/])+       # first segment (no leading slash)
+      (?:/(?:\\.|[^\s'";`|&<>()])+)+  # at least one more /segment
+    )
+""", re.VERBOSE)
+
+
+def _extract_command_paths(command: str, cwd: str) -> list[Path]:
+    """Pull path-shaped tokens out of a shell command and resolve them:
+      - absolute/home tokens (`/…`, `~/…`) → resolved as-is (cwd-INDEPENDENT;
+        this is the security-critical case the old cwd scan missed);
+      - bare-relative tokens containing a `/` (`Dupont/avis.jpg`) → resolved
+        against cwd, so a relative ref into a marked folder is also caught when
+        cwd anchors it.
+    Best-effort, permissive: a token that doesn't resolve under any marker is
+    simply ignored (zero cost), while a missed path would be a security hole.
+    Returns resolved Paths.
+    """
+    if not command:
+        return []
+    out: list[Path] = []
+    seen: set[str] = set()
+    candidates: list[str] = [m.group(1) for m in _ABS_TOKEN_RE.finditer(command)]
+    candidates += [m.group(1) for m in _REL_TOKEN_RE.finditer(command)]
+    # Quoted paths with spaces (the regexes stop at the space): sweep quoted spans.
+    for q in re.findall(r"'([^']*)'|\"([^\"]*)\"", command):
+        span = q[0] or q[1]
+        if span and ("/" in span):
+            candidates.append(span)
+    for raw in candidates:
+        # Un-escape backslash-escaped chars (e.g. "/path\ with\ space").
+        tok = re.sub(r"\\(.)", r"\1", raw).strip()
+        if not tok or "/" not in tok:
+            continue
+        expanded = os.path.expanduser(tok)
+        if not os.path.isabs(expanded):
+            # relative → anchor against cwd (only meaningful with a cwd)
+            if not cwd:
+                continue
+            expanded = os.path.join(cwd, expanded)
+        try:
+            resolved = Path(expanded).resolve()
+        except Exception:
+            resolved = Path(expanded)
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(resolved)
+    return out
+
+
 def main() -> None:
     raw = sys.stdin.read()
     try:
@@ -353,11 +441,38 @@ def main() -> None:
         command = (tool_input.get("command")
                    or tool_input.get("script")
                    or tool_input.get("code") or "")
+
+        # --- PRIMARY: per-path marker walk-up on paths extracted from the command.
+        # This is the robust, cwd-INDEPENDENT mechanism. We pull every absolute/home
+        # path-shaped token out of the command and run each through the EXACT SAME
+        # `decide_block` walk-up the file-tool path uses (which correctly finds the
+        # nearest marker walking UP from a concrete path, regardless of cwd). This
+        # closes the proven exfil gap: `tesseract /a/b/Dossier/avis.jpg stdout` with
+        # cwd=/Users/joris (an unrelated session root) now resolves the marker on
+        # the FILE'S OWN ancestry instead of relying on cwd-anchored discovery.
+        for p in _extract_command_paths(command, cwd):
+            blocked, message = decide_block(p)
+            if not blocked:
+                continue
+            # Honour a per-marker `block_bash:false` opt-out (the marker.example.json
+            # documents block_bash as a folder-level setting; previously only the
+            # GLOBAL config's block_bash was read, so a marker that set it false was
+            # silently ignored). If THIS path's nearest marker explicitly disables
+            # bash-blocking, respect it for this path (the read/write guard still
+            # protects the file; the operator opted bash out deliberately). Absent
+            # marker (global protected_folders) keeps the global block_bash gate.
+            hit = _find_marker_root(p)
+            if hit is not None and hit[1].get("block_bash") is False:
+                continue
+            _deny(f"{message}\n[Bubble Shield guard: commande shell touchant {p}]")
+            return
+
+        # --- DEFENSE-IN-DEPTH: the legacy cwd-anchored needle scan. Cheap, and it
+        # still catches the cases the path extractor can't: RELATIVE-path commands
+        # where cwd IS informative (e.g. `cat avis.pdf` run with cwd inside the
+        # marked folder — there's no absolute token to extract, but cwd discovery
+        # finds the marker). Kept as a secondary signal, no longer the ONLY one.
         home = os.path.expanduser("~")
-        # Protected roots to scan for: global config folders + any marker folders
-        # we can discover. We can't walk up from a "candidate file" for Bash (the
-        # path is buried in a command string), so we enumerate marker roots by
-        # scanning the folders referenced in global config plus the cwd's tree.
         roots: list[tuple[Path, str]] = []
         for prot, raw in zip(protected, protected_raw):
             roots.append((prot, raw))
@@ -379,6 +494,30 @@ def main() -> None:
             if n and n in command:
                 _deny(f"{g_message}\n[Bubble Shield guard: commande shell touchant {n}]")
                 return
+
+        # --- RESIDUAL-PATH POLICY (explicit decision, documented):
+        # If we reach here, block_bash is true but nothing matched. What's covered
+        # and what's left:
+        #   COVERED by the PRIMARY walk-up (cwd-INDEPENDENT): any absolute/home path
+        #     into a marked folder (the proven client exfil shape).
+        #   COVERED by the PRIMARY walk-up (cwd-anchored): any slash-bearing relative
+        #     path (`Dupont/avis.jpg`) resolved against cwd that lands under a marker.
+        #   COVERED by the needle scan: commands that literally name a discoverable
+        #     marker root by its absolute path.
+        #   RESIDUAL (deliberately ALLOWED): a BARE filename with no slash
+        #     (`cat avis.jpg`) whose cwd is itself inside a marked folder. The
+        #     resolved path WOULD be under a marker, but extracting "avis.jpg" as a
+        #     path candidate is indistinguishable from extracting every bare word/
+        #     subcommand/flag-value in the command — emitting all of them would
+        #     either over-deny benign commands (`cat readme`, `make build`) or
+        #     require a real shell lexer + per-arg cwd-join we don't have. We accept
+        #     this narrow residual gap rather than fail-closed-on-every-bare-word,
+        #     which would brick routine shell use (`ls`, `git status`). The exposure
+        #     is small: it requires cwd to ALREADY be inside the protected folder
+        #     (an agent that deep in the dossier is the in-folder workflow the marker
+        #     governs, and the file-tool Read path covers the same files), and it
+        #     does NOT cover the dangerous absolute-path-from-an-unrelated-cwd case,
+        #     which is now always denied. Documented in STATUS.md "block_bash cwd".
         _allow()
         return
 

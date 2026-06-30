@@ -15,17 +15,20 @@ die() { printf '\n[Bubble Shield] ERREUR : %s\n' "$1" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || die "git introuvable. Installez les outils en ligne de commande Xcode (xcode-select --install)."
 
-# Pick a Python >= 3.10 (the app's webapp uses 3.10+ type syntax, e.g. `X | None`).
-# A stock Mac's bare `python3` is the Xcode 3.9 build, which cannot run the app —
-# so prefer an explicit python3.1x and fall back to python3 only if it is >= 3.10.
+# Pick a Python >= 3.9. Stock macOS ships /usr/bin/python3 as the Xcode 3.9.6
+# build, and the app is verified 3.9-compatible (#396: the one `X | None` runtime
+# annotation was replaced with typing.Optional, so nothing in the import graph
+# needs 3.10+). Prefer a newer explicit pythonN.M if present, else fall back to a
+# bare python3 that is >= 3.9. A client whose Mac was never used for dev work has
+# ONLY 3.9.6 — this must NOT block them.
 PY=""
 for cand in python3.13 python3.12 python3.11 python3.10 python3; do
   command -v "$cand" >/dev/null 2>&1 || continue
-  if "$cand" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,10) else 1)' 2>/dev/null; then
+  if "$cand" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,9) else 1)' 2>/dev/null; then
     PY="$cand"; break
   fi
 done
-[ -n "$PY" ] || die "Python 3.10 ou plus récent introuvable (la version système 3.9 ne suffit pas). Installez-le : brew install python@3.12 puis relancez."
+[ -n "$PY" ] || die "Python 3.9 ou plus récent introuvable. macOS en fournit normalement un via les outils Xcode : exécutez 'xcode-select --install' puis relancez."
 
 # 1. Clone or pull (idempotent self-update). git clone handles both a git URL and a local path.
 if [ -d "$APP_DIR/.git" ]; then
@@ -36,12 +39,23 @@ else
   git clone "$REPO_URL" "$APP_DIR" || die "échec du clonage depuis $REPO_URL."
 fi
 
-# 2. venv + deps
+# 2. venv + deps — OFFLINE from vendored wheels (no PyPI access required).
+# vendor/wheels/ holds prebuilt arm64 / py3.9 wheels (pure-python + pyobjc Cocoa
+# backend), so install works on a locked-down/offline client Mac after the clone.
 say "Préparation de l'environnement Python ($("$PY" --version 2>&1))…"
 "$PY" -m venv "$APP_DIR/.venv" || die "échec de la création du venv."
-"$APP_DIR/.venv/bin/python" -m pip install --quiet --upgrade pip || die "échec de pip upgrade."
-"$APP_DIR/.venv/bin/python" -m pip install --quiet fastapi uvicorn pywebview jinja2 pypdf python-multipart \
-  || die "échec de l'installation des dépendances."
+WHEELS="$APP_DIR/vendor/wheels"
+if [ -d "$WHEELS" ] && ls "$WHEELS"/*.whl >/dev/null 2>&1; then
+  # Offline path: install ONLY from the bundled wheels, never touch the network.
+  "$APP_DIR/.venv/bin/python" -m pip install --quiet --no-index --find-links="$WHEELS" \
+    fastapi uvicorn pywebview jinja2 pypdf python-multipart \
+    || die "échec de l'installation des dépendances (wheels hors-ligne)."
+else
+  # Fallback: no vendored wheels present → online install from PyPI.
+  "$APP_DIR/.venv/bin/python" -m pip install --quiet --upgrade pip || die "échec de pip upgrade."
+  "$APP_DIR/.venv/bin/python" -m pip install --quiet fastapi uvicorn pywebview jinja2 pypdf python-multipart \
+    || die "échec de l'installation des dépendances."
+fi
 
 # 3. Create a real .app on the Desktop (icon + name, no terminal)
 say "Création de l'application sur le Bureau…"

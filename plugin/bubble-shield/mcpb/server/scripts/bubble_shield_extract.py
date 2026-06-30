@@ -337,10 +337,22 @@ def extract_pdf_text(raw: bytes) -> str:
     Fail-open: OCR errors fall through to the original ExtractionError message."""
     try:
         from pypdf import PdfReader
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise ExtractionError(
-            "pypdf manquant -- installe-le pour lire les PDF : pip install pypdf"
-        ) from exc
+    except ImportError:
+        # Self-heal: the module-top vendor insertion (line ~34) keys off a single
+        # CLAUDE_PLUGIN_ROOT env var. If that var is unset/wrong (real client case:
+        # "pypdf manquant" despite pypdf being vendored in the .mcpb), retry the
+        # import once after putting the file's *actual* sibling vendor dirs on the
+        # path. Never trust one env var as the only resolution route.
+        _here = Path(__file__).resolve()
+        for _cand in (_here.parent.parent / "vendor", _here.parent / "vendor"):
+            if _cand.is_dir() and str(_cand) not in sys.path:
+                sys.path.insert(0, str(_cand))
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise ExtractionError(
+                "pypdf manquant -- installe-le pour lire les PDF : pip install pypdf"
+            ) from exc
 
     try:
         reader = PdfReader(io.BytesIO(raw))

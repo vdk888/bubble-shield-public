@@ -567,6 +567,13 @@ def _anonymise_file(path: str) -> str:
     which contains the client's name verbatim but has no label for any content
     recognizer to anchor on.
     """
+    # The extractor imports the vendored pure-python `pypdf` to read PDFs. It does
+    # its own module-top vendor-path insertion, but that keys off a single
+    # CLAUDE_PLUGIN_ROOT env var — fragile and the source of the client's
+    # "pypdf manquant" error when that var resolves elsewhere. Insert the vendor
+    # dir here too, matching every other call site in this file (e.g. line ~365),
+    # so the import is robust regardless of how the env is set.
+    sys.path.insert(0, str(_vendor()))
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield_extract import extract_file          # PDF/docx/text → text
     p = Path(os.path.expanduser(path)).resolve()
