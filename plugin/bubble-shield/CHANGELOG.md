@@ -5,6 +5,48 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.15 — 2026-06-30 — FIX: desktop installer picks the interpreter matching the staged wheel ABI (not "newest")
+
+**Second installer bug in the same release window** (the first was the 3.10-vs-3.9
+gate, shipped in 1.18.13/14). Running the published `install-app.sh` one-liner
+end-to-end (not just diffing it) surfaced it: the Python candidate search preferred
+the **newest** `pythonN.M` on PATH. But `vendor/wheels/` only holds **cp39**-tagged
+compiled wheels (pyobjc, pydantic-core, markupsafe). On a client Mac that happens to
+have a newer Python ranking ahead of stock `/usr/bin/python3` (Homebrew/pyenv — or a
+Homebrew `python3` shadowing stock entirely), the installer picked e.g. 3.12/3.14,
+then the offline `pip install --no-index --find-links=vendor/wheels` failed with
+`No matching distribution found for pyobjc-core` and no PyPI fallback. Stock-only
+Macs were fine; **mixed Macs broke silently** — plausible even for a non-technical
+CGP client whose Mac was once used to install anything.
+
+- **Fix (note: this is `install-app.sh` only, not plugin/MCPB code — version bumped
+  together per the project convention):**
+  - The supported ABI(s) are now derived **dynamically from the actual
+    `vendor/wheels/*.whl` filenames** (the source of truth — no hardcoded "39"; if
+    the wheel set is ever re-staged for a different ABI this adapts automatically).
+  - The interpreter is chosen because its ABI **matches the staged wheels**,
+    regardless of PATH order — not because it's newest. The canonical stock path
+    `/usr/bin/python3` is added to the candidate set so a shadowed-but-ABI-matching
+    stock interpreter is still discovered (it is NOT hardcoded as the winner; it
+    only wins on an ABI match).
+  - Python selection now runs **after** the clone (the wheels it inspects only exist
+    post-clone).
+  - **Residual fallback (documented):** if NO interpreter matches the staged ABI
+    (e.g. a Mac with only 3.11+ and no 3.9 anywhere), the installer falls back to the
+    newest available `>=3.9` interpreter and installs **online from PyPI** (drops
+    `--no-index`) with a clear French message explaining the network use — chosen over
+    a hard error because failing to install at all is worse than one client
+    occasionally needing the network.
+- **Verified end-to-end (real installer runs, not code review):**
+  - Stock-only PATH → still installs clean offline on 3.9.6 (no regression).
+  - Homebrew python3.12 + python3.14 ahead of stock, stock shadowed → now selects
+    stock 3.9.6, installs offline, builds the `.app` (was the broken case).
+  - Idempotent re-run (pull path) → clean.
+- **Regression test:** `tests/test_396_installer_abi_select.py` runs the real
+  installer with an ABI-mismatched newer interpreter forced ahead on PATH and asserts
+  the venv was built on an ABI-matching interpreter — **proven to FAIL on the pre-fix
+  installer** (reproduces the exact `pyobjc-core` error) and pass after.
+
 ## 1.18.14 — 2026-06-30 — SECURITY (P0): close the `block_bash` cwd-anchoring exfil gap
 
 **Highest-severity finding to date.** A real CGP client, security-testing Bubble
