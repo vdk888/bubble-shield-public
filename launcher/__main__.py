@@ -169,7 +169,17 @@ def _run_webview(server: BubbleShieldServer) -> None:
         height=820,
         min_size=(900, 600),
     )
-    window.events.loaded += _on_loaded
+    # Register the loaded hook in a version-robust way. pywebview 4.x exposes
+    # events under a `window.events` namespace (window.events.loaded); 3.x (the
+    # version we vendor as an offline wheel, pywebview-3.4) puts them directly on
+    # the window (window.loaded). Using the 4.x-only path crashed the app on
+    # launch against the vendored 3.4 wheel (AttributeError: 'Window' object has
+    # no attribute 'events'). Resolve whichever exists so the app works on both.
+    _loaded_event = getattr(getattr(window, "events", None), "loaded", None)
+    if _loaded_event is None:
+        _loaded_event = getattr(window, "loaded", None)
+    if _loaded_event is not None:
+        _loaded_event += _on_loaded
 
     # webview.start() blocks until the window is closed.
     # gui="cocoa" is the native macOS backend; pywebview picks it automatically

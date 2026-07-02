@@ -5,6 +5,37 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.16 — 2026-07-02 — FIX: desktop app crashed on launch (pywebview 3.x/4.x events API mismatch)
+
+**Found on-site at a real client's Mac** (their own Claude Code diagnosed it). The
+install succeeded end-to-end — repo cloned, cp39 offline wheels installed against
+stock 3.9.6, `Bubble Shield.app` created — but the app **crashed immediately on
+open**, 100% reproducible on the default offline-install path:
+
+```
+File ".../launcher/__main__.py", line 172, in _run_webview
+    window.events.loaded += _on_loaded
+AttributeError: 'Window' object has no attribute 'events'
+```
+
+Root cause: `launcher/__main__.py` used the **pywebview 4.x** events API
+(`window.events.loaded`), but `install-app.sh` vendors **pywebview 3.4**
+(`vendor/wheels/pywebview-3.4-py3-none-any.whl`). In 3.x, events are attributes
+directly on the window (`window.loaded`); the `window.events` namespace was only
+introduced in 4.0. So every launch on the vendored wheel died before the GUI opened.
+
+- **Fix (version-robust — works on both 3.x and 4.x, so a future wheel restaging in
+  either direction can't re-break it; `launcher/__main__.py` only, version bumped
+  together per project convention):** resolve the loaded event via whichever API is
+  present — `getattr(getattr(window, "events", None), "loaded", None)` (4.x) then fall
+  back to `getattr(window, "loaded", None)` (3.x), and only bind if found. (The
+  `_on_loaded` hook is currently a no-op, so the binding is defensive/forward-looking,
+  but keeping it robust is cheaper than re-litigating it next time the wheel moves.)
+- **Verified against the real vendored 3.4 wheel** (installed from `vendor/wheels/`
+  into a clean venv, not code review): the old line reproduces the exact reported
+  `AttributeError`; the fixed logic resolves `window.loaded` (an `Event`) and `+=`
+  binds cleanly.
+
 ## 1.18.15 — 2026-06-30 — FIX: desktop installer picks the interpreter matching the staged wheel ABI (not "newest")
 
 **Second installer bug in the same release window** (the first was the 3.10-vs-3.9
