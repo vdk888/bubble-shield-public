@@ -53,6 +53,10 @@ fi
 # An interpreter is chosen ONLY because its ABI matches the staged wheels.
 
 WHEELS="$APP_DIR/vendor/wheels"
+# Exact-version pins matching the vendored wheels. Applied to BOTH the offline
+# and online-fallback pip installs so they resolve identically (keeps the online
+# fallback from pulling newer, API-incompatible releases like pywebview 6.x).
+CONSTRAINTS="$APP_DIR/constraints.txt"
 
 # Collect the set of CPython ABI tags the compiled wheels are built for, parsed
 # from filenames like `pyobjc_core-11.1-cp39-cp39-macosx_10_9_universal2.whl`.
@@ -139,6 +143,7 @@ say "Préparation de l'environnement Python ($("$PY" --version 2>&1))…"
 if [ "$PY_ONLINE_FALLBACK" -eq 0 ] && [ -d "$WHEELS" ] && ls "$WHEELS"/*.whl >/dev/null 2>&1; then
   # Offline path: install ONLY from the bundled wheels, never touch the network.
   "$APP_DIR/.venv/bin/python" -m pip install --quiet --no-index --find-links="$WHEELS" \
+    -c "$CONSTRAINTS" \
     fastapi uvicorn pywebview jinja2 pypdf python-multipart \
     || die "échec de l'installation des dépendances (wheels hors-ligne)."
 else
@@ -148,7 +153,8 @@ else
   # specific fallback only.
   say "Installation des dépendances depuis PyPI (connexion requise)…"
   "$APP_DIR/.venv/bin/python" -m pip install --quiet --upgrade pip || die "échec de pip upgrade."
-  "$APP_DIR/.venv/bin/python" -m pip install --quiet fastapi uvicorn pywebview jinja2 pypdf python-multipart \
+  "$APP_DIR/.venv/bin/python" -m pip install --quiet -c "$CONSTRAINTS" \
+    fastapi uvicorn pywebview jinja2 pypdf python-multipart \
     || die "échec de l'installation des dépendances (PyPI). Vérifiez votre connexion internet."
 fi
 

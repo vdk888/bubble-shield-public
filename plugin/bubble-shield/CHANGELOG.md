@@ -5,6 +5,55 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.18.18 — 2026-07-02 — SECURITY (P0): close three raw-PII exfil bypasses of the PreToolUse guard
+
+A security review found **three confirmed ways** to get raw client PII past the
+guard, all reproduced with synthetic data (Jean Dupont). Each let a read of a file
+inside a marked (`.bubble-shield.json`) client folder reach the model instead of
+being rerouted through `bubble_shield_read`. All three fixed here.
+
+- **P0-SEC-1 — guard fails OPEN on any uncaught exception.** `main()` wrapped only
+  the event-JSON parse in try/except; everything after (`_load_config`, mail-guard,
+  path extraction, `decide_block`, marker discovery) was unguarded. An unhandled
+  error → Python exits **code 1 with no deny JSON** → per Claude Code hook semantics
+  (only exit 2 or an explicit deny blocks) the tool **runs**. Reproduced with
+  `tool_input` as a list (`AttributeError`) and `cwd` as an int (`TypeError`) — both
+  exited 1 and would have allowed the tool. **Fix:** the entire decision body now
+  runs inside a blanket `try/except Exception` that fails **closed** with a French
+  deny (`🔒 Bubble Shield — erreur interne du guard, accès bloqué par sécurité.`).
+  `SystemExit` from the legitimate `_deny`/`_allow` paths is re-raised so it isn't
+  swallowed. The explicit early denies (malformed event) are kept — the wrapper is a
+  backstop, not a replacement.
+
+- **P0-SEC-2 — glob metacharacters in a parent segment bypass the Bash guard.** A
+  bash command referencing a marked file via a glob in a segment at/above the marked
+  folder (`cat /…/cl*/Dupont/avis.txt`) kept the literal `cl*` after `Path.resolve()`,
+  so the marker walk-up never found the marker → **ALLOW**, while the shell expands
+  the glob at runtime and reads the file. **Fix:** the command-path extractor now
+  expands any token containing `* ? [ ] { }` (incl. brace and `**` recursive globs)
+  against the real filesystem and runs each real match through the same
+  `decide_block` walk-up. If nothing matches on disk, it fails **closed** by
+  discovering any marked subtree under the longest glob-free prefix. Literal
+  leaf-only globs (all parent segments literal) still deny — no regression.
+
+- **P0-SEC-3 — generic `mcp__*` file tools were matched but never inspected.** The
+  hook matcher (`…|mcp__.*`) runs the guard for every MCP tool, but `_candidate_paths`
+  only extracted paths for the 6 native tools — so any other file MCP server (e.g.
+  `mcp__filesystem__read_file(path=<marked>)`) yielded zero candidates and fell
+  through to ALLOW. **Fix:** for any `mcp__*` tool (that isn't a mail/`*__bash`/our
+  own sanctioned `bubble_shield_read`/`_write` tool), scan `tool_input` for
+  path-shaped values across common keys (`path`, `file_path`, `uri`, `target`, …),
+  list keys (`paths`, `files`, …), and a regex backstop over every string value, and
+  gate each. Our own read/write tools are never treated as candidates (they are the
+  safe, already-anonymised path).
+
+**Tests:** `scripts/test_guard_bash_cwd_exfil.py` gains 24 assertions covering all
+three fixes (glob variants `*/ ? [c] {…} **` + multi-segment + fail-closed
+un-expandable, 5 generic-mcp cases incl. own-tool allow, 4 malformed-crash
+fail-closed cases). Each new assertion was proven to FAIL on the pre-fix code and
+pass after. Full suite (`test_guard.py`, `test_guard_marker.py`,
+`test_guard_bash_cwd_exfil.py`) stays green; mcpb copy re-synced and re-packed.
+
 ## 1.18.16 — 2026-07-02 — FIX: desktop app crashed on launch (pywebview 3.x/4.x events API mismatch)
 
 **Found on-site at a real client's Mac** (their own Claude Code diagnosed it). The

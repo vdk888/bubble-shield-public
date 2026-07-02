@@ -69,12 +69,12 @@ download into a separate runtime venv.
 2. Add a `CHANGELOG.md` entry for the new version.
 3. Run the tests: `python3 scripts/test_guard.py && python3 scripts/test_guard_marker.py && python3 scripts/test_tripwire.py` and `claude plugin validate .` from the repo root.
 4. Commit + push to `vdk888/bubble-shield` (private dev repo).
-4b. **Publish to the PUBLIC distribution repo `Bubble-invest/bubble-shield`** (this
+4b. **Publish to the PUBLIC distribution repo `vdk888/bubble-shield-public`** (this
     is where clients install from — no GitHub account needed because it's public).
     Sync the self-contained plugin + root marketplace.json into the public repo
     (exclude tests/__pycache__/.git and the real `deployment_allowlist.json` —
     only the `.example` ships), run the 5-point PII/secret scan, commit + push.
-    Clients install with: `Bubble-invest/bubble-shield`.
+    Clients install with: `vdk888/bubble-shield-public`.
 5. **Verify a real client can get it:**
    - CLI: `/plugin marketplace update bubble-shield` then
      `claude plugin update bubble-shield@bubble-shield` → should report the NEW version (not "already at latest").

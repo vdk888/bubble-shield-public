@@ -19,6 +19,7 @@ Exit/΄output contract (Claude Code hooks):
 """
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 import re
@@ -217,27 +218,102 @@ def _discover_marker_roots(cwd: str, max_depth: int = 4) -> list[Path]:
     return roots
 
 
+# Our OWN sanctioned MCP tools — these are the safe read/write path (they return
+# ALREADY-anonymised content), so they must NEVER be treated as candidates to
+# block. Matched by suffix so the opaque-prefixed form (mcp__<server>__bubble_shield_read)
+# is covered too.
+_OWN_MCP_TOOL_SUFFIXES = ("bubble_shield_read", "bubble_shield_write",
+                          "bubble_shield_anonymize_text")
+
+# Input keys that commonly carry a filesystem path across third-party MCP file
+# servers (filesystem, text-editor, etc.). Scanned for generic mcp__* tools.
+_MCP_PATH_KEYS = ("path", "file_path", "notebook_path", "uri", "filename",
+                  "target", "file", "src", "source", "destination", "dest")
+_MCP_PATH_LIST_KEYS = ("paths", "files", "sources", "targets")
+
+
 def _candidate_paths(tool_name: str, tool_input: dict, cwd: str) -> list[Path]:
     """Extract the filesystem path(s) a tool call would touch."""
     out: list[Path] = []
+    seen: set[str] = set()
 
     def add(raw):
         if not raw or not isinstance(raw, str):
             return
+        # A file:// URI (some MCP file servers use them) → strip the scheme.
+        if raw.startswith("file://"):
+            raw = raw[len("file://"):]
         p = Path(os.path.expanduser(raw))
         if not p.is_absolute() and cwd:
             p = Path(cwd) / p
         try:
-            out.append(p.resolve())
+            p = p.resolve()
         except Exception:
-            out.append(p)
+            pass
+        key = str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(p)
 
     if tool_name in ("Read", "Edit", "Write", "NotebookEdit"):
         add(tool_input.get("file_path") or tool_input.get("notebook_path"))
     elif tool_name in ("Glob", "Grep"):
         # `path` is the search root; the pattern itself may also be a path-ish glob
         add(tool_input.get("path"))
+    elif tool_name.startswith("mcp__"):
+        # FIX 3 (P0-SEC-3): the hooks.json matcher runs the guard for EVERY mcp__*
+        # tool, but historically only the 6 native tools above yielded candidates,
+        # so any OTHER mcp__* file tool (e.g. a filesystem MCP server's
+        # mcp__filesystem__read_file) fell through to _allow() — a silent leak.
+        # Mail tools and *__bash tools are handled on their own code paths BEFORE
+        # _candidate_paths is called, so reaching here means a generic MCP tool:
+        # scan its input for path-shaped values and gate every one.
+        #
+        # Never treat our OWN sanctioned read/write tools as candidates — they are
+        # the safe path (they return already-anonymised content).
+        if not any(tool_name.endswith(s) for s in _OWN_MCP_TOOL_SUFFIXES):
+            # 1) common path-bearing scalar keys
+            for k in _MCP_PATH_KEYS:
+                add(tool_input.get(k))
+            # 2) common path-bearing list keys
+            for k in _MCP_PATH_LIST_KEYS:
+                v = tool_input.get(k)
+                if isinstance(v, list):
+                    for item in v:
+                        add(item)
+            # 3) BACKSTOP: run the same path regex used for shell commands over
+            #    EVERY string value in tool_input, catching path-shaped values
+            #    under keys we didn't enumerate. Over-matching is safe: a token
+            #    that doesn't resolve under a marker is simply ignored downstream.
+            for raw in _extract_paths_from_values(tool_input, cwd):
+                add(str(raw))
     # Bash is handled separately (substring scan of the command string).
+    return out
+
+
+def _iter_string_values(obj) -> "list[str]":
+    """Recursively collect all string values from a JSON-ish structure."""
+    found: list[str] = []
+    if isinstance(obj, str):
+        found.append(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            found.extend(_iter_string_values(v))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            found.extend(_iter_string_values(v))
+    return found
+
+
+def _extract_paths_from_values(tool_input: dict, cwd: str) -> list[Path]:
+    """Backstop for generic MCP tools: run the shell-command path regexes over
+    every string value in the tool input and return resolved path candidates.
+    Reuses _extract_command_paths so absolute/home AND slash-relative tokens are
+    caught with identical semantics to the Bash scan."""
+    out: list[Path] = []
+    for s in _iter_string_values(tool_input):
+        out.extend(_extract_command_paths(s, cwd))
     return out
 
 
@@ -283,13 +359,75 @@ _REL_TOKEN_RE = re.compile(r"""
 """, re.VERBOSE)
 
 
+# Shell glob metacharacters. A path token containing any of these in a PARENT
+# segment used to bypass the guard: `Path("/…/cl*/Dupont/x.txt").resolve()` keeps
+# the literal `cl*` segment, so the marker walk-up never finds the marker (which
+# lives under the REAL expanded folder), while the shell expands the glob at
+# runtime and reads the real file. See FIX 2 (P0-SEC-2).
+_GLOB_META_RE = re.compile(r"[*?\[\]{}]")
+
+
+def _longest_globfree_prefix(path_str: str) -> str:
+    """Return the longest leading run of path SEGMENTS that contain no glob
+    metachar. `/a/b/cl*/Dupont/x` → `/a/b`. Used as the fail-closed fallback
+    root when a glob can't be expanded on disk."""
+    segs = path_str.split(os.sep)
+    keep: list[str] = []
+    for s in segs:
+        if _GLOB_META_RE.search(s):
+            break
+        keep.append(s)
+    prefix = os.sep.join(keep)
+    return prefix or os.sep
+
+
+def _markers_under(root: Path, max_depth: int = 6, budget: int = 5000) -> list[Path]:
+    """Discover marker-carrying folders at or below `root` (bounded). Used as the
+    fail-closed fallback for an un-expandable glob whose glob-free prefix sits
+    ABOVE a marked folder: we can't resolve the concrete file, so we protect any
+    marked subtree the glob could reach."""
+    out: list[Path] = []
+    try:
+        if (root / MARKER_NAME).is_file():
+            out.append(root)
+    except OSError:
+        pass
+    stack = [(root, 0)]
+    seen = 0
+    while stack and seen < budget:
+        d, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            seen += 1
+            try:
+                if e.name == MARKER_NAME and e.is_file():
+                    r = Path(e.path).parent
+                    if r not in out:
+                        out.append(r)
+                elif e.is_dir(follow_symlinks=False) and not e.name.startswith("."):
+                    stack.append((Path(e.path), depth + 1))
+            except OSError:
+                continue
+    return out
+
+
 def _extract_command_paths(command: str, cwd: str) -> list[Path]:
     """Pull path-shaped tokens out of a shell command and resolve them:
       - absolute/home tokens (`/…`, `~/…`) → resolved as-is (cwd-INDEPENDENT;
         this is the security-critical case the old cwd scan missed);
       - bare-relative tokens containing a `/` (`Dupont/avis.jpg`) → resolved
         against cwd, so a relative ref into a marked folder is also caught when
-        cwd anchors it.
+        cwd anchors it;
+      - GLOB tokens (`cl*/Dupont/avis.txt`, `client?/`, `[c]lients/…`, `{a,b}/…`)
+        → expanded against the real filesystem so each REAL match runs through the
+        marker walk-up (FIX 2); if expansion yields nothing, we fall back to
+        marker-discovery under the longest glob-free prefix (fail-closed — a glob
+        we can't resolve near a protected area denies rather than allows).
     Best-effort, permissive: a token that doesn't resolve under any marker is
     simply ignored (zero cost), while a missed path would be a security hole.
     Returns resolved Paths.
@@ -298,6 +436,14 @@ def _extract_command_paths(command: str, cwd: str) -> list[Path]:
         return []
     out: list[Path] = []
     seen: set[str] = set()
+
+    def emit(resolved: Path) -> None:
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(resolved)
+
     candidates: list[str] = [m.group(1) for m in _ABS_TOKEN_RE.finditer(command)]
     candidates += [m.group(1) for m in _REL_TOKEN_RE.finditer(command)]
     # Quoted paths with spaces (the regexes stop at the space): sweep quoted spans.
@@ -316,25 +462,95 @@ def _extract_command_paths(command: str, cwd: str) -> list[Path]:
             if not cwd:
                 continue
             expanded = os.path.join(cwd, expanded)
+
+        if _GLOB_META_RE.search(expanded):
+            # FIX 2: this token contains a glob metachar. `Path.resolve()` would
+            # keep the literal glob segment and defeat the marker walk-up. Expand
+            # it against the real filesystem instead.
+            matched = False
+            try:
+                # brace expansion isn't done by glob.glob — expand {a,b} first.
+                for pat in _expand_braces(expanded):
+                    for m in _glob.glob(pat, recursive=True):
+                        matched = True
+                        try:
+                            emit(Path(m).resolve())
+                        except Exception:
+                            emit(Path(m))
+            except Exception:
+                matched = False
+            if not matched:
+                # Nothing on disk matched (e.g. a `?`/`[…]`/`**` that only the
+                # runtime shell would expand, or the file isn't present in the
+                # guard's view). Fail closed: protect any marked subtree the glob
+                # could reach, discovered under the longest glob-free prefix.
+                prefix = _longest_globfree_prefix(expanded)
+                try:
+                    proot = Path(prefix).resolve()
+                except Exception:
+                    proot = Path(prefix)
+                for mroot in _markers_under(proot):
+                    # emit a path INSIDE the marked folder so decide_block's
+                    # walk-up finds the marker and blocks (fail-closed).
+                    emit(mroot / "\x00glob-unresolved")
+            continue
+
         try:
             resolved = Path(expanded).resolve()
         except Exception:
             resolved = Path(expanded)
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(resolved)
+        emit(resolved)
+    return out
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """Minimal brace expansion (`{a,b}` → [a, b]) so glob.glob can handle
+    `{clients}/…` and `{a,b}/…` tokens. Only the FIRST brace group is expanded
+    recursively; nested/adjacent groups are handled by recursion. glob.glob does
+    NOT do brace expansion itself, so we do it here before globbing."""
+    start = pattern.find("{")
+    if start == -1:
+        return [pattern]
+    end = pattern.find("}", start)
+    if end == -1:
+        return [pattern]
+    pre, body, post = pattern[:start], pattern[start + 1:end], pattern[end + 1:]
+    out: list[str] = []
+    for opt in body.split(","):
+        for tail in _expand_braces(post):
+            out.append(pre + opt + tail)
     return out
 
 
 def main() -> None:
     raw = sys.stdin.read()
     try:
+        _main(raw)
+    except SystemExit:
+        # _deny / _allow legitimately call sys.exit(0) — let those through.
+        raise
+    except Exception:
+        # FIX 1 (P0-SEC-1): ANY uncaught exception in the decision path must
+        # fail CLOSED. Without this backstop, an unhandled error → Python exits
+        # code 1 with NO deny JSON → per Claude Code hook semantics (only exit 2
+        # or an explicit deny-JSON blocks; exit 1 is non-blocking) the tool RUNS,
+        # leaking raw PII. This blanket wrapper enforces the guard's own stated
+        # "anything goes wrong → we DENY" invariant. It is a BACKSTOP, not a
+        # replacement — the explicit deny paths below (malformed event, etc.)
+        # remain and give better messages; this only catches what they miss
+        # (e.g. tool_input being a list, cwd being an int — both reproduced).
+        _deny("🔒 Bubble Shield — erreur interne du guard, accès bloqué par sécurité.")
+
+
+def _main(raw: str) -> None:
+    try:
         event = json.loads(raw) if raw.strip() else {}
     except Exception:
         # Can't even parse the event → fail closed.
         _deny("🔒 Bubble Shield guard: évènement hook illisible. Accès bloqué par sécurité.")
+        return
+    if not isinstance(event, dict):
+        _deny("🔒 Bubble Shield guard: évènement hook mal formé. Accès bloqué par sécurité.")
         return
 
     tool_name = event.get("tool_name", "")
