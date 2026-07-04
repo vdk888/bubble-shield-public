@@ -5,6 +5,163 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.20.0 — 2026-07-02 — FEATURE: built-in FR tax/admin recognizers (avis d'impôt / KYC leak fix #319)
+
+A fresh-install client is now protected on avis d'impôt / KYC documents WITHOUT
+hand-configuring any custom field. Three FR identifiers that leaked out-of-the-box
+(reproduced on v1.19.1 with synthetic values) are now masked:
+
+- **Unlabeled numéro fiscal / référence d'avis** (grouping `NN NN NNNNNNN NN`,
+  13 digits). The pre-existing `NUM_FISCAL` recognizer only fired behind a label
+  ("numéro fiscal :"); the bare forms printed on an avis d'impôt leaked
+  (`Référence de l'avis : 25 92 0364665 70`, or in plain prose). A new UNLABELED
+  recognizer catches this shape. **Precision anchor:** the trailing 2-digit control
+  key is a mod-97 checksum on the leading 11 digits (`key == 97 - body11 % 97`) —
+  a span is masked ONLY when the checksum validates, so a stray 13-digit run in the
+  same grouping (a bad-checksum lookalike, a date+amount collision) is NOT masked.
+  Maps to the existing `NUM_FISCAL` type (identifying → CLOAK).
+- **Télédéclarant alphanumeric block** (grouping `NNN NN NN NNNNNNNNNN N A`,
+  18 digits + a trailing single letter, e.g. `922 65 91 2768797789 3 A`). No
+  recognizer existed → leaked. New `NUM_TELEDECLARANT` type (identifying → CLOAK).
+  **Precision anchor:** the exact digit-group counts + the terminal uppercase
+  letter make this shape collision-free against dates, amounts, phones and refs.
+- **Bare commune + postcode** (`MONTBOURG-LES-PINS 99000` standalone): already
+  shipped in v1.19.x as `commune_postcode_matches` (structured_ext, fix #395) and
+  verified still working here — the structured/regex path covers the standalone
+  bare-commune leak (the GLiNER 'city' threshold is a separate card, out of scope).
+
+New `Recognizer.drop_if_unvalidated` flag: a checksum-gated recognizer whose regex
+shape is not rare enough to fail-closed on drops (does not emit) a validator-failing
+match — the mechanism behind the fiscal-ref precision guarantee. IBAN/ISIN/SIRET
+keep their fail-closed behaviour (flag defaults False).
+
+SIREN leading-fragment leak (card gap 3): VERIFIED on v1.19.1 and found to be a
+mischaracterization — the SIREN recognizer is correctly bounded (it consumes exactly
+a checksum-valid 9-digit SIREN and never leaves a fragment of the SIREN itself in
+clear). The leading `NN NN` groups in the reported example are a SEPARATE number
+(fiscal-ref / télédéclarant fragment), not part of the SIREN. Forcing SIREN to
+swallow leading groups would over-mask adjacent dates/amounts/page-numbers — a
+precision regression. Left the working SIREN recognizer untouched per the card's
+safe-subset guidance; gaps 1/2 cover the real leading-fragment identifiers.
+
+## 1.19.0 — 2026-07-02 — FEATURE: `bubble_shield_mail_read` — own the mail read, fail-CLOSED (Phase 1)
+
+Email is Bubble Shield's weakest surface. Today the ambient PostToolUse hook tries
+to SCRUB a Gmail *connector*'s output after the fact — fail-OPEN, regex-only,
+fragile (breaks the connector with `H.reduce`), and too late (the raw body already
+became a tool result; the harness drops the rewrite per #32105). The FILE guard
+avoids all this because it OWNS the read. This release gives mail the same
+ownership.
+
+- **New MCP tool `bubble_shield_mail_read(query, max, since)`.** Bubble Shield
+  fetches the e-mail ITSELF over IMAP (pure stdlib `imaplib` + `email` — ZERO new
+  dependency) and returns each message already anonymised. The connector leaves the
+  trust path entirely: the raw e-mail NEVER becomes a tool result.
+- **Fail-CLOSED, same guarantee as file read.** Every fetched body is routed
+  through the SAME `_anonymise_text` core the file guard uses, which raises
+  `NERDownError` when the GLiNER daemon is down → the tool returns `isError:true`,
+  NEVER raw e-mail. (The proven prototype used the base engine, which fails OPEN —
+  that was wrong; the real tool inherits daemon-up-or-refuse.)
+- **Cross-source token consistency.** Uses the same per-mission vault as files, so a
+  client masked in a PDF gets the SAME token in their e-mail; From-header and body
+  names collapse to one token root (cross-field consistency).
+- **Host-side credential store.** IMAP host/user/app-password live host-side
+  (`~/.bubble_shield/mail.json`, or `$BUBBLE_SHIELD_MAIL_CREDS`), never exposed to
+  the model/Cowork VM. `load_credentials()` REFUSES a world/group-readable creds
+  file (chmod-600 enforced) and never logs/returns the password.
+- **New files:** `scripts/bubble_shield_mail.py` (IMAP fetch + cred store),
+  `scripts/test_bubble_shield_mail.py` (fail-closed + consistency tests on synthetic
+  Jean DUPONT fixtures — no real mail, no real PII).
+- Scope: READ-ONLY. `bubble_shield_mail_write` (send/reply) is Phase 2. The old
+  PostToolUse mail-containment hook is NOT removed yet (Phase 3) — but
+  **`bubble_shield_mail_read` is the sanctioned mail path going forward**; the
+  connector-scrub approach is deprecated.
+
+## 1.19.1 — 2026-07-02 — Three P1 fixes: allow_paths resolution, pseudonymisation vocabulary, vault encryption-at-rest
+
+Product-review batch of three independent P1s. (Version reconciled to 1.19.1 on the merge ladder: 1.18.19 safe-to-send fix,
+1.18.20 recall leaks, 1.19.0 mail-read, then this batch as 1.19.1.)
+
+- **P1 — `allow_paths` relative resolution was broken (escape-hatch dead).** The
+  `.bubble-shield.json` marker documents `allow_paths: ["clean"]` as *relative to
+  the marker's own folder* (an anonymized-output sub-folder that should be
+  readable). But `_norm()` resolved a relative entry against the guard **process
+  CWD** (`os.getcwd()`), not the marker folder — so `_norm("clean")` became
+  `<random-cwd>/clean` and never matched the client's real `<marked-folder>/clean/`.
+  The documented escape-hatch silently never worked, pushing clients to disable the
+  guard. **Fix:** `_norm(x, base=marker_root)` resolves relative `allow_paths`
+  against the marker folder. `.resolve()` still follows symlinks, so a symlink
+  inside `clean/` pointing back at a protected file resolves OUT and stays DENIED —
+  the hatch opens the anonymized-output folder, not a hole. Covers both the
+  file-tool and Bash paths (both route through `decide_block`). New regression tests
+  in `test_guard_marker.py` (relative-allow ALLOWED, secret outside DENIED, symlink
+  DENIED); they fail on pre-fix code and pass after.
+
+- **P1 (compliance) — "anonymisation" → "pseudonymisation" in the legal claims.**
+  `COMPLIANCE_RGPD.md` flags that calling the tool "anonymisation" in client-facing
+  copy is a legal over-promise: it is reversible **pseudonymisation** (RGPD art. 4
+  §5 / art. 32), not RGPD anonymisation (which would take data *out* of the
+  regulation — the vault keeps it reversible, so it doesn't). **Fix:** corrected the
+  formal capability/legal CLAIMS — the root `README.md` product one-liner and the
+  webapp `about.html` hero lede — to "pseudonymisation réversible (et locale)".
+  Deliberately left the informal VERB usage ("anonymiser ce dossier", button
+  labels, mechanism descriptions) and the token type names (`⟦NOM⟧`) untouched, per
+  the compliance doc's own guidance to fix the claim, not every occurrence.
+
+- **P1 (art. 32) — vault encryption-at-rest was opt-in; plaintext by default.** The
+  vault concentrates all of a mission's PII, so a cleartext file is the
+  highest-value target on the machine. `save_encrypted()`/`load_encrypted()` existed
+  (pure-stdlib PBKDF2 + HMAC-CTR, encrypt-then-MAC) but weren't the default.
+  **Fix (minimum-viable, non-disruptive — chosen over encrypt-by-default to avoid
+  corrupting existing client vaults; full default-encryption with machine-local key
+  management is a flagged follow-up):** the default `save()` now **warns loudly on
+  stderr** whenever it writes plaintext (never touches the JSON stdout that hooks
+  parse; suppressible via `BUBBLE_SHIELD_SILENCE_PLAINTEXT_WARN=1`), plus a
+  one-command in-place migration: `python3 -m bubble_shield.vault encrypt <dir>`
+  (and `status <dir>` to audit). Migration verifies an exact decrypt round-trip
+  before replacing the original, so no vault can be lost or corrupted; existing
+  plaintext vaults still load unchanged via `Vault.load`. New tests cover the
+  warning, plaintext detection, exact round-trip, idempotency and legacy-load.
+
+- Re-vendored the changed engine (`vault.py`, 3 copies) + `guard.py` (2 copies) and
+  re-packed the MCPB — all copies verified byte-identical.
+
+## 1.18.19 — 2026-07-02 — PRODUCT INTEGRITY: no green "safe to send" on a zero-detection document
+
+A product review found the single most damaging failure mode for a tool sold on
+"your client data is protected": the verdict surfaces showed a **green "✓ sûr à
+envoyer" / "✓ Aucune PII détectée"** on documents where the engine had detected
+**nothing** — and in the regex-only / no-ML config, "found nothing" on a real
+free-text document very often means a name or address was simply **MISSED**. In
+the review battery, **26 of 27 leaking documents showed the green verdict.** The
+verdict is computed by the same recognizers that missed the entity, so it
+structurally cannot catch its own false negatives.
+
+**This release reframes the verdict honestly. Detection/masking is UNCHANGED — a
+document that was masking correctly still masks byte-for-byte identically. This is
+purely the MESSAGE/flag.**
+
+- **New engine state machine** (`AnonymizationResult.verdict_state`): one canonical
+  source of truth for every surface — `leak | low_confidence | zero_detection |
+  nothing_to_do | masked_ok`.
+- **`zero_detection`** — a SUBSTANTIAL document (real prose: ≥ 8 words and ≥ 40
+  chars) where ZERO entities were found. This is now a distinct **CAUTION** state:
+  "⚠️ Aucune donnée identifiante détectée — cela ne garantit PAS l'absence de PII.
+  Une relecture humaine est requise avant envoi." Visually distinct amber banner
+  (`verdict--caution`), never green.
+- **`safe_to_send` now returns `False`** for the zero-detection case (with a
+  distinct reason via `verdict_state`), so every consumer that only reads the bool
+  (dossier `all_safe`, dashboard flag, bench) stops certifying it safe. A `True`
+  now means the honest best case — entities were found and all masked — still
+  framed as "revue conseillée", never an absolute guarantee.
+- **`nothing_to_do`** — a trivially short no-PII input (below the substantial bar)
+  stays genuinely safe/green: "rien à anonymiser".
+- **All surfaces updated**: engine `verdict_fr`, webapp `result.html` verdict banner
+  + mapping-table hint, MCP note (`bubble_shield_mcp.py`), artifact
+  (`make_artifact.py`), and the `bubble-shield-anonymize` skill guidance.
+- **PostToolUse email hook honesty** (`posttool_anonymize.py`): the ambient
+  regex-only, fail-open mail containment now states plainly it is **best-effort**,
+  not the fail-closed guarantee the folder guard provides.
 ## 1.18.18 — 2026-07-02 — SECURITY (P0): close three raw-PII exfil bypasses of the PreToolUse guard
 
 A security review found **three confirmed ways** to get raw client PII past the
@@ -53,6 +210,21 @@ un-expandable, 5 generic-mcp cases incl. own-tool allow, 4 malformed-crash
 fail-closed cases). Each new assertion was proven to FAIL on the pre-fix code and
 pass after. Full suite (`test_guard.py`, `test_guard_marker.py`,
 `test_guard_bash_cwd_exfil.py`) stays green; mcpb copy re-synced and re-packed.
+
+## 1.18.17 — 2026-07-02 — FIX: pin the installer's online-fallback deps (no pywebview-6 crash)
+
+`install-app.sh` has two dependency-install paths: an OFFLINE default (installs from the
+pinned wheels in `vendor/wheels/`) and an ONLINE FALLBACK (used only when no interpreter
+matching the vendored wheel ABI is found). The online fallback ran
+`pip install fastapi uvicorn pywebview jinja2 pypdf python-multipart` **unpinned** — so it
+would pull the **latest** from PyPI, e.g. **pywebview 6.x** against launcher code written and
+tested for **pywebview 3.4**. That is exactly the pywebview 3.x/4.x major-API-drift crash
+class fixed in 1.18.16 (the `window.events` AttributeError), relocated to the fallback branch.
+
+- **Fix:** added `constraints.txt` at the repo root pinning every vendored-wheel version, and
+  passed `-c constraints.txt` to **both** the offline and the online pip installs, so both
+  resolve to the identical versions (pywebview stays 3.4). Verified: the pin forces 3.4 even
+  when a 6.0 wheel is available; the offline path still installs clean from vendored wheels.
 
 ## 1.18.16 — 2026-07-02 — FIX: desktop app crashed on launch (pywebview 3.x/4.x events API mismatch)
 

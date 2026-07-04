@@ -84,6 +84,7 @@ CSS = """
 :root{--paper:#fbfaf7;--panel:#fff;--ink:#1b1a17;--muted:#6c6862;--faint:#9b958c;
 --line:#e7e3db;--line-strong:#d6d1c6;--accent:#8a6d3b;--safe:#3f6b52;--safe-bg:#f1f4ef;
 --safe-line:#cdddcf;--warn:#9a4a36;--warn-bg:#f7efea;--warn-line:#e6cfc4;
+--caution:#8a6a1e;--caution-bg:#f9f3e4;--caution-line:#e8dbb5;
 --serif:"Newsreader",Georgia,serif;--sans:"IBM Plex Sans",system-ui,sans-serif;
 --mono:"JetBrains Mono",ui-monospace,monospace;--maxw:880px;}
 *{box-sizing:border-box}
@@ -97,13 +98,14 @@ border-left-width:3px;border-radius:4px;padding:16px 20px;margin-bottom:30px;bac
 .verdict--ok{border-left-color:var(--safe);background:var(--safe-bg)}
 .verdict--warn{border-left-color:var(--warn);background:var(--warn-bg)}
 .verdict--review{border-left-color:var(--accent);background:#faf6ee}
+.verdict--caution{border-left-color:var(--caution);background:var(--caution-bg)}
 .verdict-mark{flex:0 0 auto;font-family:var(--serif);font-size:1.1rem;width:1.4em;text-align:center}
 .verdict--ok .verdict-mark{color:var(--safe)}.verdict--warn .verdict-mark{color:var(--warn)}
-.verdict--review .verdict-mark{color:var(--accent)}
+.verdict--review .verdict-mark{color:var(--accent)}.verdict--caution .verdict-mark{color:var(--caution)}
 .verdict-body{display:flex;flex-direction:column;gap:2px}
 .verdict-text{font-size:1rem;font-weight:600}
 .verdict--ok .verdict-text{color:var(--safe)}.verdict--warn .verdict-text{color:var(--warn)}
-.verdict--review .verdict-text{color:var(--accent)}
+.verdict--review .verdict-text{color:var(--accent)}.verdict--caution .verdict-text{color:var(--caution)}
 .verdict-meta{font-size:.8rem;color:var(--muted);font-family:var(--mono)}
 .cols{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:30px}
 .col-h{font-size:.82rem;color:var(--muted);margin:0 0 12px;display:flex;align-items:baseline;gap:9px}
@@ -144,12 +146,31 @@ def build_html(result, mission, policy_rows):
     to_review = [e for e in result.entities if e.score < result.threshold]
     has_review = bool(to_review)
     safe = getattr(result, "safe_to_send", True)
-    vclass = "verdict--ok" if safe and not has_review else ("verdict--review" if safe else "verdict--warn")
-    vmark = "✓" if safe else "!"
-    vtext = ("Prêt à envoyer — données identifiantes masquées"
-             if safe and not has_review else
-             ("Anonymisé — quelques éléments à vérifier d'un coup d'œil" if safe
-              else "À revoir — donnée identifiante encore en clair"))
+    # Product-integrity fix (2026-07-02): key the verdict off verdict_state so a
+    # substantial ZERO-detection doc shows a distinct CAUTION (never green "safe",
+    # never the leak-flavoured "encore en clair"). Fall back to the old bool logic
+    # if an older engine result without verdict_state is passed in.
+    state = getattr(result, "verdict_state", None)
+    if state == "zero_detection":
+        vclass, vmark = "verdict--caution", "⚠️"
+        vtext = ("Aucune donnée identifiante détectée — cela ne garantit PAS "
+                 "l'absence de PII. Relecture humaine requise avant envoi.")
+    elif state == "leak":
+        vclass, vmark, vtext = "verdict--warn", "!", "À revoir — donnée identifiante encore en clair"
+    elif state == "low_confidence" or (state is None and safe and has_review):
+        vclass, vmark, vtext = "verdict--review", "!", "Anonymisé — quelques éléments à vérifier d'un coup d'œil"
+    elif state == "nothing_to_do":
+        vclass, vmark, vtext = "verdict--ok", "✓", "Aucune donnée identifiante détectée — rien à anonymiser"
+    elif state == "masked_ok":
+        vclass, vmark, vtext = "verdict--ok", "✓", "Données identifiantes masquées — revue conseillée avant envoi"
+    else:
+        # Legacy fallback (result predates verdict_state).
+        vclass = "verdict--ok" if safe and not has_review else ("verdict--review" if safe else "verdict--warn")
+        vmark = "✓" if safe else "!"
+        vtext = ("Prêt à envoyer — données identifiantes masquées"
+                 if safe and not has_review else
+                 ("Anonymisé — quelques éléments à vérifier d'un coup d'œil" if safe
+                  else "À revoir — donnée identifiante encore en clair"))
     roundtrip = "vérifiée"  # caller passes only when ok; default vérifiée
     meta = (f"{len(confident)} élément(s) masqué(s) avec certitude · "
             f"{len(to_review)} à vérifier · restauration {roundtrip} · tout reste local")

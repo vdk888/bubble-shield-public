@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.18.20
+
+> Assumes PR #24 (1.18.19, `verdict_state` honesty fix) merges first. If #24
+> does not land before this, the version needs reconciling (this would become
+> 1.18.19).
+
+### Fixed
+- **Recall LEAK 1 — hyphen/dot-grouped IBAN was not detected.** The IBAN
+  recognizer's separator class only allowed a space between groups, so real forms
+  written `FR76-1027-…` or `FR76.1027.…` never matched the regex and leaked in the
+  daemon-DOWN (regex-only) config while still being certified "safe to send".
+  Extended the separator class to accept space, `-` or `.` between groups, and the
+  mod-97 validator now strips the same separators before checksum validation. All
+  three groupings (spaced / unspaced / hyphen / dot) now match and mod-97-validate
+  identically. No change to spaced/unspaced behaviour (regression-tested).
+- **Recall LEAK 2 — bare Title-case "Prénom Nom" mid-sentence leaked.** In running
+  prose with no structured label (`Titulaire:` / `Nom:`), a bare Title-case name
+  such as "Frédérique Marchand" leaked because GLiNER scores that span *below* the
+  0.30 accept threshold (measured 0.21) and the forename gazetteer — the anchor
+  that catches untitled `Prénom Nom` — was missing the forename. Root cause was
+  investigated by running the real GLiNER detector on the exact span and inspecting
+  raw scores (0.05–0.21 mid-sentence vs 0.74 in isolation), confirming the signal
+  is genuinely below threshold and that lowering the global threshold would tank
+  precision. Fix: expand the forename gazetteer (`gazetteer.py`) with the missing
+  common French forenames. This anchors strictly on the forename list — the
+  untitled-NOM recognizer only fires when the FIRST token is a known forename — so
+  precision on ordinary capitalized French terms ("Plan Épargne Retraite",
+  "Assurance Vie", "Crédit Agricole") is unchanged (measured 0 false positives on a
+  20-sample financial-prose corpus). ALL-CAPS and labeled forms were already caught;
+  this closes the bare Title-case gap without touching the detection thresholds.
+
 ## 1.18.17
 
 ### Fixed

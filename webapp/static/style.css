@@ -21,6 +21,11 @@
   --warn:      #9a4a36;
   --warn-bg:   #f7efea;
   --warn-line: #e6cfc4;
+  /* caution: distinct amber for the zero-detection "found nothing ≠ safe" state
+     — NOT green (never certifies safe) and NOT the red-ish warn (not a leak). */
+  --caution:      #8a6a1e;
+  --caution-bg:   #f9f3e4;
+  --caution-line: #e8dbb5;
 
   --serif: "Newsreader", Georgia, serif;
   --sans:  "IBM Plex Sans", system-ui, sans-serif;
@@ -140,18 +145,21 @@ input[type=file]::file-selector-button {
   border: 1px solid var(--line-strong); border-left-width: 3px; border-radius: 4px;
   padding: 16px 20px; margin-bottom: 34px; background: var(--panel);
 }
-.verdict--ok   { border-left-color: var(--safe); background: var(--safe-bg); }
-.verdict--warn { border-left-color: var(--warn); background: var(--warn-bg); }
+.verdict--ok      { border-left-color: var(--safe); background: var(--safe-bg); }
+.verdict--warn    { border-left-color: var(--warn); background: var(--warn-bg); }
+.verdict--caution { border-left-color: var(--caution); background: var(--caution-bg); }
 .verdict-mark {
   flex: 0 0 auto; font-family: var(--serif); font-size: 1.1rem; line-height: 1.5;
   width: 1.4em; text-align: center;
 }
-.verdict--ok .verdict-mark   { color: var(--safe); }
-.verdict--warn .verdict-mark { color: var(--warn); }
+.verdict--ok .verdict-mark      { color: var(--safe); }
+.verdict--warn .verdict-mark    { color: var(--warn); }
+.verdict--caution .verdict-mark { color: var(--caution); }
 .verdict-body { display: flex; flex-direction: column; gap: 2px; }
 .verdict-text { font-size: 1rem; font-weight: 600; }
-.verdict--ok .verdict-text   { color: var(--safe); }
-.verdict--warn .verdict-text { color: var(--warn); }
+.verdict--ok .verdict-text      { color: var(--safe); }
+.verdict--warn .verdict-text    { color: var(--warn); }
+.verdict--caution .verdict-text { color: var(--caution); }
 .verdict-meta { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); }
 
 /* ── section headers ────────────────────────────────────────────────────── */

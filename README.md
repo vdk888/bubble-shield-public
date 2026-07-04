@@ -2,11 +2,13 @@
 
 # ⟦ Bubble Shield ⟧
 
-**Local, reversible PII anonymisation for LLM workflows.**
+**Local, reversible PII pseudonymisation for LLM workflows.**
 
-Put your sensitive data in the vault before you talk to a model — anonymise on
-the way *in*, de-anonymise the answer on the way *out*, and the real values
-never leave the machine.
+Put your sensitive data in the vault before you talk to a model — pseudonymise on
+the way *in*, restore the answer on the way *out*, and the real values
+never leave the machine. (Reversible pseudonymisation, a GDPR art. 32 security
+measure — not irreversible "anonymisation" in the RGPD sense; the vault keeps it
+reversible and stays local.)
 
 </div>
 
@@ -40,6 +42,14 @@ are FR-first) but the engine is generic and the entity list is easy to extend.
 - **Layered, optional ML.** A zero-dependency regex + checksum core (IBAN
   mod-97, ISIN/SIREN Luhn) that runs anywhere, plus two **optional** layers that
   *only ever add recall* and fail open to the core when their backend is absent.
+- **Encryption at rest (art. 32).** The vault concentrates all the mission's PII,
+  so it is the highest-value file on the machine. `Vault.save_encrypted()` /
+  `load_encrypted()` give authenticated, pure-stdlib encryption (PBKDF2 + HMAC-CTR,
+  encrypt-then-MAC — no `pip install`). The default `save()` still writes chmod-600
+  cleartext, so it now **warns loudly** when it does, and a one-command migration
+  encrypts existing vaults in place:
+  `python3 -m bubble_shield.vault encrypt <vault-dir>` (`status` to audit first).
+  *Encrypt-by-default with machine-local key management is the tracked follow-up.*
 
 ## Detection layers
 
@@ -97,8 +107,14 @@ engine = AnonymizationEngine(vault=Vault(mission="dossier-dupont-2026"))
 res = engine.anonymize("Monsieur Jean Dupont, IBAN FR76 3000 6000 0112 3456 7890 189.")
 
 res.anonymized      # 'Monsieur ⟦NOM_0001⟧, IBAN ⟦IBAN_0002⟧.'
-res.safe_to_send    # True  (no residual PII, no sub-threshold detection)
+res.safe_to_send    # True  (entities found & masked, no residual, no sub-threshold)
+res.verdict_state   # 'masked_ok' | 'leak' | 'low_confidence' | 'zero_detection' | 'nothing_to_do'
+res.verdict_fr      # human-facing FR verdict for the state above
 engine.deanonymize(res.anonymized)   # round-trips back to the original
+
+# NB: a SUBSTANTIAL document where the engine finds ZERO entities is NOT reported
+# as safe — res.safe_to_send is False and verdict_state == 'zero_detection'.
+# "Found nothing" is not "safe"; on free text it often means a name was MISSED.
 ```
 
 ## Turning on the optional layers

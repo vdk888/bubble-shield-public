@@ -225,6 +225,10 @@ async def anonymize(
         "roundtrip_ok": engine.deanonymize(result.anonymized) == (text or ""),
         # #334: non-empty list of FR labels when the policy keeps identifying types.
         "kept_identifying": kept_identifying,
+        # Product-integrity fix (2026-07-02): canonical verdict state drives the
+        # verdict banner so a substantial ZERO-detection doc shows CAUTION, never
+        # a green "✓ safe". See engine.AnonymizationResult.verdict_state.
+        "verdict_state": result.verdict_state,
     }
     return templates.TemplateResponse(request, "result.html", ctx)
 

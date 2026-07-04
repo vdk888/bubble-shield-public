@@ -9,8 +9,12 @@ fail-closed residual-PII scan.
 
 The same engine instance owns a Vault, so anonymise then de-anonymise round-
 trips exactly. `safe_to_send` is False when (a) the residual scan still finds
-PII-shaped strings in the anonymised text, or (b) any accepted detection was
-below the confidence threshold (we'd rather over-flag than leak).
+PII-shaped strings in the anonymised text, (b) any accepted detection was
+below the confidence threshold, or (c) a SUBSTANTIAL document yielded ZERO
+detections — "found nothing" is not "safe", it's "nothing found", which on real
+free text often means a name/address was MISSED (we'd rather over-flag than
+falsely certify a leak as safe). See `verdict_state` for the canonical
+per-surface state machine.
 """
 from __future__ import annotations
 
@@ -51,6 +55,25 @@ class DetectedEntity:
     priority: int = 0
 
 
+# Zero-detection honesty (product-integrity fix, 2026-07-02).
+# "Detected nothing" is NOT "safe" — on a real free-text document (especially in
+# the regex-only / no-ML config) it very often means a name or address was simply
+# MISSED. `safe_to_send` is computed by the same recognizers that missed the
+# entity, so it structurally cannot catch its own false negatives. We therefore
+# refuse to show a green "safe" verdict on a SUBSTANTIAL document where zero
+# entities were found — the honest state is CAUTION (human review required),
+# distinct from both the confident "everything found was masked" case and the
+# trivially-empty "nothing to do" case (empty/whitespace/one-liner with no prose).
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+# A document is "substantial" (i.e. a zero-detection result is meaningfully
+# suspicious) when it carries real prose. Threshold is deliberately low so short
+# real KYC snippets still trip caution, but trivial inputs (an empty string, a
+# whitespace blob, "ok", a bare date) do not. Tuned against the review battery:
+# every leaking free-text doc there clears both bars; genuine no-op inputs do not.
+_SUBSTANTIAL_MIN_WORDS = 8
+_SUBSTANTIAL_MIN_CHARS = 40
+
+
 @dataclass
 class AnonymizationResult:
     original: str
@@ -73,19 +96,69 @@ class AnonymizationResult:
         return self.entity_count > 0 and self.min_score < self.threshold
 
     @property
+    def substantial_text(self) -> bool:
+        """True when the source doc carries enough prose that finding ZERO
+        identifying entities is meaningfully suspicious (vs. a trivially empty or
+        one-word input where "nothing found" is genuinely "nothing to do")."""
+        words = _WORD_RE.findall(self.original or "")
+        return (len(words) >= _SUBSTANTIAL_MIN_WORDS
+                and len((self.original or "").strip()) >= _SUBSTANTIAL_MIN_CHARS)
+
+    @property
+    def zero_detection(self) -> bool:
+        """A substantial document in which the engine found and masked NOTHING.
+        This is NOT "safe" — it's "nothing FOUND", which on free text very often
+        means a name/address was MISSED. The caution state, not a green verdict."""
+        return (self.entity_count == 0
+                and not self.has_residual
+                and self.substantial_text)
+
+    @property
+    def verdict_state(self) -> str:
+        """Canonical, single source of truth for every human-facing surface.
+        One of: 'leak' | 'low_confidence' | 'zero_detection' | 'nothing_to_do'
+        | 'masked_ok'. Ordered by severity so the most serious state wins."""
+        if self.has_residual:
+            return "leak"
+        if self.low_confidence:
+            return "low_confidence"
+        if self.zero_detection:
+            return "zero_detection"
+        if self.entity_count == 0:
+            return "nothing_to_do"
+        return "masked_ok"
+
+    @property
     def safe_to_send(self) -> bool:
-        """Fail-closed verdict: no residual PII AND no sub-threshold detection."""
-        return not self.has_residual and not self.low_confidence
+        """Fail-closed verdict. False when (a) residual PII remains, (b) a
+        detection was sub-threshold, OR (c) a SUBSTANTIAL document yielded ZERO
+        detections — because "found nothing" cannot be certified "safe" by the
+        very recognizers that would have missed a name. A True here means the
+        closest we honestly get to safe: things WERE found and all were masked
+        (or the input carried no real prose to worry about) — still 'revue
+        conseillée', never an absolute guarantee. See `verdict_state` /
+        `verdict_fr` for the human-facing distinction; consumers that only see a
+        bool must treat True as 'no red flag' and NEVER render '✓ sûr' text off
+        it alone (a zero-detection doc is correctly False, so the boolean is a
+        safe gate for callers that ignore the richer state)."""
+        return (not self.has_residual
+                and not self.low_confidence
+                and not self.zero_detection)
 
     @property
     def verdict_fr(self) -> str:
-        if self.has_residual:
+        state = self.verdict_state
+        if state == "leak":
             return "⚠️ PII résiduelle détectée — NE PAS envoyer"
-        if self.low_confidence:
+        if state == "low_confidence":
             return "⚠️ Détection peu fiable sous le seuil — à revoir avant envoi"
-        if self.entity_count == 0:
-            return "✓ Aucune PII détectée — rien à anonymiser"
-        return "✓ Aucune PII résiduelle — sûr à envoyer"
+        if state == "zero_detection":
+            # THE FIX: never a green "safe" on a substantial zero-detection doc.
+            return ("⚠️ Aucune donnée identifiante détectée — cela ne garantit PAS "
+                    "l'absence de PII. Une relecture humaine est requise avant envoi.")
+        if state == "nothing_to_do":
+            return "✓ Aucune donnée identifiante détectée — rien à anonymiser"
+        return "✓ Données identifiantes masquées — revue conseillée avant envoi"
 
 
 class AnonymizationEngine:

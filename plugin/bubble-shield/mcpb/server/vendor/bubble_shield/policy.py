@@ -39,6 +39,7 @@ ENTITY_CATALOG: Dict[str, Dict[str, Any]] = {
     "LIEU_NAISSANCE": {"label": "Lieu de naissance",       "identifying": True,  "default_cloak": True},
     "NUM_CLIENT":     {"label": "N° client",               "identifying": True,  "default_cloak": True},
     "NUM_FISCAL":     {"label": "N° fiscal",               "identifying": True,  "default_cloak": True},
+    "NUM_TELEDECLARANT": {"label": "N° télédéclarant",     "identifying": True,  "default_cloak": True},
     "SECU":           {"label": "N° sécurité sociale",     "identifying": True,  "default_cloak": True},
     "IBAN":           {"label": "IBAN / compte bancaire",  "identifying": True,  "default_cloak": True},
     "PIECE_IDENTITE": {"label": "Pièce d'identité",        "identifying": True,  "default_cloak": True},

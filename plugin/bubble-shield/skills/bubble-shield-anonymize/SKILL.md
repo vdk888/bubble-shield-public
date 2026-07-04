@@ -93,6 +93,11 @@ for pat in PATTERNS:
         (OUT / f"{f.stem}.anon.txt").write_text(res.anonymized, encoding="utf-8")
         if not res.safe_to_send:
             print(f"⚠️ {f.name}: {res.verdict_fr} — relecture humaine requise")
+        # IMPORTANT — zero-detection is NOT "safe". If the engine found and masked
+        # ZERO entities on a substantial document (res.verdict_state == "zero_detection",
+        # res.safe_to_send is False), that means "rien TROUVÉ", not "rien à cacher":
+        # in the regex-only config a name/address is often simply MISSED. Never tell
+        # the user a zero-detection doc is safe to send — flag it for human review.
 
 vault.save_encrypted(str(SRC / ".vault.enc"), passphrase="<set-by-operator>")  # coffre chiffré, reste local
 print("done — clean/ contains the cloaked copies; the vault never leaves this machine")
@@ -161,6 +166,10 @@ sample (the engine has none baked in; make up a plausible "Jean Dupont" record).
 - **Never bypass the guard.** No reading the raw file via an alternate tool.
 - **One vault per dossier** so the same client gets the same token across all files.
 - **Fail-closed:** if `safe_to_send` is false, flag it — do not treat the doc as safe.
+- **"Found nothing" ≠ "safe".** A substantial document with ZERO detections
+  (`verdict_state == "zero_detection"`) is a CAUTION state, not a clean bill of
+  health — the same recognizers that would flag a leak are the ones that found
+  nothing, so they can't vouch for their own miss. Always ask for human review.
 - **The vault is the secret.** It stays on the machine; it is never sent to any model.
 
 ## En cas de fuite ou de problème

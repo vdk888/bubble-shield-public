@@ -36,4 +36,23 @@ FRENCH_FIRST_NAMES = {
     "Jean-Pierre", "Jean-Claude", "Jean-Paul", "Jean-Luc", "Jean-Marc",
     "Jean-François", "Jean-Michel", "Marie-Claude", "Marie-Christine",
     "Marie-Hélène", "Anne-Marie", "Pierre-Yves",
+    # recall LEAK 2 — bare Title-case "Prénom Nom" mid-sentence: GLiNER scores
+    # these below threshold (e.g. "Frédérique Marchand" → 0.21 < 0.30), so the
+    # forename gazetteer is what anchors them. These common FR forenames were
+    # missing, so the untitled-NOM recognizer never fired. Adding them lifts
+    # recall WITHOUT touching precision: the recognizer only fires when the FIRST
+    # token is a known forename, so capitalized non-name terms ("Plan Épargne",
+    # "Assurance Vie", "Crédit Agricole") are never matched. Screened for
+    # collisions against common capitalized FR words — none of these are.
+    # masculins
+    "Fabrice", "Ludovic", "Grégory", "Jonathan", "Franck", "Cyril", "Mickaël",
+    "Michaël", "Guy", "Roger", "Robert", "René", "Marcel", "Lucien", "Raymond",
+    "Yannick", "Loïc", "Erwan", "Gwenaël", "Karim", "Rachid", "Mehdi", "Anthony",
+    "Kevin", "Fabrice", "Régis", "Serge", "Alexis", "Corentin", "Valentin",
+    # féminins
+    "Frédérique", "Dominique", "Christelle", "Séverine", "Angélique", "Vanessa",
+    "Sonia", "Nadia", "Solène", "Morgane", "Anaïs", "Coralie", "Amélie",
+    "Noémie", "Roxane", "Jacqueline", "Colette", "Denise", "Renée", "Suzanne",
+    "Simone", "Micheline", "Paulette", "Bernadette", "Yvette", "Ginette",
+    "Sabine", "Muriel", "Nadège", "Marion", "Fanny", "Élise",
 }

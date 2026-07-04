@@ -41,7 +41,10 @@ class Match:
 # ─── checksum validators ─────────────────────────────────────────────────
 
 def _iban_valid(iban: str) -> bool:
-    s = re.sub(r"\s+", "", iban).upper()
+    # Strip group separators before mod-97: whitespace AND hyphens/dots, so that
+    # hyphen- or dot-grouped forms ("FR76-1027-…", "FR76.1027.…") validate the
+    # same as spaced/unspaced ones. Real forms use all three (fix: recall LEAK 1).
+    s = re.sub(r"[\s.\-]+", "", iban).upper()
     if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", s):
         return False
     rearranged = s[4:] + s[:4]
@@ -79,6 +82,20 @@ def _siren_valid(num: str) -> bool:
     return len(d) in (9, 14) and _luhn_ok(d)
 
 
+def _num_fiscal_ref_valid(s: str) -> bool:
+    """Validate a numéro fiscal / référence d'avis (13 digits, grouping
+    ``NN NN NNNNNNN NN``). The trailing 2-digit control key is a mod-97 check on
+    the leading 11 digits: ``key == 97 - (body11 % 97)`` (the DGFiP algorithm,
+    same family as the NIR/SECU key). This checksum is the precision anchor — a
+    random 13-digit run in this grouping almost never satisfies it, so we only
+    mask when it passes. Separators (spaces) are stripped before the check."""
+    d = re.sub(r"\s+", "", s)
+    if len(d) != 13 or not d.isdigit():
+        return False
+    body, key = d[:11], int(d[11:])
+    return (97 - (int(body) % 97)) == key
+
+
 # ─── regex recognizers ───────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -89,6 +106,13 @@ class Recognizer:
     group: int = 0                             # which capture group is the PII
     validator: Optional[Callable[[str], bool]] = None
     score_if_unvalidated: float = 0.6
+    # When True, a match whose validator FAILS is dropped entirely (not emitted),
+    # instead of emitted at score_if_unvalidated. Used by checksum-gated recognizers
+    # whose regex shape is not rare enough to fail-closed on (fix #319: the fiscal
+    # reference grouping NN NN NNNNNNN NN would over-mask stray 13-digit runs, so we
+    # only mask when the mod-97 control key validates). Keeps the fail-closed
+    # behaviour of IBAN/ISIN/SIRET (drop_if_unvalidated=False) untouched.
+    drop_if_unvalidated: bool = False
 
     def find(self, text: str) -> List[Match]:
         out: List[Match] = []
@@ -101,6 +125,8 @@ class Recognizer:
             if self.validator is not None:
                 if self.validator(value):
                     score = 1.0
+                elif self.drop_if_unvalidated:
+                    continue  # precision: no checksum, no mask
                 else:
                     score = self.score_if_unvalidated
             out.append(Match(start, end, self.entity_type, value, score, self.priority))
@@ -144,7 +170,10 @@ _COMP = r"(?:[^\S\n]+(?:chez|au[^\S\n]+sein[^\S\n]+de|de[^\S\n]+la|de|dans)[^\S\
 RECOGNIZERS: List[Recognizer] = [
     # — structured / checksum-backed (high priority) —
     Recognizer("EMAIL", re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), 100),
-    Recognizer("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{2,4}){2,8}\b"),
+    # Separator class tolerates space, hyphen OR dot between groups — real forms
+    # write "FR76 1027 …", "FR76-1027-…" and "FR76.1027.…"; the validator strips
+    # the same separators before mod-97 (fix: recall LEAK 1).
+    Recognizer("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?:[ .\-]?[A-Z0-9]{2,4}){2,8}\b"),
                95, validator=_iban_valid, score_if_unvalidated=0.5),
     Recognizer("ISIN", re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b"),
                94, validator=_isin_valid, score_if_unvalidated=0.5),
@@ -162,6 +191,28 @@ RECOGNIZERS: List[Recognizer] = [
     Recognizer("NUM_FISCAL",
                re.compile(r"(?:num[ée]ro\s+fiscal|n[°o]\s*fiscal|r[ée]f[ée]rence\s+fiscale|SPI)\s*:?\s*(\d(?:[ .]?\d){12})",
                           re.I), 88, group=1),
+    # UNLABELED numéro fiscal / référence d'avis (fix #319): the fiscal reference
+    # printed on an avis d'impôt in its canonical grouping "NN NN NNNNNNN NN"
+    # (2-2-7-2 = 13 digits) with NO "numéro fiscal :" label — e.g.
+    # "Référence de l'avis : 25 92 0364665 70" or the bare "…numéro 25 92 0364665 70…".
+    # The labeled NUM_FISCAL recognizer above misses these. PRECISION: this shape
+    # is not extraordinarily rare, so we mask ONLY when the mod-97 control key
+    # validates (_num_fiscal_ref_valid) — a checksum-failing lookalike (a stray
+    # 13-digit run, a page/date group) is NOT emitted. Single-space separators only,
+    # anchored on the exact 2-2-7-2 grouping. drop_if_unvalidated=True → a
+    # checksum-failing span is dropped entirely, never masked (precision over recall).
+    Recognizer("NUM_FISCAL",
+               re.compile(r"\b\d{2}\s\d{2}\s\d{7}\s\d{2}\b"),
+               87, validator=_num_fiscal_ref_valid, drop_if_unvalidated=True),
+    # Télédéclarant alphanumeric block (fix #319): the identifier printed on some
+    # fiscal forms in the grouping "NNN NN NN NNNNNNNNNN N A" (3-2-2-10-1 digits +
+    # a trailing single letter) — e.g. "922 65 91 2768797789 3 A". No checksum is
+    # published, so PRECISION rests entirely on the full structural anchor: the
+    # exact digit-group counts AND the terminal single uppercase letter make this
+    # shape (18 digits in 5 specific groups + a letter) collision-free against
+    # dates, amounts, phones and generic refs (verified in the precision corpus).
+    Recognizer("NUM_TELEDECLARANT",
+               re.compile(r"\b\d{3}\s\d{2}\s\d{2}\s\d{10}\s\d\s[A-Z]\b"), 87),
     # Client number — O2S / dossier.
     # Client/dossier number. Tolerate an optional system label (e.g. "O2S")
     # between the cue and the value, and require the captured value to

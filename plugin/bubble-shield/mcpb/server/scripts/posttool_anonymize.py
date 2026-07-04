@@ -318,7 +318,10 @@ def _try_mail_containment(event, cfg) -> None:
                 "hookEventName": "PostToolUse",
                 "updatedToolOutput": new_tr,
                 "additionalContext": ("ℹ️ Bubble Shield a anonymisé les données sensibles "
-                                      "de ce résultat e-mail (jetons ⟦…⟧)."),
+                                      "détectées dans ce résultat e-mail (jetons ⟦…⟧). "
+                                      "Confinement best-effort (regex, fail-open) — ce n'est "
+                                      "PAS la garantie fail-closed du garde de dossier ; une PII "
+                                      "non détectée a pu passer."),
             }
         }))
         sys.exit(0)
@@ -431,9 +434,11 @@ def main() -> None:
                 "hookEventName": "PostToolUse",
                 "updatedToolOutput": {"type": "text", "text": res.anonymized},
                 "additionalContext": (
-                    "ℹ️ Bubble Shield a anonymisé des données sensibles dans ce résultat "
-                    "(jetons ⟦…⟧). Les vraies valeurs restent locales ; la réponse "
-                    "sera restaurée au moment de la rendre à l'utilisateur."),
+                    "ℹ️ Bubble Shield a anonymisé les données sensibles détectées dans ce "
+                    "résultat (jetons ⟦…⟧). Les vraies valeurs restent locales ; la réponse "
+                    "sera restaurée au moment de la rendre à l'utilisateur. "
+                    "Confinement best-effort (regex, fail-open) — ce n'est PAS la garantie "
+                    "fail-closed du garde de dossier ; une PII non détectée a pu passer."),
             }
         }))
         sys.exit(0)

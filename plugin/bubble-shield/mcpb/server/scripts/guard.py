@@ -125,12 +125,25 @@ def _load_config() -> dict:
     return {"protected_folders": [], "_config_path": None}
 
 
-def _norm(path_str: str) -> Path | None:
-    """Resolve a path to an absolute, symlink-resolved Path. None if empty."""
+def _norm(path_str: str, base: Path | None = None) -> Path | None:
+    """Resolve a path to an absolute, symlink-resolved Path. None if empty.
+
+    A RELATIVE entry is resolved against `base` when given (the folder it was
+    declared in — e.g. a marker's own directory), NOT the guard process CWD.
+    This matters for marker `allow_paths`/`allow_extensions`: the marker
+    documents them as "relative to THIS marker's folder", so `_norm("clean",
+    base=marker_root)` must become `<marker_root>/clean`, never `<cwd>/clean`.
+    Absolute and `~/`-anchored entries ignore `base`. `.resolve()` still follows
+    symlinks, so an allow-listed path that symlinks OUT of the folder resolves
+    to its real target and won't spuriously match a protected file.
+    """
     if not path_str:
         return None
     try:
-        return Path(os.path.expanduser(path_str)).resolve()
+        p = Path(os.path.expanduser(path_str))
+        if base is not None and not p.is_absolute():
+            p = base / p
+        return p.resolve()
     except Exception:
         return None
 
@@ -625,7 +638,9 @@ def _main(raw: str) -> None:
         hit = _find_marker_root(p)
         if hit is not None:
             root, mdata = hit
-            m_allow_paths = [q for q in (_norm(x) for x in mdata.get("allow_paths", [])) if q]
+            # Marker allow_paths/allow_extensions are documented as relative to
+            # THIS marker's folder → resolve them against `root`, not process CWD.
+            m_allow_paths = [q for q in (_norm(x, base=root) for x in mdata.get("allow_paths", [])) if q]
             m_allow_exts = tuple(e.lower() for e in mdata.get("allow_extensions", []) if e)
             # marker overrides fall back to global defaults when unset
             allow_paths = m_allow_paths or g_allow_paths

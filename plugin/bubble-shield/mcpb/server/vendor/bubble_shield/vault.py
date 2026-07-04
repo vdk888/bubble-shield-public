@@ -246,6 +246,13 @@ class Vault:
             p.chmod(0o600)  # vault holds the real PII — keep it private
         except OSError:
             pass
+        # RGPD art. 32 — this is a PLAINTEXT-at-rest write. The vault concentrates
+        # all the mission's real PII, so a cleartext file is the single
+        # highest-value target on the machine. chmod 600 is NOT encryption. Warn
+        # loudly (stderr only — never touches the JSON stdout that hooks parse) so
+        # the gap can't stay silent, and point at the one-command remediation.
+        # Suppressible via BUBBLE_SHIELD_SILENCE_PLAINTEXT_WARN=1 once acknowledged.
+        _warn_plaintext_at_rest(p)
 
     @classmethod
     def load(cls, path: str | Path) -> "Vault":
@@ -403,3 +410,172 @@ def purge_expired(directory: str | Path, ttl_days: float) -> List[Path]:
             p.unlink()
             purged.append(p)
     return purged
+
+
+# ---- RGPD encryption at rest: plaintext detection + one-command remediation --
+# (art. 32) — the encryption primitives (save_encrypted / load_encrypted) have
+# existed for a while but were OPT-IN, so the default save() wrote cleartext PII.
+# Closing that gap fully (encrypt-by-default with machine-local key management
+# threaded through the webapp + MCP server + PostToolUse hook) is a larger change
+# with real corruption risk; until then, the MINIMUM viable art. 32 posture is:
+# (1) never let a plaintext write stay silent, (2) ship a one-command migration.
+
+def is_encrypted_vault_file(path: str | Path) -> bool:
+    """True if `path` is a Bubble Shield ENCRYPTED vault envelope (v1 or v2).
+
+    Cheap + safe: parses the JSON and checks for the magic key. A plaintext
+    vault, a non-vault JSON, or an unreadable file all return False.
+    """
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+    return isinstance(d, dict) and Vault._ENC_MAGIC in d
+
+
+def _warn_plaintext_at_rest(path: Path) -> None:
+    """Emit a loud, one-line-ish stderr warning that a vault sits in plaintext.
+
+    stderr ONLY — hooks/MCP servers parse stdout JSON, so this never corrupts a
+    tool response. Suppress with BUBBLE_SHIELD_SILENCE_PLAINTEXT_WARN=1 once the
+    operator has acknowledged the trade-off (or migrated to encrypted-at-rest).
+    """
+    if os.environ.get("BUBBLE_SHIELD_SILENCE_PLAINTEXT_WARN") == "1":
+        return
+    import sys
+    try:
+        sys.stderr.write(
+            f"⚠️  Bubble Shield — coffre EN CLAIR sur le disque : {path}\n"
+            "    Ce fichier concentre toute la PII de la mission (RGPD art. 32).\n"
+            "    Chiffrez-le :  python3 -m bubble_shield.vault encrypt "
+            f"'{path.parent}'\n"
+            "    (silence : BUBBLE_SHIELD_SILENCE_PLAINTEXT_WARN=1)\n"
+        )
+    except Exception:
+        pass
+
+
+def find_plaintext_vaults(directory: str | Path) -> List[Path]:
+    """Return the plaintext (unencrypted) vault files under `directory`.
+
+    A file counts as a plaintext vault if it parses as JSON, carries the vault
+    required-keys, and is NOT an encrypted envelope. Encrypted vaults, non-vault
+    JSON and unrelated files are skipped — same conservative filter as purge.
+    """
+    out: List[Path] = []
+    for p in sorted(Path(directory).glob("*.json")):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        if Vault._ENC_MAGIC in d:
+            continue  # already encrypted
+        if not _VAULT_REQUIRED_KEYS.issubset(d):
+            continue  # not one of our vaults
+        out.append(p)
+    return out
+
+
+def encrypt_vault_file(path: str | Path, passphrase: str) -> bool:
+    """Encrypt ONE plaintext vault file in place (art. 32). Returns True if it
+    was plaintext and got encrypted; False if it was already encrypted / not a
+    vault. Round-trips through Vault so the on-disk map is preserved exactly.
+
+    Safe by construction: we load → re-save encrypted to a temp file → verify the
+    temp file decrypts back to an identical mapping → only THEN os.replace() over
+    the original. A failure at any step leaves the original untouched.
+    """
+    p = Path(path)
+    if is_encrypted_vault_file(p):
+        return False
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not (isinstance(d, dict) and _VAULT_REQUIRED_KEYS.issubset(d)):
+        return False
+    v = Vault.from_dict(d)
+    tmp = p.with_suffix(p.suffix + ".enc.tmp")
+    v.save_encrypted(tmp, passphrase)
+    # verify round-trip before we overwrite the only copy of the PII map
+    check = Vault.load_encrypted(tmp, passphrase)
+    if check.to_value != v.to_value or check.to_token != v.to_token:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"Vérification round-trip échouée pour {p} — original conservé.")
+    os.replace(tmp, p)
+    try:
+        p.chmod(0o600)
+    except OSError:
+        pass
+    return True
+
+
+def encrypt_all_vaults(directory: str | Path, passphrase: str) -> List[Path]:
+    """Encrypt every plaintext vault under `directory`. Returns the paths that
+    were converted. Idempotent: already-encrypted vaults are skipped."""
+    done: List[Path] = []
+    for p in find_plaintext_vaults(directory):
+        if encrypt_vault_file(p, passphrase):
+            done.append(p)
+    return done
+
+
+def _cli(argv: Optional[List[str]] = None) -> int:
+    """One-command remediation: `python3 -m bubble_shield.vault encrypt <dir>`.
+
+    Reads the passphrase from $BUBBLE_SHIELD_VAULT_PASSPHRASE or prompts (never
+    echoes it, never puts it in argv). `status <dir>` reports the plaintext/
+    encrypted split without changing anything.
+    """
+    import argparse
+    import getpass
+    import sys
+
+    ap = argparse.ArgumentParser(
+        prog="bubble_shield.vault",
+        description="Bubble Shield vault — encryption-at-rest maintenance (RGPD art. 32).",
+    )
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap_enc = sub.add_parser("encrypt", help="encrypt every plaintext vault in a folder")
+    ap_enc.add_argument("directory", help="folder holding *.json vault files")
+    ap_st = sub.add_parser("status", help="report which vaults are plaintext vs encrypted")
+    ap_st.add_argument("directory", help="folder holding *.json vault files")
+    args = ap.parse_args(argv)
+
+    directory = Path(args.directory)
+    if not directory.is_dir():
+        sys.stderr.write(f"Dossier introuvable : {directory}\n")
+        return 2
+
+    if args.cmd == "status":
+        plain = find_plaintext_vaults(directory)
+        allj = sorted(directory.glob("*.json"))
+        enc = [p for p in allj if is_encrypted_vault_file(p)]
+        print(f"{len(enc)} coffre(s) chiffré(s), {len(plain)} en clair, dans {directory}")
+        for p in plain:
+            print(f"  ⚠️  EN CLAIR : {p.name}")
+        return 0
+
+    # encrypt
+    plain = find_plaintext_vaults(directory)
+    if not plain:
+        print(f"Aucun coffre en clair dans {directory} — rien à faire.")
+        return 0
+    passphrase = os.environ.get("BUBBLE_SHIELD_VAULT_PASSPHRASE")
+    if not passphrase:
+        passphrase = getpass.getpass("Phrase secrète pour chiffrer les coffres : ")
+    if not passphrase:
+        sys.stderr.write("Phrase secrète vide — abandon (rien n'a été modifié).\n")
+        return 2
+    done = encrypt_all_vaults(directory, passphrase)
+    print(f"✅ {len(done)} coffre(s) chiffré(s) sur {len(plain)}.")
+    for p in done:
+        print(f"   🔒 {p.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli())

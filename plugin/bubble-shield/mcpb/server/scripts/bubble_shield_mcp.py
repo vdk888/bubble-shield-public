@@ -109,6 +109,34 @@ TOOLS = [
         },
     },
     {
+        "name": "bubble_shield_mail_read",
+        "description": (
+            "Read e-mail ANONYMISED. Bubble Shield fetches the messages ITSELF over "
+            "IMAP (host-side) and returns each one with names, IBANs, e-mails and "
+            "other identifying data already replaced by reversible ⟦…⟧ tokens — the "
+            "raw e-mail NEVER enters your context. Use this INSTEAD of a Gmail/mail "
+            "connector for any mailbox that may contain client PII: the connector is "
+            "removed from the trust path entirely. Same fail-CLOSED guarantee as "
+            "bubble_shield_read — if the NER daemon is down, this REFUSES rather than "
+            "return raw e-mail. Uses the same local vault as files, so a client masked "
+            "in a PDF gets the SAME token in their e-mail (cross-source consistency). "
+            "Credentials live host-side (~/.bubble_shield/mail.json) and are never "
+            "shown to you."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "IMAP search criterion: UNSEEN, ALL, SEEN, "
+                                         "'FROM \"x@y.fr\"', etc. Default ALL."},
+                "max": {"type": "integer",
+                        "description": "Max messages to fetch (most-recent first, capped at 50). Default 10."},
+                "since": {"type": "string",
+                          "description": "Optional IMAP date filter 'dd-Mon-yyyy' e.g. '01-Jul-2026'."}
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "bubble_shield_write",
         "description": (
             "Write a document to disk, restoring the REAL client values from the "
@@ -529,9 +557,28 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
     except Exception:
         pass  # fail-open: sidecar write never breaks anonymization
 
-    note = "" if res.safe_to_send else (
-        "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
-        "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
+    # Verdict note — keyed off the engine's canonical verdict_state so each state
+    # gets the HONEST message. Critically, the zero-detection state (a substantial
+    # doc where NOTHING was found) must NOT be presented as safe: "found nothing"
+    # is not "safe", it's "nothing found", which on free text often means a
+    # name/address was MISSED. (Product-integrity fix 2026-07-02.)
+    _state = getattr(res, "verdict_state", None)
+    if _state == "zero_detection":
+        note = (
+            "\n\n[⚠️ Bubble Shield : aucune donnée identifiante détectée — cela ne "
+            "garantit PAS l'absence de PII. Sur un document de ce type, « rien "
+            "trouvé » peut signifier qu'un nom ou une adresse est passé inaperçu. "
+            "Une relecture humaine est requise avant envoi.]")
+    elif _state == "low_confidence":
+        note = (
+            "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
+            "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
+    elif _state == "leak":
+        note = (
+            "\n\n[⚠️ Bubble Shield : une donnée identifiante est restée en clair — "
+            "NE PAS envoyer sans correction.]")
+    else:
+        note = ""
 
     # #334 — LOUD WARNING when an identifying type is set to KEEP in the policy.
     # The client keeps full autonomy (no hard floor), but the kept types are named
@@ -581,6 +628,42 @@ def _anonymise_file(path: str) -> str:
         raise FileNotFoundError(f"no such file: {p}")
     text = extract_file(p)                            # fail-closed on scanned PDFs
     return _anonymise_text(text, filename_basename=p.name)
+
+
+def _anonymise_mail(query: str = "ALL", maxn: int = 10, since: str = None) -> str:
+    """Fetch mail over IMAP and return every message ANONYMISED, fail-CLOSED.
+
+    This is the mail mirror of _anonymise_file: Bubble Shield OWNS the read
+    (fetches via IMAP host-side), then routes EACH raw body through the SAME
+    fail-closed _anonymise_text core the file guard uses. Because _anonymise_text
+    raises NERDownError when the daemon is down, this whole path inherits the
+    daemon-up-or-refuse guarantee for free — the caller converts NERDownError to
+    isError:true and NO raw e-mail is ever returned.
+
+    The raw From/Subject/body are combined into one text block per message and
+    anonymised together, so a client's name appearing in BOTH the From-header and
+    the body collapses to the SAME token (cross-field consistency), and — via the
+    shared per-mission vault — the SAME token as in that client's PDFs
+    (cross-source consistency).
+
+    Fail-closed ordering matters: if the daemon is down, _anonymise_text raises on
+    the FIRST message before any body is appended to the output, so a daemon-down
+    call returns zero anonymised content.
+    """
+    sys.path.insert(0, str(_scripts_dir()))
+    from bubble_shield_mail import fetch_mail, load_credentials  # imaplib + email (stdlib)
+    creds = load_credentials()                      # raises MailConfigError (no secret leaked) if unset/mis-perm
+    msgs = fetch_mail(query=query, maxn=maxn, since=since, creds=creds)
+    if not msgs:
+        return "📭 Aucun message ne correspond à cette recherche."
+    blocks = []
+    for frm, subj, body in msgs:
+        raw = f"From: {frm}\nSubject: {subj}\n\n{body}"
+        # fail-CLOSED: raises NERDownError if the daemon is down → caller → isError
+        cloaked = _anonymise_text(raw)
+        blocks.append(cloaked)
+    header = f"📧 {len(blocks)} message(s) anonymisé(s) (le contenu brut n'a jamais quitté l'hôte) :\n"
+    return header + ("\n\n" + ("─" * 40) + "\n\n").join(blocks)
 
 
 def _ner_status() -> dict:
@@ -951,6 +1034,12 @@ def _handle(req: dict) -> None:
                 if _OCR_TAG in anon[:30]:
                     anon = _OCR_QUALITY_NOTE + anon
                 ok(anon)
+            elif name == "bubble_shield_mail_read":
+                anon = _anonymise_mail(
+                    query=args.get("query", "ALL"),
+                    maxn=args.get("max", 10),
+                    since=args.get("since"))
+                ok(anon)
             elif name == "bubble_shield_anonymize_text":
                 ok(_anonymise_text(args.get("text", "")))
             elif name == "bubble_shield_write":
@@ -1091,11 +1180,18 @@ def _handle(req: dict) -> None:
             # NER daemon is offline — fail-closed. No anonymized body, no raw PII.
             fail(str(e))
         except Exception as e:
+            # fail-CLOSED: the exception message may embed the raw input (mail body,
+            # file text, IBAN, name…) — a parser/lib error commonly quotes what it
+            # choked on. NEVER interpolate str(e) into the RETURNED tool text, or raw
+            # PII would leak into the model's context through this "safe" error path.
+            # Log the detail host-side (STDERR only) and return a FIXED message.
+            print(f"[bubble_shield] tool '{name}' failed: {e!r}", file=sys.stderr, flush=True)
             if name == "bubble_shield_write":
-                fail(f"⛔ Bubble Shield n'a pas pu écrire le document : {e}. "
-                     "Aucun fichier n'a été produit.")
+                fail("⛔ Bubble Shield n'a pas pu écrire le document. "
+                     "Aucun fichier n'a été produit. "
+                     "Le contenu brut n'est PAS renvoyé (sécurité).")
             else:
-                fail(f"⛔ Bubble Shield n'a pas pu anonymiser : {e}. "
+                fail("⛔ Échec de l'anonymisation. "
                      "Le contenu brut n'est PAS renvoyé (sécurité).")
     elif id_ is not None:
         _error(id_, -32601, f"method not found: {method}")

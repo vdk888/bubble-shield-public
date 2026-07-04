@@ -2,21 +2,41 @@
 {% block title %}Résultat — Bubble Shield{% endblock %}
 {% block content %}
 
-{# ── Verdict — 3-part, operator-friendly ──────────────────────────────────
-   Lead with the WIN (N identifiers protected). Then, calmly, the items to
-   glance at (low-confidence — usually form labels). True residual leaks (rare
-   now) get the only serious warning. This replaces the confusing binary
-   "DON'T SEND" that flagged the intentionally-kept advisor + form labels. #}
+{# ── Verdict — keyed off the engine's canonical verdict_state ──────────────
+   States (see engine.AnonymizationResult.verdict_state):
+     leak           → real PII still in clear (serious, red).
+     low_confidence → sub-threshold detection, worth a glance (amber review).
+     zero_detection → SUBSTANTIAL doc, NOTHING found. NOT green — "found nothing"
+                      often means a name was MISSED. Caution, human review needed.
+                      (Product-integrity fix 2026-07-02: this used to render green.)
+     nothing_to_do  → trivial input, no real prose → genuinely nothing to do.
+     masked_ok      → things WERE found and masked → the closest to safe, but
+                      framed as "revue conseillée", never an absolute guarantee. #}
 {% set has_review = to_review and to_review|length > 0 %}
 {% set has_leak = result.residual and result.residual|length > 0 %}
+{% if verdict_state == 'zero_detection' %}
+<div class="verdict verdict--caution">
+  <span class="verdict-mark">⚠️</span>
+  <div class="verdict-body">
+    <span class="verdict-text">
+      Aucune donnée identifiante détectée — cela ne garantit <strong>pas</strong> l'absence de PII.
+    </span>
+    <span class="verdict-meta">
+      Rien trouvé n'est pas rien à cacher&nbsp;: un nom ou une adresse a pu passer sous le radar. Relecture humaine requise avant envoi · tout reste local
+    </span>
+  </div>
+</div>
+{% else %}
 <div class="verdict {{ 'verdict--warn' if has_leak else ('verdict--review' if has_review else 'verdict--ok') }}">
-  <span class="verdict-mark">{{ '!' if has_leak else ('✓' if not has_review else '✓') }}</span>
+  <span class="verdict-mark">{{ '!' if has_leak else '✓' }}</span>
   <div class="verdict-body">
     <span class="verdict-text">
       {% if has_leak %}
         Donnée identifiante encore en clair — à corriger avant envoi.
+      {% elif verdict_state == 'nothing_to_do' %}
+        Aucune donnée identifiante détectée — rien à anonymiser.
       {% else %}
-        {{ n_confident }} identifiant{{ '' if n_confident == 1 else 's' }} protégé{{ '' if n_confident == 1 else 's' }} et remplacé{{ '' if n_confident == 1 else 's' }} par des jetons réversibles.
+        {{ n_confident }} identifiant{{ '' if n_confident == 1 else 's' }} protégé{{ '' if n_confident == 1 else 's' }} et remplacé{{ '' if n_confident == 1 else 's' }} par des jetons réversibles — revue conseillée.
       {% endif %}
     </span>
     <span class="verdict-meta">
@@ -24,6 +44,7 @@
     </span>
   </div>
 </div>
+{% endif %}
 
 {# ── #334 — Policy kept-identifying warning ─────────────────────────────────
    Shown when the active policy keeps one or more IDENTIFYING entity types.
@@ -92,7 +113,11 @@
     </tbody>
   </table>
   {% else %}
+  {% if verdict_state == 'zero_detection' %}
+  <p class="hint">Aucune entité détectée — mais un document de ce volume contient rarement zéro donnée identifiante. Une relecture humaine est recommandée avant envoi.</p>
+  {% else %}
   <p class="hint">Aucune entité détectée — rien à anonymiser.</p>
+  {% endif %}
   {% endif %}
 </section>
 
