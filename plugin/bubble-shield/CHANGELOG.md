@@ -5,6 +5,24 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.20.2 — 2026-07-05 — FEATURE: folder-listing discovery (Glob allow + bubble_shield_list)
+
+The agent can now discover *which* file to read inside a protected folder without
+being able to read any file's contents. Two coordinated changes:
+
+- **Glob is now allowed on protected folders (names only).** Previously Glob, Grep and
+  Read were blocked as one group on protected paths; Glob is now split out into its own
+  branch and permitted, because it returns only filenames — never file content. Grep,
+  Read and Bash stay blocked on protected paths (they can surface content), so no PII in
+  a file's *body* can leak through this path.
+- **New `bubble_shield_list(folder)` MCP tool.** Lists the filenames and subfolders in a
+  protected folder (non-recursive), with any PII in the *names themselves* masked through
+  the anonymiser before returning. It never returns file content, and it is fail-closed:
+  if the NER pipeline is down, the tool refuses rather than returning unmasked names.
+
+Together these let an agent answer "what's in this client's folder?" and pick the right
+document to run through `bubble_shield_read`, without ever seeing raw client data.
+
 ## 1.20.1 — 2026-07-05 — P0 SECURITY: close Cowork sandbox-mount-alias Bash exfil
 
 A red-team pass found a real PII-exfil path on Cowork: a Bash command referencing a

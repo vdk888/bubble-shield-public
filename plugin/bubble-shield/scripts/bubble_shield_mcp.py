@@ -90,6 +90,31 @@ TOOLS = [
         },
     },
     {
+        "name": "bubble_shield_list",
+        "description": (
+            "List the files and subfolders INSIDE a protected client folder so you "
+            "can DISCOVER what's there and pick the right file to work on — the plain "
+            "Read/Grep/Bash tools are blocked on protected folders, so use THIS to see "
+            "what a folder contains. Returns each entry's NAME, type (file/dir), and "
+            "for files the extension, inferred modality (pdf, scan, spreadsheet, …) and "
+            "byte size, so you can choose 'the PDF', 'the scan', or 'the newest'. "
+            "NON-recursive: lists only the immediate children (call again on a subfolder "
+            "to go deeper). File NAMES that may contain client PII are returned MASKED "
+            "with reversible ⟦…⟧ tokens (you see the structure/modality/date, not the "
+            "real name). NEVER returns file CONTENT — for that, use bubble_shield_read. "
+            "Fail-closed like bubble_shield_read: if the NER daemon is down it REFUSES "
+            "rather than leak raw filenames."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string",
+                           "description": "Absolute path to a protected folder (or a "
+                                          "subfolder of one) to list."}
+            },
+            "required": ["folder"],
+        },
+    },
+    {
         "name": "bubble_shield_anonymize_text",
         "description": (
             "Anonymise a block of text and return it with reversible ⟦…⟧ tokens. Use "
@@ -630,6 +655,179 @@ def _anonymise_file(path: str) -> str:
     return _anonymise_text(text, filename_basename=p.name)
 
 
+# ---- folder listing (bubble_shield_list) -----------------------------------
+# The sanctioned discovery path. The PreToolUse guard now ALLOWS the native Glob
+# on a protected folder (names only), but a dedicated MCP tool gives a reliable,
+# reversible listing with per-entry modality/size so the agent can pick "the PDF"
+# / "the scan" / "the newest" — WITHOUT ever reading file CONTENT.
+#
+# Design decisions (documented):
+#   - NON-RECURSIVE (shallow): we list only the immediate children of `folder`.
+#     Recursion could enumerate an arbitrarily deep tree (cost + noise) and leak
+#     structure the agent doesn't need to pick a file; the agent can list a
+#     subfolder explicitly by calling the tool again on it. Subdirs are marked
+#     with type="dir" so the agent knows what it can descend into.
+#   - Entry NAMES are masked through _anonymise_text (the SAME fail-closed masker
+#     as bubble_shield_read): a PII-bearing filename comes back tokenised, so the
+#     agent sees structure/modality/date, not the real name. If the NER daemon is
+#     down, _anonymise_text raises NERDownError and this whole call fails closed
+#     (isError, no raw filenames) — identical contract to bubble_shield_read.
+#   - A hard CAP (_LIST_MAX_ENTRIES) bounds a folder with thousands of files so
+#     the listing can't blow up; when hit, `truncated` is reported.
+
+_LIST_MAX_ENTRIES = 500  # cap so a huge folder can't produce an unbounded listing
+
+# Modality inference by extension — lets the agent reason about "the PDF" / "the
+# scan" / "the spreadsheet" from the masked listing alone.
+_MODALITY_BY_EXT = {
+    ".pdf": "pdf", ".docx": "document", ".doc": "document", ".odt": "document",
+    ".txt": "text", ".md": "text", ".rtf": "text",
+    ".csv": "table", ".tsv": "table", ".xlsx": "spreadsheet", ".xls": "spreadsheet",
+    ".json": "data", ".xml": "data", ".yaml": "data", ".yml": "data",
+    ".jpg": "image/scan", ".jpeg": "image/scan", ".png": "image/scan",
+    ".tif": "image/scan", ".tiff": "image/scan", ".gif": "image", ".webp": "image",
+    ".heic": "image/scan", ".bmp": "image/scan",
+    ".zip": "archive", ".tar": "archive", ".gz": "archive",
+}
+
+
+def _is_protected_folder(p: Path) -> bool:
+    """True if `p` is a protected folder. Mirrors the guard's two protection
+    mechanisms so bubble_shield_list can decide whether filename masking is
+    required: (1) an in-folder `.bubble-shield.json` marker on `p` or any ancestor;
+    (2) `p` sits under a global `protected_folders` entry. Best-effort and
+    fail-SAFE: on any error we return True (mask), never False — over-masking a
+    non-protected folder is harmless, under-masking a protected one leaks."""
+    try:
+        p = p.resolve()
+    except Exception:
+        return True
+    # (1) in-folder marker walk-up (Cowork-native)
+    try:
+        start = p if p.is_dir() else p.parent
+        for anc in [start, *start.parents]:
+            try:
+                if (anc / ".bubble-shield.json").is_file():
+                    return True
+            except OSError:
+                continue
+    except Exception:
+        return True
+    # (2) global protected_folders config
+    try:
+        for loc in (
+            os.environ.get("BUBBLE_SHIELD_GUARD_CONFIG"),
+            os.path.join(os.environ.get("CLAUDE_PROJECT_DIR", ""), ".bubble-shield.json"),
+            os.path.expanduser("~/.config/bubble_shield/bubble-shield.json"),
+            os.path.expanduser("~/.bubble-shield.json"),
+        ):
+            if not loc or not Path(loc).is_file():
+                continue
+            try:
+                cfg = json.loads(Path(loc).read_text(encoding="utf-8"))
+            except Exception:
+                # unreadable config → fail safe (treat as protected)
+                return True
+            for raw in cfg.get("protected_folders", []) or []:
+                try:
+                    prot = Path(os.path.expanduser(raw)).resolve()
+                except Exception:
+                    continue
+                try:
+                    p.relative_to(prot)
+                    return True
+                except ValueError:
+                    continue
+            break  # first config found wins (same order as the guard)
+    except Exception:
+        return True
+    return False
+
+
+def _list_folder(folder: str) -> str:
+    """List the immediate children of `folder` (NON-recursive). Returns a JSON
+    listing: for each entry its NAME (masked if the folder is protected), relative
+    path, type (file|dir), and for files the extension + inferred modality + byte
+    size. NEVER reads or returns file CONTENT.
+
+    Fail-CLOSED on masking: if the folder is protected and the NER daemon is down,
+    _anonymise_text raises NERDownError → the caller converts it to isError with no
+    raw filenames leaked (same contract as bubble_shield_read).
+
+    Non-protected folder: a plain (unmasked) listing is returned with
+    protected=false, so the tool never crashes when pointed outside a marked
+    folder — it's simply a normal directory listing there.
+    """
+    p = Path(os.path.expanduser(folder)).resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"no such folder: {p}")
+    if not p.is_dir():
+        raise NotADirectoryError(f"not a folder: {p}")
+
+    protected = _is_protected_folder(p)
+
+    # Enumerate immediate children (shallow). Skip the marker file itself.
+    raw_entries: list[os.DirEntry] = []
+    try:
+        for e in os.scandir(p):
+            if e.name == ".bubble-shield.json":
+                continue
+            raw_entries.append(e)
+    except OSError as ex:
+        raise OSError(f"cannot list folder: {ex}")
+    raw_entries.sort(key=lambda e: e.name.lower())
+
+    truncated = len(raw_entries) > _LIST_MAX_ENTRIES
+    raw_entries = raw_entries[:_LIST_MAX_ENTRIES]
+
+    entries: list[dict] = []
+    for e in raw_entries:
+        try:
+            is_dir = e.is_dir(follow_symlinks=False)
+        except OSError:
+            is_dir = False
+        is_symlink = False
+        try:
+            is_symlink = e.is_symlink()
+        except OSError:
+            pass
+        item: dict = {"name": e.name, "type": "dir" if is_dir else "file"}
+        if is_symlink:
+            item["symlink"] = True
+        if not is_dir:
+            ext = os.path.splitext(e.name)[1].lower()
+            item["ext"] = ext
+            item["modality"] = _MODALITY_BY_EXT.get(ext, "other")
+            try:
+                item["size"] = e.stat(follow_symlinks=False).st_size
+            except OSError:
+                item["size"] = None
+        entries.append(item)
+
+    # Mask entry NAMES if the folder is protected. We run the WHOLE set of names
+    # through _anonymise_text in one call (so tokens stay consistent) and map each
+    # masked name back onto its entry. If the daemon is down, _anonymise_text
+    # raises NERDownError → fail-closed (no raw names ever returned).
+    if protected and entries:
+        joined = "\n".join(it["name"] for it in entries)
+        masked = _anonymise_text(joined)  # raises NERDownError when daemon down
+        # _anonymise_text may append a verdict/kept-policy NOTE after a blank line;
+        # take only the first len(entries) lines (the masked names, in order).
+        masked_lines = masked.split("\n")[:len(entries)]
+        for it, ml in zip(entries, masked_lines):
+            it["name"] = ml
+
+    result = {
+        "folder": str(p),
+        "protected": protected,
+        "recursive": False,
+        "count": len(entries),
+        "truncated": truncated,
+        "entries": entries,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _anonymise_mail(query: str = "ALL", maxn: int = 10, since: str = None) -> str:
     """Fetch mail over IMAP and return every message ANONYMISED, fail-CLOSED.
 
@@ -1034,6 +1232,8 @@ def _handle(req: dict) -> None:
                 if _OCR_TAG in anon[:30]:
                     anon = _OCR_QUALITY_NOTE + anon
                 ok(anon)
+            elif name == "bubble_shield_list":
+                ok(_list_folder(args.get("folder", "")))
             elif name == "bubble_shield_mail_read":
                 anon = _anonymise_mail(
                     query=args.get("query", "ALL"),

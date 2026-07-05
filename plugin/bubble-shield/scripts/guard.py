@@ -271,9 +271,22 @@ def _candidate_paths(tool_name: str, tool_input: dict, cwd: str) -> list[Path]:
 
     if tool_name in ("Read", "Edit", "Write", "NotebookEdit"):
         add(tool_input.get("file_path") or tool_input.get("notebook_path"))
-    elif tool_name in ("Glob", "Grep"):
-        # `path` is the search root; the pattern itself may also be a path-ish glob
+    elif tool_name == "Grep":
+        # Grep returns file CONTENT (matching lines) → a content-leak vector, so it
+        # MUST stay blocked on a protected folder. `path` is its search root; gate it.
         add(tool_input.get("path"))
+    elif tool_name == "Glob":
+        # Glob returns NAMES ONLY (matching paths) — a listing, never any file
+        # CONTENT. Listing filenames is the sanctioned discovery capability (Joris
+        # approved: the agent may SEE folder/file NAMES so it can find the file to
+        # work on; filenames may be PII but that's an accepted, deferred decision).
+        # So Glob is SAFE to allow even on a protected folder: emit NO candidate,
+        # which means decide_block is never consulted and the call falls through to
+        # _allow(). This is the ONE native tool freed here — Read/Edit/Write/
+        # NotebookEdit stay blocked (content), Grep stays blocked (content), and the
+        # Bash branch is untouched (unblocking ls/cat/find there would need
+        # verb-parsing and reopen the v1.20.1 content-exfil hole). See CHANGE 1.
+        pass
     elif tool_name.startswith("mcp__"):
         # FIX 3 (P0-SEC-3): the hooks.json matcher runs the guard for EVERY mcp__*
         # tool, but historically only the 6 native tools above yielded candidates,
