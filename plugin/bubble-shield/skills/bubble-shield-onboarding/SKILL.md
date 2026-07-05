@@ -154,93 +154,99 @@ Once you have the path:
 
 ---
 
-### Étape 5 — Démo sur le DCC (deux temps)
+### Étape 5 — Démo : une VRAIE tâche sur un VRAI fichier (deux temps)
 
-> « **Étape 3/3 — La démo.** Je vais maintenant lire un vrai document
-> de démonstration. Regardez bien : vous allez voir que l'IA ne reçoit
-> jamais le nom du client — et pourtant elle produit le document final
-> avec le vrai nom. »
+> « **Étape 3/3 — La démo.** Au lieu d'un exemple tout fait, faisons-le
+> sur un de VOS vrais fichiers, avec une vraie tâche. Vous allez voir
+> deux versions du résultat côte à côte : celle que MOI j'ai vue
+> (anonymisée, avec des étiquettes) — et la vraie (avec les noms
+> réels), produite sur votre Mac sans jamais passer par moi. »
 
-The demo file is:
-`DCC - Monsieur Jean DUPONT - 2026-02-19.pdf` (exemple — remplacez par votre vrai fichier client)
-(inside the DUPONT folder the user just marked in Étape 4).
+**Elicit — laissez le client choisir SA tâche et SON fichier :**
 
-#### Temps A — « L'IA ne voit pas le nom »
+```
+Sur quel fichier de ce dossier, et pour quelle tâche ? Par exemple :
+« résume-moi le DCC de M. X », « rédige la lettre de synthèse à partir
+de ce profil », « extrais les points clés de cet avis d'imposition ».
+```
 
-Call **`bubble_shield_read`** on the DCC file path.
+- Le client nomme **un fichier réel** (dans le dossier protégé marqué à
+  l'Étape 4) et **une tâche réelle** (résumé, lettre, extraction, note…).
+- S'il ne sait pas quoi choisir, proposez : « résumez-moi ce document et
+  rédigez-en une courte note de synthèse » sur le fichier de son choix.
+- Notez le chemin du fichier = `<FICHIER>`, la tâche = `<TÂCHE>`.
+
+#### Temps A — « L'IA fait la tâche en aveugle » (résultat ANONYMISÉ, montré en session)
+
+Call **`bubble_shield_read`** on `<FICHIER>`.
 
 The tool returns the document content with all PII replaced by tokens
-(e.g. `⟦NOM_0001⟧`, `⟦ADRESSE_0001⟧`, `⟦DATE_NAISSANCE_0001⟧`).
+(`⟦NOM_0001⟧`, `⟦ADRESSE_0001⟧`, `⟦IBAN_0001⟧`, `⟦DATE_NAISSANCE_0001⟧`…).
 
-**Work only on what the tool returned** — do NOT use the filename as
-a source of client identity, and do NOT paste or mention any real
-personal data from the file. The AI at this point sees only tokens.
+**Work ONLY on what the tool returned.** Do NOT use the filename as a
+source of identity, do NOT paste or infer any real personal value. You
+see only tokens.
 
-Produce a 3–5 sentence summary of the DCC *using only the tokenised
-version* returned by the tool. Example phrasing:
+Now **actually perform `<TÂCHE>`** using only the tokenised version —
+a real result, not a canned one. Keep every PII in token form. Then
+**show that token-form result to the client in the session**, framed:
 
-> « Voici le résumé du document : ⟦NOM_0001⟧ est ⟦PROFESSION_0001⟧,
-> né(e) le ⟦DATE_NAISSANCE_0001⟧, domicilié(e) à ⟦ADRESSE_0001⟧.
-> L'entretien du ⟦DATE_0001⟧ porte sur… »
-
-Then say to the user:
-> « Vous voyez ? Je viens de lire et résumer un vrai document — mais je
-> n'ai jamais reçu un seul nom réel. Tout ce que j'ai vu, ce sont des
-> étiquettes comme ⟦NOM_0001⟧. Les vraies valeurs sont restées dans le
-> coffre sur votre Mac. »
+> « Voici le résultat de votre tâche, tel que MOI je l'ai produit —
+> regardez, je n'ai jamais vu un seul nom réel : partout où il y avait
+> une identité, je n'ai eu que des étiquettes (⟦NOM_0001⟧, ⟦IBAN_0001⟧…).
+> **C'est la version anonymisée — la preuve que ça a marché sans exposer
+> vos données.** »
 
 **Elicit** before Temps B:
 
 ```
-[Voir la magie — produire le vrai document]   [Arrêter ici]
+[Voir la vraie version — restaurée sur mon Mac]   [Arrêter ici]
 ```
 
 - `[Arrêter ici]` → skip to Étape 6.
-- `[Voir la magie — produire le vrai document]` → continue.
+- `[Voir la vraie version…]` → continue.
 
-#### Temps B — « Mais elle produit le vrai document »
+#### Temps B — « Votre Mac produit la vraie version » (résultat EN CLAIR, dans un fichier)
 
-Still using only tokens, draft a short (3–5 lines) cover note. Example
-(all PII in token form):
-
-```
-Paris, le ⟦DATE_0001⟧
-
-Objet : Synthèse de l'entretien de conseil — ⟦NOM_0001⟧
-
-Madame, Monsieur,
-
-Suite à notre entretien du ⟦DATE_0001⟧, nous vous confirmons
-avoir enregistré votre situation patrimoniale. Votre conseiller
-reste à votre disposition.
-
-Cordialement,
-Votre conseiller
-```
-
-> Signature : utilisez « Votre conseiller » (ou le nom du cabinet du client
-> s'il est connu, depuis `deployment_allowlist.json`). Ne signez JAMAIS
-> « Bubble Invest » dans une démo client — c'est notre société, pas la leur.
+Take the **exact token-form result from Temps A** (same text, PII still
+in `⟦…⟧` form — do NOT re-draft, do NOT try to fill in real values
+yourself; you don't have them and never will).
 
 Call **`bubble_shield_write`** with:
-- `path` = a file in the `clean/` sub-folder of the DUPONT folder,
-  e.g. `<dossier>/clean/note-de-synthese-demo.pdf` (or `.txt`).
-- `content` = the token-form draft above.
+- `path` = a file in the `clean/` sub-folder of the marked folder,
+  e.g. `<dossier>/clean/resultat-demo.txt` (or `.pdf`).
+- `content` = the token-form result from Temps A, verbatim.
 
-The tool restores the real values locally and writes the file to disk.
-It returns ONLY a success confirmation — the real content is never
-shown in the conversation.
+This is the "script that reuses the tokens to decrypt": Bubble Shield
+replaces every `⟦…⟧` token with its real value **from the local vault
+on the Mac**, writes the finished file to disk, and returns ONLY a
+success confirmation + a count of restored values — **never the clear
+content**. The real names never enter this conversation.
 
-Then say:
-> « ✓ Le fichier est écrit sur votre disque. Ouvrez-le :
-> `<dossier>/clean/note-de-synthese-demo.pdf` — vous verrez le vrai
-> nom du client en clair. »
+Then say (make the side-by-side explicit — this is the punchline):
 
-Punchline (say this explicitly):
-> « C'est ça la magie de Bubble Shield : j'ai rédigé ce document
-> entièrement en aveugle — je n'ai jamais vu le nom. Seul votre Mac
-> connaît l'identité. L'IA a travaillé sur des étiquettes ; votre
-> ordinateur a remis les vrais noms à la fin. »
+> « ✓ Fait. Ouvrez ce fichier sur votre Mac :
+> `<dossier>/clean/resultat-demo.txt`
+>
+> Comparez les deux :
+> • **Ce que j'ai vu, moi** (ci-dessus, en session) → des étiquettes.
+> • **Ce que votre Mac a produit** (le fichier) → le vrai résultat, avec
+>   les vrais noms.
+>
+> **Même tâche, même résultat — mais l'identité de votre client n'a
+> jamais quitté votre ordinateur.** L'IA a travaillé sur des étiquettes ;
+> c'est votre Mac, à la toute fin et en local, qui a remis les vraies
+> valeurs. Rien en clair n'est passé par l'IA ni par Cowork. »
+
+> Signature (si la tâche produit une lettre) : « Votre conseiller » ou le
+> nom du cabinet du client depuis `deployment_allowlist.json`. Ne signez
+> JAMAIS « Bubble Invest » dans une démo client — c'est notre société.
+
+⚠️ **Ne trichez pas la démo.** Ne devinez pas, ne re-tapez pas, ne
+« complétez » jamais une vraie valeur à la place d'un token, même si le
+nom semble évident d'après le nom de fichier ou le contexte. Toute la
+preuve repose sur le fait que le résultat en session est 100 % en
+étiquettes et que seul `bubble_shield_write` (côté Mac) connaît le clair.
 
 ---
 
@@ -250,7 +256,7 @@ Punchline (say this explicitly):
 > ✓ GLiNER + OpenAI Privacy Filter (détection avancée) installés
 > ✓ OCR (PDF scannés) installé
 > ✓ Dossier protégé marqué
-> ✓ Démo complète — l'IA travaille en aveugle, le Mac remet les vrais noms
+> ✓ Démo complète — vraie tâche sur un vrai fichier : résultat anonymisé (vu par l'IA) vs vrai résultat (produit par votre Mac)
 >
 > Que voulez-vous faire maintenant ? »
 

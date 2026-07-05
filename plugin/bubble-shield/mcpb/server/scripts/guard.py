@@ -535,6 +535,76 @@ def _expand_braces(pattern: str) -> list[str]:
     return out
 
 
+# --- Cowork sandbox-mount-alias handling (FIX B / FIX C) -----------------------
+# Cowork runs the agent in a sandbox VM and mounts each folder the user connected
+# to the session under a DYNAMIC per-session alias:
+#     /sessions/<random-session-name>/mnt/<subpath>
+# e.g. `/sessions/pensive-dreamy-goldberg/mnt/clients/note.txt`. The <session-name>
+# is random per session (cannot be hardcoded). The HOST guard matches command
+# strings against REAL Mac paths, so an alias token like the above resolves to no
+# marker on the Mac (`/sessions/...` doesn't exist there) and the legacy needle
+# scan (Mac-path needles only) never matches the alias prefix → the command was
+# ALLOWED and PII leaked in clear. This is a mount-NAMESPACE mismatch, distinct
+# from the cwd-exfil path-EXTRACTION fix.
+#
+# The mount exposes a protected folder's CONTENTS under `mnt/<basename>/…`, so a
+# mount-relative path whose first segment is a protected folder's basename is
+# INSIDE that protected folder → DENY (Fix B). Any *other* `mnt/<X>` token we
+# can't classify is failed CLOSED (Fix C), EXCEPT the known Cowork infra mounts
+# below, which are the agent's own workspace and must stay usable.
+_SESSION_MNT_RE = re.compile(r"^/sessions/[^/]+/mnt/(?P<rest>.+)$")
+
+# Cowork infra mounts observed under /sessions/<name>/mnt/ in the live probe:
+#   .claude, .remote-plugins, outputs, uploads  → infrastructure (agent's own
+#     workspace: its config, plugins, work outputs, and user uploads).
+#   clients (in the probe) → the USER-SELECTED protected folder (Fix B denies it
+#     via its basename anyway; it is NOT infra).
+# We ALLOW these infra mounts so the fail-closed backstop (Fix C) doesn't brick
+# the agent's own workspace, and fail-closed on every OTHER unknown `mnt/<X>`
+# (we cannot prove such a subtree is not a protected user folder → err toward
+# blocking within the mnt/ mount tree, which is exactly where user folders mount).
+_COWORK_INFRA_MNT = ("outputs", "uploads", ".claude", ".remote-plugins")
+
+
+def _iter_session_mnt_tokens(command: str) -> "list[tuple[str, str]]":
+    """Extract `/sessions/<name>/mnt/<rest>` tokens from a shell command.
+
+    Returns a list of (full_token, rest) pairs where `rest` is the mount-relative
+    path (e.g. "clients/clean/note.txt"). Reuses the SAME tokenisation as
+    `_extract_command_paths`: absolute-token regex, relative-token regex, and a
+    quoted-span sweep — so quoted/escaped alias paths are caught. These tokens
+    were previously IGNORED downstream (they resolve to no marker on the Mac);
+    here we classify them explicitly against the mount namespace instead.
+    """
+    if not command:
+        return []
+    raw_candidates: list[str] = [m.group(1) for m in _ABS_TOKEN_RE.finditer(command)]
+    raw_candidates += [m.group(1) for m in _REL_TOKEN_RE.finditer(command)]
+    for q in re.findall(r"'([^']*)'|\"([^\"]*)\"", command):
+        span = q[0] or q[1]
+        if span and ("/" in span):
+            raw_candidates.append(span)
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in raw_candidates:
+        # Un-escape backslash-escaped chars (e.g. "/sessions/x/mnt/cl\ ients/…").
+        tok = re.sub(r"\\(.)", r"\1", raw).strip()
+        m = _SESSION_MNT_RE.match(tok)
+        if not m:
+            continue
+        rest = m.group("rest")  # mount-relative path; normalised at use site
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append((tok, rest))
+    return out
+
+
+def _mnt_first_segment(rest: str) -> str:
+    """First path segment of a mount-relative path ("clients/x/y" → "clients")."""
+    return rest.strip("/").split("/", 1)[0] if rest.strip("/") else ""
+
+
 def main() -> None:
     raw = sys.stdin.read()
     try:
@@ -697,6 +767,82 @@ def _main(raw: str) -> None:
                 continue
             _deny(f"{message}\n[Bubble Shield guard: commande shell touchant {p}]")
             return
+
+        # --- FIX B + FIX C: Cowork sandbox-mount-alias namespace -------------------
+        # The PRIMARY walk-up above never fires for `/sessions/<name>/mnt/…` tokens:
+        # that namespace doesn't exist on the Mac, so `decide_block` finds no marker
+        # and ALLOWS — the confirmed live leak. Here we classify those alias tokens
+        # explicitly against the mount namespace instead of the host filesystem.
+        #
+        # Build the set of protected-folder BASENAMES reachable this session:
+        #   - global `protected_folders` config entries (resolved + raw), and
+        #   - marker-carrying roots discovered near the session cwd.
+        # The mount exposes each such folder's contents under `mnt/<basename>/…`.
+        protected_basenames: set[str] = set()
+        for prot in protected:
+            if prot.name:
+                protected_basenames.add(prot.name)
+        for raw in protected_raw:
+            bn = os.path.basename(str(raw).rstrip("/"))
+            if bn:
+                protected_basenames.add(bn)
+        marker_roots = _discover_marker_roots(cwd)
+        for mroot in marker_roots:
+            if mroot.name:
+                protected_basenames.add(mroot.name)
+        # NOTE: Fix C below is now UNCONDITIONAL on the mnt/ namespace (no
+        # `any_protection` gate). The host cannot see markers on the sandbox-FS
+        # inode, so it must fail closed on every non-infra mount subtree even when
+        # no protected_folders/markers are known to the host. See Fix C comment.
+
+        for tok, rest in _iter_session_mnt_tokens(command):
+            first = _mnt_first_segment(rest)   # e.g. "clients" from "clients/x/y"
+            if not first:
+                continue
+            # FIX B — the alias's first mnt segment IS a protected folder's
+            # basename → this token refers INTO that protected folder → DENY.
+            # (`rest == basename` is the dir itself; `basename + "/"` is inside it —
+            # both are captured by comparing the first segment.)
+            if first in protected_basenames:
+                _deny(
+                    f"{g_message}\n[Bubble Shield guard: commande shell touchant un "
+                    f"dossier protégé via le montage sandbox Cowork {tok}]")
+                return
+            # FIX C — UNCONDITIONAL fail-closed backstop on the mnt/ mount tree.
+            # Any `/sessions/*/mnt/<X>` whose first segment is NOT a known Cowork
+            # infra mount is DENIED — regardless of `any_protection`, regardless of
+            # whether ANY protected_folders/markers are known to the host.
+            #
+            # WHY UNCONDITIONAL (the residual-leak hardening): in a real Cowork
+            # session there is NO host global config (protected_folders EMPTY) and
+            # the session cwd is a HOST outputs path (e.g. `.../local_<id>/outputs`),
+            # NOT inside the marked folder — so `protected` is empty AND
+            # `_discover_marker_roots(cwd)` finds nothing → `any_protection` is
+            # FALSE and the OLD gated Fix C stayed inert while `cat
+            # /sessions/foo/mnt/clients/secret.txt` LEAKED. The deeper reason the
+            # host guard cannot do better: any `mnt/<user-folder>` is a folder the
+            # user connected to THIS session, and its `.bubble-shield.json` marker
+            # lives on the sandbox-FS inode — structurally UNREACHABLE from the Mac
+            # path namespace (there is no `/sessions/...` on the host). The host can
+            # never see whether a given `mnt/<X>` carries a marker. Therefore the
+            # only safe posture for a privacy tool is: block Bash on every non-infra
+            # mount subtree by default. Better to block a legitimate Bash op on a
+            # user mount (the user can use `bubble_shield_read`/Read, or re-run the
+            # command with the REAL Mac path, which resolves the marker via the
+            # PRIMARY walk-up) than to leak PII in clear.
+            #
+            # Known infra mounts (outputs/uploads/.claude/.remote-plugins) are the
+            # agent's OWN workspace and stay allowed so we don't brick it. Non-`mnt/`
+            # paths (`/sessions/<name>/outputs/…`, `/tmp/…`, any host path) are NOT
+            # touched here. And a GLOBAL `block_bash:false` is the operator's
+            # deliberate opt-out: it skips the whole Bash branch upstream
+            # (`if not block_bash: _allow()`), so Fix C never runs in that case.
+            if first not in _COWORK_INFRA_MNT:
+                _deny(
+                    f"{g_message}\n[Bubble Shield guard: chemin de montage sandbox "
+                    f"non-infra ({tok}) — le host ne peut PAS voir le marqueur sur "
+                    "l'inode sandbox, bloqué par sécurité (fail-closed).]")
+                return
 
         # --- DEFENSE-IN-DEPTH: the legacy cwd-anchored needle scan. Cheap, and it
         # still catches the cases the path extractor can't: RELATIVE-path commands

@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "bubble_shield",
   "display_name": "Bubble Shield",
-  "version": "1.20.0",
+  "version": "1.20.1",
   "description": "Fail-closed local PII anonymiser — reads/anonymises client data into reversible tokens that never leave the machine.",
   "long_description": "Bubble Shield's local stdio MCP server, packaged as an MCPB so it can ship inside the bubble-shield plugin (plugins may not declare bare stdio servers). Exposes bubble_shield_read / bubble_shield_anonymize_text / bubble_shield_write / bubble_shield_setup_ml / bubble_shield_enable_global plus custom-field tools. The engine is pure-python and vendored; the optional ML accuracy pack downloads separately on demand and is lazy-imported.",
   "author": {
@@ -45,12 +45,20 @@
       "description": "Anonymise a block of text (non-file PII)."
     },
     {
+      "name": "bubble_shield_mail_read",
+      "description": "Read e-mail anonymised — fetches over IMAP host-side and returns reversible tokens (fail-closed)."
+    },
+    {
       "name": "bubble_shield_write",
       "description": "Write a document, restoring real values from tokens locally (never shown)."
     },
     {
       "name": "bubble_shield_setup_ml",
       "description": "Install/check the optional on-device ML accuracy pack."
+    },
+    {
+      "name": "bubble_shield_status",
+      "description": "Report NER (GLiNER ML) daemon status and liveness diagnostics before processing sensitive documents."
     },
     {
       "name": "bubble_shield_setup_ocr",

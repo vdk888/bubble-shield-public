@@ -498,7 +498,11 @@ def encrypt_vault_file(path: str | Path, passphrase: str) -> bool:
         return False
     v = Vault.from_dict(d)
     tmp = p.with_suffix(p.suffix + ".enc.tmp")
-    v.save_encrypted(tmp, passphrase)
+    try:
+        v.save_encrypted(tmp, passphrase)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     # verify round-trip before we overwrite the only copy of the PII map
     check = Vault.load_encrypted(tmp, passphrase)
     if check.to_value != v.to_value or check.to_token != v.to_token:

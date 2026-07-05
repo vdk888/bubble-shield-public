@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.20.1
+
+- **P0 SECURITY — Cowork sandbox-mount-alias Bash exfil closed.** In a Cowork
+  session the guard runs host-side and matches real Mac paths, but the sandbox
+  mounts each connected folder under a dynamic alias `/sessions/<name>/mnt/<X>/…`.
+  A shell command using that alias path bypassed the marker walk-up and could read
+  a protected file in clear. The guard now DENIES any `/sessions/*/mnt/<X>` token
+  fail-closed (except the known infra mounts `outputs`/`uploads`/`.claude`/
+  `.remote-plugins`), regardless of config/marker state — because the host cannot
+  see a marker on the sandbox filesystem.
+- **Manifest completeness** — the MCPB manifest now advertises `bubble_shield_mail_read`
+  and `bubble_shield_status` (both were served but not listed).
+- **Onboarding demo** — the first-run demo now runs a real, client-chosen task on a
+  real file, showing the anonymized result in-session and the in-clear result written
+  locally to disk (never re-entering the session).
+
 ## 1.18.20
 
 > Assumes PR #24 (1.18.19, `verdict_state` honesty fix) merges first. If #24

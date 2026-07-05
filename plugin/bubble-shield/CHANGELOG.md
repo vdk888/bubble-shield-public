@@ -5,6 +5,26 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.20.1 — 2026-07-05 — P0 SECURITY: close Cowork sandbox-mount-alias Bash exfil
+
+A red-team pass found a real PII-exfil path on Cowork: a Bash command referencing a
+sandbox mount alias under `/sessions/*/mnt/<...>` could reach protected client data
+without going through the anonymiser, because the guard's mount-namespace check was
+not unconditional. **Fixed, fail-closed:** the guard now DENIES any
+`/sessions/*/mnt/<non-infra>` token — only the known infra mount tokens are allowed,
+everything else is blocked by default (Fix C is now unconditional; new
+`_COWORK_INFRA_MNT` allowlist gate). A leaked reference in the original report was a
+genuine client name; this release is the reason it can no longer escape.
+
+**Also in this release (the re-pack is the whole point):**
+- **Re-packed MCPB.** The shipped stdio server (`mcpb/bubble-shield.mcpb`) bundles a
+  copy of `scripts/`; a prior release did not re-pack, so a client kept running stale
+  guard code. This release re-syncs `scripts/` into `mcpb/server/` and re-packs the
+  `.mcpb`, so the fix actually reaches the shipped server.
+- **Manifest** now exposes the `mail_read` / `status` tools in the MCPB manifest.
+- **Onboarding demo reworked:** the demo now runs a real client-chosen task and shows
+  the anonymized-vs-clear output side-by-side, instead of a canned sample.
+
 ## 1.20.0 — 2026-07-02 — FEATURE: built-in FR tax/admin recognizers (avis d'impôt / KYC leak fix #319)
 
 A fresh-install client is now protected on avis d'impôt / KYC documents WITHOUT
