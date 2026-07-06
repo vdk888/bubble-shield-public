@@ -31,7 +31,7 @@ therefore live host-side and are read by THIS module, never returned to the mode
     read a world/group-readable creds file (fail-closed on a mis-permissioned secret).
   - The app-password NEVER leaves this module: it is passed straight to
     imaplib.login() and is never logged, never returned to the caller, never put in
-    an error message. fetch_mail() returns only (uid, from, subject, body) tuples.
+    an error message. fetch_mail() returns only (from, subject, body) tuples.
 
 Phase 1 keeps the setup minimal: the operator populates mail.json out-of-band (the
 docstring / README documents it). A future `bubble_shield_mail_setup` MCP tool can
@@ -278,21 +278,12 @@ def parse_message(raw_bytes: bytes) -> tuple[str, str, str]:
 
 def fetch_mail(query: str = "ALL", maxn: int = 10, since: str | None = None,
                creds: dict | None = None) -> list[tuple[str, str, str, str]]:
-    """Fetch up to `maxn` messages over IMAP and return raw (uid, from, subject, body).
+    """Fetch up to `maxn` messages over IMAP and return raw (from, subject, body).
 
     NOTE: the returned bodies are RAW and MUST be routed through the fail-closed
     `_anonymise_text` by the caller before the model sees them — this function
     performs NO anonymisation. It exists so Bubble Shield OWNS the read; the raw
     body never becomes a tool result on its own.
-
-    The `uid` is the Gmail/IMAP UID (a mailbox-local integer, decoded to a str). It
-    is FETCH-STABLE and lives in the SAME UID space that apply_labels() mutates via
-    ``M.uid("STORE", uid, …)`` — so the uid surfaced by the read can be passed
-    straight to the apply path to act on the SAME message. We use UID SEARCH + UID
-    FETCH (never bare SEARCH/FETCH, whose sequence numbers SHIFT as the mailbox
-    changes and would target the WRONG message when later fed to a UID STORE). The
-    uid is NOT PII (a mailbox-local counter), so the caller may surface it in clear;
-    only From/Subject/body ever carry PII and must be anonymised.
 
     Args:
       query: IMAP SEARCH criterion (UNSEEN, ALL, SEEN, 'FROM "x@y"', …).
@@ -315,15 +306,15 @@ def fetch_mail(query: str = "ALL", maxn: int = 10, since: str | None = None,
         if since:
             since = _validate_query(since)
             criteria = ["SINCE", since, query] if query != "ALL" else ["SINCE", since]
-        # UID SEARCH → returns UIDs (fetch-stable, same UID space apply's STORE uses),
-        # NOT sequence numbers (which shift as the mailbox changes → wrong-message bug).
+        # UID SEARCH/FETCH (not sequence numbers): the UID space is stable and is
+        # the SAME identifier apply's UID STORE targets — so the uid we surface can be
+        # passed straight to bubble_shield_mail_apply.
         typ, data = M.uid("SEARCH", None, *criteria)
         if typ != "OK" or not data or not data[0]:
             return []
         uids = data[0].split()[-maxn:]
         out: list[tuple[str, str, str, str]] = []
         for u in uids:
-            # UID FETCH by the same UID we'll later STORE against.
             typ, d = M.uid("FETCH", u, "(RFC822)")
             if typ != "OK" or not d or not isinstance(d[0], tuple):
                 continue
@@ -387,22 +378,66 @@ def _journal(uid: str, action: str, labels) -> None:
         print(f"[bubble_shield_mail] journal write failed: {e!r}", file=sys.stderr, flush=True)
 
 
-def _imap_label_arg(labels: list[str]) -> str:
-    """Render a list of Gmail labels as the parenthesised X-GM-LABELS argument.
+def _mutf7_encode(s: str) -> bytes:
+    """Encode a str to IMAP modified UTF-7 (RFC 3501 §5.1.3) bytes.
+
+    ASCII printable passes through; '&' → '&-'; runs of non-ASCII → '&<base64(UTF-16BE)>-'
+    with base64 '/' replaced by ','. Used for Gmail X-GM-LABELS values that contain
+    emoji/accents (a raw str there triggers imaplib's ascii encode → UnicodeEncodeError,
+    which failed mail_apply 0/20 in a live Cowork test against real Gmail).
+
+    Deterministic: the same input always yields the same bytes, so an add and a later
+    remove of the SAME label produce IDENTICAL encoded bytes — Gmail matches on removal.
+    """
+    import base64
+    res = bytearray()
+    buf = ""
+
+    def flush():
+        nonlocal buf
+        if buf:
+            b64 = base64.b64encode(buf.encode("utf-16-be")).decode("ascii").rstrip("=").replace("/", ",")
+            res.extend(("&" + b64 + "-").encode("ascii"))
+            buf = ""
+
+    for ch in s:
+        o = ord(ch)
+        if 0x20 <= o <= 0x7e:
+            flush()
+            res.extend(b"&-" if ch == "&" else ch.encode("ascii"))
+        else:
+            buf += ch
+    flush()
+    return bytes(res)
+
+
+def _imap_label_arg(labels: list[str]) -> bytes:
+    """Render a list of Gmail labels as the parenthesised X-GM-LABELS argument, as BYTES.
 
     CRITICAL Gmail-IMAP gotcha: the label list MUST be wrapped in parens `(...)`.
     A label that contains a space (e.g. a user label "🔴 Clients") must be quoted so
     the space is not read as a label separator; Gmail's system flags like \\Inbox
     are backslash-atoms and are NOT quoted.
+
+    Non-ASCII gotcha: imaplib encodes str command args as ASCII, so a label carrying an
+    emoji (🔴 U+1F534) or accent (Système) raises UnicodeEncodeError. Per RFC 3501
+    §5.1.3, IMAP mailbox/label names carrying non-ASCII MUST be modified-UTF-7 encoded.
+    We therefore return BYTES: only the label TEXT of a user label is mutf7-encoded; the
+    surrounding parens/quotes/spaces and the backslash-atom system flags stay ASCII.
+    So ["🔴 Clients"] → b'("&2D3dNA- Clients")', ["\\Inbox"] → b'(\\Inbox)',
+    ["Systeme"] → b'(Systeme)'. imaplib sends a bytes arg literally.
     """
-    parts = []
+    parts: list[bytes] = []
     for lab in labels:
         lab = str(lab)
         if lab.startswith("\\"):
-            parts.append(lab)              # system flag atom, e.g. \Inbox — never quote
+            parts.append(lab.encode("ascii"))   # system flag atom, e.g. \Inbox — never quote
         else:
-            parts.append('"' + lab.replace('"', '\\"') + '"')  # user label — quote (spaces/emoji safe)
-    return "(" + " ".join(parts) + ")"
+            # user label — quote (spaces/emoji safe); the TEXT is mutf7-encoded, the
+            # surrounding quotes stay ASCII. Preserve the existing quote-escaping of ".
+            body = _mutf7_encode(lab.replace('"', '\\"'))
+            parts.append(b'"' + body + b'"')
+    return b"(" + b" ".join(parts) + b")"
 
 
 def apply_labels(msg_uid, add_labels: list[str] | None = None,
@@ -440,6 +475,10 @@ def apply_labels(msg_uid, add_labels: list[str] | None = None,
         M.select(creds.get("mailbox", "INBOX"), readonly=False)  # mutation: readonly=False
         # SEPARATE store commands — never combine add + remove (or spaced + \Inbox)
         # in one STORE (Gmail-IMAP gotcha).
+        # _imap_label_arg returns BYTES (mutf7-encoded label text) — imaplib sends a
+        # bytes arg literally; the "+X-GM-LABELS"/"-X-GM-LABELS" word stays a str
+        # (imaplib handles a mixed str-word + bytes-arg command fine). Passing a raw str
+        # here would ascii-encode and raise UnicodeEncodeError on emoji/accented labels.
         if add_labels:
             typ, resp = M.uid("STORE", uid, "+X-GM-LABELS", _imap_label_arg(add_labels))
             if typ != "OK":
@@ -485,8 +524,63 @@ def build_reply_draft(to_addr: str, subject: str, body_text: str,
     return msg.as_bytes(policy=email.policy.SMTP)
 
 
+def _find_drafts_mailbox(M) -> str | None:
+    """Return the DRAFTS mailbox NAME by its IMAP \\Drafts special-use flag, or None.
+
+    The Gmail Drafts folder is LOCALIZED: on a French account M.list() yields
+    `(\\Drafts \\HasNoChildren) "/" "[Gmail]/Brouillons"` — the name is "Brouillons",
+    not "Drafts". Hardcoding the English "[Gmail]/Drafts" makes APPEND fail with
+    `NO [TRYCREATE] Folder doesn't exist` on every non-English Gmail (confirmed live).
+
+    So we DISCOVER the folder by its special-use flag \\Drafts (RFC 6154) instead of
+    by name: scan M.list(), find the line whose flag list contains \\Drafts
+    (case-insensitive), and return the trailing mailbox name.
+
+    The returned name is passed VERBATIM to M.append — the wire form M.list() gave us
+    (it may itself be IMAP modified-UTF-7 encoded for non-ASCII names). We do NOT
+    decode/re-encode it: append wants the SAME bytes list returned.
+    """
+    try:
+        typ, data = M.list()
+    except Exception:
+        return None
+    if typ != "OK" or not data:
+        return None
+    for raw in data:
+        line = raw.decode("utf-8", "surrogateescape") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        # Format: (<flags>) "<sep>" <mailbox-name>   e.g. (\Drafts \HasNoChildren) "/" "[Gmail]/Brouillons"
+        close = line.find(")")
+        if not line.startswith("(") or close == -1:
+            continue
+        flags = line[1:close]
+        if "\\drafts" not in flags.lower():
+            continue
+        rest = line[close + 1:].strip()
+        # rest is: "<sep>" <name>. Drop the separator token (quoted or NIL), keep the name.
+        if rest.startswith('"'):
+            end = rest.find('"', 1)
+            if end == -1:
+                continue
+            rest = rest[end + 1:].strip()
+        else:
+            # unquoted separator token (e.g. NIL) — drop the first whitespace-delimited word
+            parts = rest.split(None, 1)
+            rest = parts[1].strip() if len(parts) == 2 else ""
+        if not rest:
+            continue
+        # rest is now the mailbox name — quoted or bare. Return verbatim (unquoted).
+        if rest.startswith('"') and rest.endswith('"') and len(rest) >= 2:
+            return rest[1:-1]
+        return rest
+    return None
+
+
 def create_draft(raw_rfc822_bytes: bytes, creds: dict | None = None) -> None:
-    """Create a Gmail DRAFT from raw RFC822 bytes via IMAP APPEND to [Gmail]/Drafts.
+    """Create a Gmail DRAFT from raw RFC822 bytes via IMAP APPEND to the Drafts folder.
+
+    The Drafts folder is DISCOVERED by its \\Drafts special-use flag (see
+    _find_drafts_mailbox), because its name is localized ("[Gmail]/Brouillons" on a
+    French account); a hardcoded English name breaks non-English Gmail.
 
     This is draft-ONLY: the message is appended to the Drafts folder with the \\Draft
     flag. It is STRUCTURALLY impossible for this code to SEND it — there is no SMTP
@@ -504,14 +598,34 @@ def create_draft(raw_rfc822_bytes: bytes, creds: dict | None = None) -> None:
     M = imaplib.IMAP4_SSL(creds["host"])
     try:
         M.login(creds["user"], creds["password"])
-        typ, resp = M.append(
-            _GMAIL_DRAFTS_MAILBOX,
-            "\\Draft",
-            imaplib.Time2Internaldate(time.time()),
-            bytes(raw_rfc822_bytes),
-        )
-        if typ != "OK":
-            raise MailConfigError("échec de la création du brouillon (APPEND [Gmail]/Drafts).")
+        # Discover the Drafts folder by its \Drafts special-use flag (RFC 6154) — the
+        # folder NAME is localized ("[Gmail]/Brouillons" on a French account), so the
+        # hardcoded English name breaks non-English Gmail. Fall back to the English
+        # name then bare "Drafts" only if no \Drafts-flagged folder is found. We try
+        # each candidate with APPEND until one succeeds; if ALL fail we raise (never
+        # silently succeed). This stays draft-ONLY: still just an APPEND with \Draft.
+        discovered = _find_drafts_mailbox(M)
+        candidates: list[str] = []
+        for c in (discovered, _GMAIL_DRAFTS_MAILBOX, "Drafts"):
+            if c and c not in candidates:
+                candidates.append(c)
+        last_typ = None
+        appended = False
+        for mailbox in candidates:
+            typ, resp = M.append(
+                mailbox,
+                "\\Draft",
+                imaplib.Time2Internaldate(time.time()),
+                bytes(raw_rfc822_bytes),
+            )
+            last_typ = typ
+            if typ == "OK":
+                appended = True
+                break
+        if not appended:
+            raise MailConfigError(
+                "échec de la création du brouillon (APPEND dossier Brouillons introuvable)."
+            )
         _journal("-", "create_draft", [])
     finally:
         try:

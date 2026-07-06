@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.21.4
+
+### Fixed
+- **Mail triage can now apply emoji labels and prepare drafts on any-locale Gmail.**
+  Two bugs surfaced by a live triage test, both fixed and verified against a real
+  account:
+  - **Emoji/accented label names no longer crash the apply.** Applying a label like
+    `🔴 Clients` or `Système` failed with `UnicodeEncodeError` because IMAP label
+    names carrying non-ASCII must be modified-UTF-7 encoded; the label argument is
+    now encoded correctly (`🔴 Clients` → `&2D3dNA- Clients`).
+  - **Draft creation works on non-English Gmail.** The drafts folder was hardcoded to
+    the English `[Gmail]/Drafts`; a French account uses `[Gmail]/Brouillons`, so
+    drafts failed with "folder doesn't exist". Bubble Shield now discovers the drafts
+    folder via its IMAP `\Drafts` special-use flag (locale-proof), with a fallback.
+
 ## 1.21.3
 
 ### Fixed
