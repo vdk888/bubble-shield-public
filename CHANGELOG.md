@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.21.1
+
+### Fixed
+- **NER daemon no longer drops after a plugin update (#561, the real fix).** The
+  LaunchAgent that keeps the detection daemon warm was pointed at the daemon script
+  inside the ephemeral per-session plugin cache. Cowork garbage-collects that cache on
+  every plugin update, so after each update launchd tried to start a deleted file, crash-
+  looped, and the daemon went "down" — making reads fail-closed until a session lazily
+  respawned it. The daemon is now installed to a STABLE location (`~/.bubble_shield/
+  daemon/`) and the LaunchAgent points there, so a plugin update can no longer orphan it.
+  A re-run of the ML setup refreshes the stable copy to the new code. Only the daemon +
+  its setup script are copied (guard/hooks/tests are explicitly excluded).
+
 ## 1.21.0
 
 ### Added

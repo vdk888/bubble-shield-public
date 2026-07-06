@@ -61,6 +61,30 @@ ML_ENV = BUBBLE_SHIELD_HOME / "ml-env"
 MODELS_DIR = BUBBLE_SHIELD_HOME / "models"
 MANIFEST = BUBBLE_SHIELD_HOME / "ml.json"
 
+# Stable, non-ephemeral home for the daemon SCRIPT + its vendored deps. The
+# plugin's own scripts/ dir is an EPHEMERAL per-session Cowork plugin cache
+# (…/.mcpb-cache/<hash>/server/scripts/…) that Cowork garbage-collects on every
+# plugin update — a LaunchAgent pointing there crash-loops with Errno 2 after
+# an update. We copy the daemon out of that cache into this stable root and
+# point launchd here instead. Layout mirrors the plugin so the daemon's
+# relative imports (here.parent/"vendor", sibling bubble_shield_setup_ml.py)
+# all still resolve. See install_daemon_to_stable_path().
+STABLE_DAEMON_ROOT = BUBBLE_SHIELD_HOME / "daemon"
+
+# The MINIMAL set of scripts/ files the NER daemon needs at runtime, copied into
+# STABLE_DAEMON_ROOT/scripts/. Kept as a tight allowlist (NOT the whole scripts/
+# dir) so guard.py, the hook installers, tripwire.py, posttool_anonymize.py and
+# the ~30 test_*.py files do NOT get a second stale copy under ~/.bubble_shield/
+# — on a privacy tool a duplicate guard.py is a latent footgun. nerd.py's only
+# scripts/-sibling reference is bubble_shield_setup_ml.py (the on-demand OpenAI-PF
+# fetch at ~L235); everything else it imports comes from vendor/. If nerd.py ever
+# imports a new scripts/ module, ADD it here (a missing module = daemon won't
+# start), but NEVER add guard.py / hooks / tripwire / test_*.py.
+_DAEMON_SCRIPTS = (
+    "bubble_shield_nerd.py",       # the daemon itself
+    "bubble_shield_setup_ml.py",   # nerd.py invokes it for on-demand weight fetch
+)
+
 DEFAULT_MODEL = "onnx-community/gliner_multi_pii-v1"
 DEFAULT_ONNX = "onnx/model_quantized.onnx"   # int8; smaller variants: model_q4.onnx
 
@@ -404,12 +428,99 @@ def write_manifest(
     log(f"✓ manifest written: {MANIFEST}")
 
 
+def install_daemon_to_stable_path() -> Path:
+    """Copy the daemon SCRIPT + its vendored deps out of the ephemeral plugin
+    cache into a STABLE home under ~/.bubble_shield/daemon, and return the stable
+    nerd.py path.
+
+    WHY: install_launchagent used to point launchd at
+    ``Path(__file__).parent/bubble_shield_nerd.py``. Inside Cowork __file__ is an
+    EPHEMERAL per-session plugin cache dir
+    (…/.mcpb-cache/<hash>/server/scripts/…) that Cowork garbage-collects on every
+    plugin update. The LaunchAgent then points at a DELETED path → launchd
+    crash-loops (Errno 2) and the daemon never starts from the agent, so reads
+    fail-closed ("NER down") after every update.
+
+    We copy an EXPLICIT ALLOWLIST of scripts/ files (only what the daemon uses
+    at runtime) plus the WHOLE vendor/ tree, into STABLE_DAEMON_ROOT, PRESERVING
+    the layout the daemon expects:
+        STABLE_DAEMON_ROOT/scripts/bubble_shield_nerd.py       (the daemon)
+        STABLE_DAEMON_ROOT/scripts/bubble_shield_setup_ml.py   (nerd.py refs it)
+        STABLE_DAEMON_ROOT/vendor/…                            (whole vendor tree)
+    bubble_shield_nerd.py resolves vendor as ``here.parent/"vendor"`` and reads
+    ``here.parent/"vendor"/"bubble_shield"/"custom_fields.json"`` and the sibling
+    ``bubble_shield_setup_ml.py`` — all of which resolve correctly under this
+    layout.
+
+    WHY AN ALLOWLIST, NOT THE WHOLE scripts/ DIR: scripts/ also contains guard.py,
+    the hook installers (install_user_hooks.py / uninstall_user_hooks.py),
+    posttool_anonymize.py, tripwire.py and ~30 test_*.py files — NONE of which
+    the daemon imports (verified: nerd.py's only scripts/-sibling reference is
+    bubble_shield_setup_ml.py at ~L235; all its other imports come from vendor/).
+    On a PRIVACY tool, dropping a SECOND stale copy of guard.py under
+    ~/.bubble_shield/ is a latent footgun — something could resolve the wrong
+    guard. So we copy only the daemon's real runtime deps and deliberately leave
+    guard/hooks/tripwire/tests out of the stable home.
+
+    _DAEMON_SCRIPTS is the allowlist. If nerd.py ever grows a new scripts/ import,
+    add it here — a MISSING module means the daemon won't start (the very bug this
+    whole change fixes), which is strictly worse than a bit of dead weight, so
+    err toward including. guard.py/hooks/tripwire/tests must NEVER be added.
+
+    Overwrites on each run: a re-run after a plugin update refreshes the stable
+    copy to the new code — this is exactly what makes the daemon update-safe.
+    (For scripts/ we copy2 each allowlisted file, overwriting; vendor/ uses
+    dirs_exist_ok.) Returns the stable nerd path."""
+    src_scripts = Path(__file__).resolve().parent
+    src_vendor = src_scripts.parent / "vendor"
+    dst_scripts = STABLE_DAEMON_ROOT / "scripts"
+    dst_vendor = STABLE_DAEMON_ROOT / "vendor"
+
+    STABLE_DAEMON_ROOT.mkdir(parents=True, exist_ok=True)
+    dst_scripts.mkdir(parents=True, exist_ok=True)
+    # EXPLICIT allowlist of scripts/ files the daemon actually needs at runtime.
+    # Keep this tight — guard.py / hook installers / tripwire / test_*.py are
+    # deliberately EXCLUDED (see docstring). copy2 overwrites any stale copy, so
+    # a re-run after a plugin update refreshes the stable files.
+    for name in _DAEMON_SCRIPTS:
+        src_f = src_scripts / name
+        if src_f.is_file():
+            shutil.copy2(src_f, dst_scripts / name)
+    # vendor/ is the detection ENGINE — no guard/hooks/tests live there, so the
+    # whole tree is copied. __pycache__/*.pyc are skipped (stale bytecode carries
+    # the ephemeral source path; regenerated on demand at the stable path).
+    if src_vendor.is_dir():
+        shutil.copytree(src_vendor, dst_vendor, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    stable_nerd = dst_scripts / "bubble_shield_nerd.py"
+    if not stable_nerd.is_file():
+        raise FileNotFoundError(
+            f"daemon copy incomplete: {stable_nerd} missing after allowlist copy")
+    log(f"✓ daemon installed to stable path: {STABLE_DAEMON_ROOT}")
+    return stable_nerd
+
+
 def install_launchagent(py: Path) -> None:
     """Write + load a LaunchAgent so the warm daemon starts at login and is kept
-    alive. This is the 'from then on, no intervention' piece. The daemon script
-    lives in the plugin's scripts/ dir; we resolve it relative to THIS file so
-    the path is stable (the plugin dir is where bubble_shield_nerd.py ships)."""
-    nerd = Path(__file__).resolve().parent / "bubble_shield_nerd.py"
+    alive. This is the 'from then on, no intervention' piece.
+
+    The daemon path is STABLE because we first COPY the daemon (script + vendored
+    deps) out of the ephemeral per-session plugin cache into
+    ~/.bubble_shield/daemon (see install_daemon_to_stable_path). We point launchd
+    at that stable copy, NOT at Path(__file__) — which under Cowork is a
+    per-session .mcpb-cache dir that gets garbage-collected on every plugin
+    update, leaving launchd pointing at a deleted path (Errno 2 crash-loop).
+
+    If the copy fails (permissions, disk), we FALL BACK to the old __file__ path
+    so setup never hard-fails — the hook's on-demand lazy-start still works."""
+    try:
+        nerd = install_daemon_to_stable_path()
+    except Exception as e:  # noqa: BLE001 — never hard-fail setup on the copy
+        nerd = Path(__file__).resolve().parent / "bubble_shield_nerd.py"
+        log(f"⚠️ could not install daemon to stable path ({e}); "
+            f"falling back to ephemeral plugin path {nerd}. The daemon may stop "
+            f"starting from launchd after the next plugin update — the hook's "
+            f"lazy-start still covers live sessions.")
     logf = BUBBLE_SHIELD_HOME / "nerd.log"
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
