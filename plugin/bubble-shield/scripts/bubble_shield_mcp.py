@@ -1035,13 +1035,15 @@ def _apply_mail(decisions: list) -> str:
                     drafts_created += 1
         except Exception as e:
             # NEVER surface str(e) here — a restore/append error could quote the draft
-            # body / restored PII. Log only the exception TYPE (its message/args may
-            # carry restored PII, and this stderr can be a host LaunchAgent log file =
-            # PII-at-rest). Record the uid + failure; the returned text stays fixed.
-            print(f"[bubble_shield] mail_apply decision uid={uid} failed: {type(e).__name__}",
+            # body / restored PII. But the exception TYPE NAME is a class identifier
+            # (e.g. MailConfigError, IMAP4.error, FileNotFoundError) — it carries NO
+            # PII, so we DO surface it (in stderr AND the returned summary) to make a
+            # failure diagnosable without leaking. Message/args are never included.
+            etype = type(e).__name__
+            print(f"[bubble_shield] mail_apply decision uid={uid} failed: {etype}",
                   file=sys.stderr, flush=True)
             failures += 1
-            fail_uids.append(uid)
+            fail_uids.append(f"{uid}:{etype}")
 
     summary = (
         f"📬 Décisions appliquées (le contenu réel n'a jamais quitté l'hôte).\n"
@@ -1051,7 +1053,7 @@ def _apply_mail(decisions: list) -> str:
            f"(⟦…⟧ sans valeur au coffre — non ajouté aux brouillons)\n"
            if drafts_skipped else "")
         + f"  • {failures} échec(s)"
-        + (f" (UID: {', '.join(fail_uids)})" if fail_uids else "")
+        + (f" (UID:type — {', '.join(fail_uids)})" if fail_uids else "")
     )
     return summary
 

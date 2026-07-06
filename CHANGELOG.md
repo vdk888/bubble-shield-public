@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.21.3
+
+### Fixed
+- **A failed mail-triage action now says WHY (the exception type), so it's
+  diagnosable.** `bubble_shield_mail_apply` used to report only `1 échec (UID: n)`
+  with no reason — the cause was redacted to avoid leaking PII, but that made a real
+  failure impossible to diagnose from the assistant side. It now surfaces the
+  exception **type name** (a class identifier like `MailConfigError`, `IMAP4.error`,
+  `PermissionError` — never PII, never the message/args) in the returned summary and
+  stderr, e.g. `1 échec (UID:type — 3785:MailConfigError)`. The restored draft body
+  and any exception message are still never surfaced.
+
 ## 1.21.2
 
 ### Fixed
