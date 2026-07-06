@@ -158,6 +158,31 @@ partial addresses) wait there to **Confirmer** (→ masked everywhere after) or
 **Liste connue** (gazetteer). The safety net for uncertain cases — remind the
 user it exists and to review it periodically.
 
+### Quand le client signale un mot manqué
+
+La détection n'est pas parfaite. Si le client dit **« tu as oublié X »** — un
+nom/valeur est apparu en clair alors qu'il aurait dû être masqué — ajoute-le à la
+**liste connue** avec :
+
+```
+bubble_shield_add_known_pii(value="X", confirm=true)   # entity_type="NOM" par défaut
+```
+
+Il sera **désormais masqué partout**, dans tous les documents (masquage
+déterministe via le gazetteer, sans dépendre du score NER).
+
+⚠️ **Avant d'ajouter, préviens le client** : ce mot sera masqué PARTOUT où il
+apparaît. Si c'est un mot **courant** (prénom très répandu, mot du dictionnaire),
+cela peut **sur-masquer** du texte légitime — confirme avec lui qu'il est assez
+spécifique. `confirm=true` est requis (poka-yoke) : l'outil refuse d'ajouter sans,
+pour te forcer à avoir posé la question. Pour une **catégorie/motif** (ex. un
+format de code dossier), ce n'est pas cet outil — utilise `bubble_shield_add_field`
+(kind=regex).
+
+**Répartition des tâches** : les détections à **haute confiance** entrent déjà
+AUTOMATIQUEMENT dans la liste connue (rien à faire de ta part). `bubble_shield_add_known_pii`
+est pour l'autre moitié : les **oublis que seul le client attrape**.
+
 **For a non-technical user demo, never use real client data** — use a fictional
 sample (the engine has none baked in; make up a plausible "Jean Dupont" record).
 

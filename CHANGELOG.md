@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.20.3
+
+Security + feature release. Fixes surfaced by a live red-team pass against the
+guard, plus a new client-facing gazetteer tool.
+
+### Security
+- **Relative `..`-traversal exfil closed (#19).** A path that reached a protected
+  file by walking up out of a sandbox mount alias (e.g. `…/mnt/<X>/../../secret`)
+  slipped past the marker walk-up. The guard now resolves and re-checks traversal
+  tokens fail-closed so the escape hatch is gone.
+- **Bare-name symlink bypass closed (#20).** A symlink named as a bare word (no
+  path separators) pointing at a protected file let a read dodge the guard. The
+  guard now extracts and resolves bare-word tokens before deciding, so a symlink
+  target inside a protected folder is blocked like the real path.
+- **Write-back can no longer read PII back into context (#40).** `bubble_shield_write`
+  now refuses any target that is not itself guarded or explicitly allow-listed, so
+  a restored in-clear file can't be written to an unguarded path and then re-read
+  by the agent.
+- **Guard block-decision is now single-sourced (#40 structural).** The write gate
+  and the read guard both call one shared `decide_block_for_path` decision, so the
+  two can no longer drift apart as the code evolves — a whole class of "the write
+  path allowed what the read path blocked" bugs is designed out.
+
+### Added
+- **Cowork human-viewer tools exempted.** The viewer tools that render a file
+  straight to the human (`present_files`, `create_artifact`, `update_artifact`)
+  are exempted from the protected-path block, so the agent can show a restored
+  file to the operator without the raw body ever entering the model's context.
+- **`bubble_shield_add_known_pii` tool.** Lets a client flag a word the anonymiser
+  missed and add it to the always-mask gazetteer, so that term is masked on every
+  subsequent document without a code change.
+
 ## 1.20.1
 
 - **P0 SECURITY — Cowork sandbox-mount-alias Bash exfil closed.** In a Cowork

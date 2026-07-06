@@ -238,6 +238,56 @@ def _discover_marker_roots(cwd: str, max_depth: int = 4) -> list[Path]:
 _OWN_MCP_TOOL_SUFFIXES = ("bubble_shield_read", "bubble_shield_write",
                           "bubble_shield_anonymize_text")
 
+# Cowork's HUMAN-VIEWER tools — the "render a file to the human screen" path.
+# These are NOT our tools; they belong to the Cowork platform. We exempt them for
+# ONE specific, load-bearing workflow (companion to Finding #40): the agent works
+# on TOKENS, `bubble_shield_write` restores the real values into a GUARDED file on
+# disk (the #40 fix REFUSES the allow-listed `clean/`, so the restored file always
+# lands where a later agent Read is blocked), and then the agent asks a Cowork
+# viewer to render that restored file to the HUMAN. The clear data goes to the
+# human UI; the agent never sees it. Without this exemption the guard's `mcp__.*`
+# matcher gates the viewer's file_path/html_path on the protected path and DENIES
+# it — which would break the only way to show the client their own real document.
+#
+# SAFETY INVARIANT (verified live, and the reason this is safe):
+#   Each of these viewers RETURNS TO THE AGENT only a path or a short confirmation
+#   — NEVER the file body:
+#     - present_files  → returns only the path (no "État civil"/passport/address);
+#     - create_artifact → returns only 'Artifact "…" created.';
+#     - update_artifact → returns only 'Artifact "…" updated.'.
+#   So they are structurally identical to our own sanctioned bubble_shield_read/
+#   write: the human sees the content, the AGENT does not. Exempting them cannot
+#   leak PII into the agent's context.
+#
+#   ⚠️ This exemption is valid ONLY while that invariant holds. If Cowork ever
+#   changes any of these tools to return the file BODY to the agent, this becomes a
+#   PII leak and the tool must be removed from this list. A future maintainer MUST
+#   re-verify the return shape before trusting it.
+#
+# ACCEPTED, KNOWN CONSEQUENCE: the agent could point create_artifact/update_artifact
+# `html_path` (or present_files) at a protected client file DIRECTLY (not a
+# restored-token artifact), rendering raw client data onto the human panel. That is
+# acceptable BY DESIGN: the guard protects the AGENT's context, not the human's
+# screen — the human is allowed to view their own client's data. The safety
+# boundary (nothing clear reaches the model) is preserved either way.
+#
+# Matched by SUFFIX (like _OWN_MCP_TOOL_SUFFIXES) so the opaque-prefixed form
+# (mcp__<opaque-server-id>__present_files) is covered too. Suffix match is exact-
+# tail, so a look-alike like `present_files_and_dump_body` does NOT match.
+_COWORK_VIEWER_TOOL_SUFFIXES = ("present_files", "create_artifact", "update_artifact")
+
+
+def _is_cowork_viewer(tool_name: str) -> bool:
+    """True if `tool_name` is one of Cowork's exempt human-viewer tools (matched by
+    exact suffix — see _COWORK_VIEWER_TOOL_SUFFIXES). These render a file to the
+    HUMAN and return only a path/confirmation to the agent, so they are ALLOWED
+    even on a protected path. The suffix must be preceded by the mcp `__` separator
+    (or be the whole leaf) so we match a tool NAME segment, never a partial word."""
+    if not tool_name.startswith("mcp__"):
+        return False
+    leaf = tool_name.rsplit("__", 1)[-1]
+    return leaf in _COWORK_VIEWER_TOOL_SUFFIXES
+
 # Input keys that commonly carry a filesystem path across third-party MCP file
 # servers (filesystem, text-editor, etc.). Scanned for generic mcp__* tools.
 _MCP_PATH_KEYS = ("path", "file_path", "notebook_path", "uri", "filename",
@@ -296,6 +346,15 @@ def _candidate_paths(tool_name: str, tool_input: dict, cwd: str) -> list[Path]:
         # _candidate_paths is called, so reaching here means a generic MCP tool:
         # scan its input for path-shaped values and gate every one.
         #
+        # Cowork's HUMAN-VIEWER tools (present_files / create_artifact /
+        # update_artifact) are EXEMPT: they render the file to the human and return
+        # only a path/confirmation to the agent (never the body), so they are safe
+        # on a protected path — emit NO candidate, so decide_block is never consulted
+        # and the call falls through to _allow(). This is the load-bearing "render
+        # restored file to the human" path (companion to Finding #40). See
+        # _COWORK_VIEWER_TOOL_SUFFIXES for the full rationale + safety invariant.
+        if _is_cowork_viewer(tool_name):
+            return out  # empty → allowed
         # Never treat our OWN sanctioned read/write tools as candidates — they are
         # the safe path (they return already-anonymised content).
         if not any(tool_name.endswith(s) for s in _OWN_MCP_TOOL_SUFFIXES):
@@ -529,6 +588,55 @@ def _extract_command_paths(command: str, cwd: str) -> list[Path]:
     return out
 
 
+# Bare shell WORDS with NO slash (`link`, `avis.txt`, `readme`). The command-path
+# extractors above deliberately IGNORE these (emitting every bare word as a path
+# would over-block routine shell use). But FINDING #20 shows one dangerous class:
+# a bare token that is a SYMLINK (or, via cwd, any name) resolving INTO a protected
+# folder while cwd is OUTSIDE it — `ln -s <protected>/f.txt link; cat link` leaks.
+# We tokenise bare words here so the Bash branch can resolve each with realpath
+# (follow symlinks) and gate ONLY the ones that land inside a protected folder.
+# Kept intentionally loose (any non-flag, non-path shell word); the NARROW filter
+# that prevents over-block lives at the call site (must resolve + land in a marker).
+_BARE_WORD_RE = re.compile(r"""
+    (?:^|[\s=:,;()<>&|"'`])          # a boundary before the word
+    (                                # capture the bare word
+      (?![-/~])                      # not a flag (-x) and not an abs/home path
+      (?:\\.|[^\s'";`|&<>()/=])+     # word chars, NO slash (bare name only)
+    )
+""", re.VERBOSE)
+
+
+def _extract_bare_word_tokens(command: str) -> list[str]:
+    """Return bare (slash-free) word tokens from a shell command, de-escaped.
+
+    Excludes flags (`-x`), absolute/home paths (handled elsewhere), and anything
+    with a slash. These are CANDIDATES only — the caller must resolve each via
+    `os.path.realpath(os.path.join(cwd, tok))` and keep it ONLY when the resolved
+    real path exists and lands inside a protected/marked folder (FINDING #20).
+    Also sweeps quoted slash-free spans (`cat "link"`)."""
+    if not command:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(w: str) -> None:
+        tok = re.sub(r"\\(.)", r"\1", w).strip()
+        if not tok or "/" in tok or tok.startswith("-") or tok.startswith("~"):
+            return
+        if tok in seen:
+            return
+        seen.add(tok)
+        out.append(tok)
+
+    for m in _BARE_WORD_RE.finditer(command):
+        _add(m.group(1))
+    for q in re.findall(r"'([^']*)'|\"([^\"]*)\"", command):
+        span = q[0] or q[1]
+        if span and ("/" not in span):
+            _add(span)
+    return out
+
+
 def _expand_braces(pattern: str) -> list[str]:
     """Minimal brace expansion (`{a,b}` → [a, b]) so glob.glob can handle
     `{clients}/…` and `{a,b}/…` tokens. Only the FIRST brace group is expanded
@@ -579,7 +687,7 @@ _SESSION_MNT_RE = re.compile(r"^/sessions/[^/]+/mnt/(?P<rest>.+)$")
 _COWORK_INFRA_MNT = ("outputs", "uploads", ".claude", ".remote-plugins")
 
 
-def _iter_session_mnt_tokens(command: str) -> "list[tuple[str, str]]":
+def _iter_session_mnt_tokens(command: str, cwd: str = "") -> "list[tuple[str, str]]":
     """Extract `/sessions/<name>/mnt/<rest>` tokens from a shell command.
 
     Returns a list of (full_token, rest) pairs where `rest` is the mount-relative
@@ -588,6 +696,15 @@ def _iter_session_mnt_tokens(command: str) -> "list[tuple[str, str]]":
     quoted-span sweep — so quoted/escaped alias paths are caught. These tokens
     were previously IGNORED downstream (they resolve to no marker on the Mac);
     here we classify them explicitly against the mount namespace instead.
+
+    FINDING #19 (`..`-traversal into a mounted folder): a RELATIVE token like
+    `../Dropbox/x` does NOT match `_SESSION_MNT_RE` on its own, but when the
+    session cwd is itself a mount path (`/sessions/foo/mnt/outputs`), joining +
+    `os.path.normpath` collapses the `..` into `/sessions/foo/mnt/Dropbox/x` — a
+    real mnt-alias path that MUST re-enter the Fix-C classification. So before
+    matching, we normalise each relative token against `cwd` (collapsing `..`),
+    and match the normalised absolute form. Absolute tokens are normpath'd too so
+    an embedded `..` (`/sessions/x/mnt/outputs/../clients/f`) is collapsed as well.
     """
     if not command:
         return []
@@ -602,20 +719,107 @@ def _iter_session_mnt_tokens(command: str) -> "list[tuple[str, str]]":
     for raw in raw_candidates:
         # Un-escape backslash-escaped chars (e.g. "/sessions/x/mnt/cl\ ients/…").
         tok = re.sub(r"\\(.)", r"\1", raw).strip()
-        m = _SESSION_MNT_RE.match(tok)
+        if not tok:
+            continue
+        # FINDING #19: resolve the token to an absolute, `..`-collapsed form so a
+        # relative traversal into the mount namespace is caught by Fix C. We use
+        # os.path.normpath (NOT realpath) here on purpose: `/sessions/...` does not
+        # exist on the host, so realpath can't follow it; normpath is a pure lexical
+        # collapse of `..`/`.` that keeps us in the alias namespace to classify.
+        norm = os.path.expanduser(tok)
+        if not os.path.isabs(norm):
+            if not cwd:
+                # No cwd → can't anchor a relative token into the mnt namespace.
+                # Only an already-absolute token can be an mnt alias, so skip.
+                continue
+            norm = os.path.join(cwd, norm)
+        norm = os.path.normpath(norm)
+        m = _SESSION_MNT_RE.match(norm)
         if not m:
             continue
-        rest = m.group("rest")  # mount-relative path; normalised at use site
-        if tok in seen:
+        rest = m.group("rest")  # mount-relative path; normalised above
+        if norm in seen:
             continue
-        seen.add(tok)
-        out.append((tok, rest))
+        seen.add(norm)
+        out.append((norm, rest))
     return out
 
 
 def _mnt_first_segment(rest: str) -> str:
     """First path segment of a mount-relative path ("clients/x/y" → "clients")."""
     return rest.strip("/").split("/", 1)[0] if rest.strip("/") else ""
+
+
+def _ext_exempt(p: Path, exts: tuple) -> bool:
+    """True if `p`'s extension is on the `exts` allow-list (case-insensitive).
+    Matches both the full multi-suffix tail (`.anon.txt`) and any single trailing
+    extension. Pure — module-level so both main() and the write gate share it."""
+    if not exts:
+        return False
+    if "".join(p.suffixes).lower().endswith(exts):
+        return True
+    name_lower = p.name.lower()
+    return any(name_lower.endswith(e) for e in exts)
+
+
+def decide_block_for_path(path, config: dict | None = None) -> "tuple[bool, str]":
+    """SINGLE SOURCE OF TRUTH for "would a built-in Read/Bash of `path` be BLOCKED?"
+
+    Returns (blocked, message). A path is blocked if it sits under a folder
+    carrying a `.bubble-shield.json` marker OR under a global `protected_folders`
+    entry, unless it is exempted by that folder's `allow_paths` / `allow_extensions`
+    (marker overrides fall back to the global defaults when unset). The marker file
+    itself is NEVER blocked (it is our own metadata, no PII).
+
+    This is the module-level function that BOTH the guard hook (`main()` →
+    `decide_block`) and the MCP write gate (`bubble_shield_mcp._path_is_guarded`)
+    call, so the two can never drift. `path` may be a str or a Path; it is
+    expanduser'd + resolved here. Pass a pre-loaded `config` (as `main()` does, to
+    reuse the config it already read) or let it load the global config itself.
+    """
+    p = path if isinstance(path, Path) else Path(os.path.expanduser(str(path)))
+    try:
+        p = p.resolve()
+    except Exception:
+        pass
+
+    cfg = config if config is not None else _load_config()
+    protected = [q for q in (_norm(x) for x in cfg.get("protected_folders", [])) if q]
+    g_allow_paths = [q for q in (_norm(x) for x in cfg.get("allow_paths", [])) if q]
+    g_allow_exts = tuple(e.lower() for e in cfg.get("allow_extensions", []) if e)
+    g_message = cfg.get("message_fr") or DEFAULT_MESSAGE
+
+    # The marker file itself is never blocked — it's our own metadata (no PII),
+    # and onboarding / the skill must be able to read & write it.
+    if p.name == MARKER_NAME:
+        return False, ""
+    # 1) In-folder marker (the Cowork-native path). Nearest ancestor wins.
+    hit = _find_marker_root(p)
+    if hit is not None:
+        root, mdata = hit
+        # Marker allow_paths/allow_extensions are documented as relative to
+        # THIS marker's folder → resolve them against `root`, not process CWD.
+        m_allow_paths = [q for q in (_norm(x, base=root) for x in mdata.get("allow_paths", [])) if q]
+        m_allow_exts = tuple(e.lower() for e in mdata.get("allow_extensions", []) if e)
+        # marker overrides fall back to global defaults when unset
+        allow_paths = m_allow_paths or g_allow_paths
+        allow_exts = m_allow_exts or g_allow_exts
+        message = mdata.get("message_fr") or g_message
+        if any(_is_within(p, ap) for ap in allow_paths):
+            return False, ""
+        if _ext_exempt(p, allow_exts):
+            return False, ""
+        return True, message
+
+    # 2) Global protected_folders (CLI / back-compat).
+    if protected:
+        if any(_is_within(p, ap) for ap in g_allow_paths):
+            return False, ""
+        if any(_is_within(p, prot) for prot in protected):
+            if _ext_exempt(p, g_allow_exts):
+                return False, ""
+            return True, g_message
+    return False, ""
 
 
 def main() -> None:
@@ -700,50 +904,13 @@ def _main(raw: str) -> None:
                 "[mail-guard: " + tool_name + "]")
             return
 
-    def _ext_exempt(p: Path, exts: tuple) -> bool:
-        if not exts:
-            return False
-        if "".join(p.suffixes).lower().endswith(exts):
-            return True
-        name_lower = p.name.lower()
-        return any(name_lower.endswith(e) for e in exts)
-
     def decide_block(p: Path) -> tuple[bool, str]:
-        """Return (blocked, message). A path is blocked if it sits under a
-        global protected_folder OR under a folder carrying a marker. Per-folder
-        marker overrides (allow_paths/allow_extensions/message_fr) apply when the
-        protection came from a marker; otherwise the global ones apply."""
-        # The marker file itself is never blocked — it's our own metadata (no
-        # PII), and onboarding / the skill must be able to read & write it.
-        if p.name == MARKER_NAME:
-            return False, ""
-        # 1) In-folder marker (the Cowork-native path). Nearest ancestor wins.
-        hit = _find_marker_root(p)
-        if hit is not None:
-            root, mdata = hit
-            # Marker allow_paths/allow_extensions are documented as relative to
-            # THIS marker's folder → resolve them against `root`, not process CWD.
-            m_allow_paths = [q for q in (_norm(x, base=root) for x in mdata.get("allow_paths", [])) if q]
-            m_allow_exts = tuple(e.lower() for e in mdata.get("allow_extensions", []) if e)
-            # marker overrides fall back to global defaults when unset
-            allow_paths = m_allow_paths or g_allow_paths
-            allow_exts = m_allow_exts or g_allow_exts
-            message = mdata.get("message_fr") or g_message
-            if any(_is_within(p, ap) for ap in allow_paths):
-                return False, ""
-            if _ext_exempt(p, allow_exts):
-                return False, ""
-            return True, message
-
-        # 2) Global protected_folders (CLI / back-compat).
-        if protected:
-            if any(_is_within(p, ap) for ap in g_allow_paths):
-                return False, ""
-            if any(_is_within(p, prot) for prot in protected):
-                if _ext_exempt(p, g_allow_exts):
-                    return False, ""
-                return True, g_message
-        return False, ""
+        """Return (blocked, message) for path `p`. DELEGATES to the module-level
+        `decide_block_for_path` — the SINGLE source of truth also called by the
+        MCP write gate — passing the config this session already loaded so the two
+        can never drift. (This nested wrapper is kept so the call sites below read
+        unchanged; it just forwards `p` + `cfg`.)"""
+        return decide_block_for_path(p, cfg)
 
     # --- Bash: scan the command string for any protected path mention ---
     # Cowork runs shell via `mcp__workspace__bash` (not `Bash`); treat both. The
@@ -781,6 +948,64 @@ def _main(raw: str) -> None:
             _deny(f"{message}\n[Bubble Shield guard: commande shell touchant {p}]")
             return
 
+        # --- FINDING #20: bare-name SYMLINK (or cwd-relative bare name) into a
+        # protected folder. The path extractors above skip slash-free tokens on
+        # purpose (emitting every bare word would over-block routine shell use), so
+        # `ln -s <protected>/f.txt link; cat link` from an UNRELATED cwd bypassed the
+        # guard and leaked the protected file. Here we handle bare words NARROWLY:
+        # for each bare token we join it to cwd and `os.path.realpath` it (following
+        # symlinks to the real target); we DENY only when the resolved real path
+        #   (a) EXISTS on disk,
+        #   (b) lands inside a protected/marked folder (decide_block says blocked),
+        #   (c) AND cwd is NOT itself inside that same protected root.
+        # (c) is what preserves the DELIBERATE in-folder residual: `cd protected &&
+        # cat avis.txt` has cwd INSIDE the marker root, so it stays ALLOWED (the
+        # documented, accepted residual). A bare word that doesn't resolve, or
+        # resolves OUTSIDE any protected folder (`cat readme`, `ls`, a benign
+        # `link2 -> /tmp/x`), emits nothing → no over-block.
+        if cwd:
+            try:
+                cwd_real = os.path.realpath(cwd)
+            except Exception:
+                cwd_real = cwd
+            for tok in _extract_bare_word_tokens(command):
+                try:
+                    joined = os.path.join(cwd, os.path.expanduser(tok))
+                    real = os.path.realpath(joined)   # follows symlinks
+                except Exception:
+                    continue
+                # Must resolve to something that actually exists (a live symlink
+                # target or a real file); a non-existent bare word is not a leak.
+                if not os.path.exists(real):
+                    continue
+                rp = Path(real)
+                blocked, message = decide_block(rp)
+                if not blocked:
+                    continue
+                # (c) cwd itself inside the SAME protected root → deliberate
+                # in-folder residual, keep ALLOWED. Determine the protected root of
+                # the resolved target and check whether cwd_real lives under it.
+                root = None
+                hit = _find_marker_root(rp)
+                if hit is not None:
+                    root = hit[0]
+                else:
+                    for prot in protected:
+                        if _is_within(rp, prot):
+                            root = prot
+                            break
+                if root is not None and _is_within(Path(cwd_real), root):
+                    # cwd is INSIDE the protected folder → in-folder residual, allow.
+                    continue
+                # Honour a per-marker block_bash:false opt-out on the target.
+                if hit is not None and hit[1].get("block_bash") is False:
+                    continue
+                _deny(
+                    f"{message}\n[Bubble Shield guard: nom nu '{tok}' résolu vers "
+                    f"{real} dans un dossier protégé (symlink/relatif depuis un cwd "
+                    "hors dossier) — bloqué par sécurité.]")
+                return
+
         # --- FIX B + FIX C: Cowork sandbox-mount-alias namespace -------------------
         # The PRIMARY walk-up above never fires for `/sessions/<name>/mnt/…` tokens:
         # that namespace doesn't exist on the Mac, so `decide_block` finds no marker
@@ -808,7 +1033,7 @@ def _main(raw: str) -> None:
         # inode, so it must fail closed on every non-infra mount subtree even when
         # no protected_folders/markers are known to the host. See Fix C comment.
 
-        for tok, rest in _iter_session_mnt_tokens(command):
+        for tok, rest in _iter_session_mnt_tokens(command, cwd):
             first = _mnt_first_segment(rest)   # e.g. "clients" from "clients/x/y"
             if not first:
                 continue

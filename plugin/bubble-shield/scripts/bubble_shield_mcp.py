@@ -265,6 +265,28 @@ TOOLS = [
         }
     },
     {
+        "name": "bubble_shield_add_known_pii",
+        "description": (
+            "Ajoute un mot que le client signale comme MANQUÉ (un nom/valeur que Bubble Shield "
+            "n'a pas masqué) à la liste connue (gazetteer) — il sera DÉSORMAIS TOUJOURS masqué "
+            "dans tous les documents. À utiliser quand le client dit 'tu as oublié X'. "
+            "⚠️ Ce mot sera masqué partout où il apparaît — si c'est un mot COURANT (un prénom "
+            "très répandu, un mot du dictionnaire), cela peut SUR-MASQUER du texte légitime ; "
+            "demande confirmation au client avant d'ajouter un mot ambigu."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string",
+                          "description": "Le mot/valeur EXACT que le client signale comme manqué."},
+                "entity_type": {"type": "string",
+                                "description": "Type UPPER_SNAKE, ex. NOM, ADRESSE, EMAIL. Défaut NOM (le cas courant : un nom manqué)."},
+                "confirm": {"type": "boolean",
+                            "description": "Requis true. Poka-yoke : le client doit avoir été prévenu que ce mot sera masqué PARTOUT (risque de sur-masquage si mot courant)."}
+            },
+            "required": ["value", "confirm"]
+        }
+    },
+    {
         "name": "bubble_shield_list_fields",
         "description": "List active custom PII fields (patterns/labels/keep counts). Never echoes PII instances.",
         "inputSchema": {"type": "object", "properties": {}, "required": []}
@@ -924,6 +946,56 @@ def _ner_status() -> dict:
     }
 
 
+# ---- Finding #40: refuse to write restored real PII to an unguarded path ----
+#
+# `bubble_shield_write` (below) restores REAL client values and writes the file to
+# disk. If that file lands somewhere a later agent built-in Read is NOT blocked —
+# OUTSIDE any protected folder, OR inside one but on the marker's allow_paths /
+# allow_extensions exemption (e.g. the anonymize skill's `clean/`) — then a
+# `Read`/`cat` pulls the real names straight back into the session in clear. The
+# PostToolUse re-anonymise scrub does NOT run on built-in Read in Cowork (#32105),
+# so the PreToolUse BLOCK is the ONLY protection, and an allow-listed path
+# disables it. So we enforce the invariant "the restored real document must land
+# on a GUARDED path" — one where a subsequent agent Read is DENIED. The human
+# still opens it (Finder / the local viewer); the guard governs the agent only.
+#
+# `_path_is_guarded` CALLS guard.py's OWN decision function so the two can NEVER
+# drift: there is now exactly ONE implementation of "would a built-in Read of
+# this path be blocked?" — `guard.decide_block_for_path` — used by BOTH the guard
+# hook and this write gate. (Previously this hand-copied `decide_block`'s logic
+# and DRIFTED: it missed the `p.name == MARKER_NAME` short-circuit, so a write to
+# a `.bubble-shield.json`-named path was wrongly treated as guarded while the guard
+# ALLOWED a Read of it → leak. Calling the real function fixes that class of bug
+# for good.) A path is GUARDED iff a built-in Read of it would be DENIED.
+
+def _guard_module():
+    """Import guard.py (same scripts/ dir) so we reuse its EXACT marker logic."""
+    sys.path.insert(0, str(_scripts_dir()))
+    import guard as _g  # noqa: E402
+    return _g
+
+
+def _path_is_guarded(path: str) -> bool:
+    """True iff a subsequent agent built-in Read of `path` would be BLOCKED by
+    the guard — i.e. `path` sits under a marker (or a global protected_folders
+    entry) AND is NOT exempted by that folder's allow_paths / allow_extensions,
+    AND is not the marker file itself.
+
+    Delegates to `guard.decide_block_for_path` — the guard's REAL decision
+    function — so the write-side invariant can never disagree with the read-side
+    gate. Fail-SAFE: on ANY error we return False (treat as UNGUARDED) so
+    bubble_shield_write REFUSES rather than risk writing real PII to a readable
+    location.
+    """
+    try:
+        g = _guard_module()
+        guarded, _msg = g.decide_block_for_path(path)
+        return bool(guarded)
+    except Exception:
+        # Fail-SAFE: unknown → treat as UNGUARDED so the write is REFUSED.
+        return False
+
+
 def _deanonymise_to_file(path: str, content: str) -> dict:
     """Restore real values from ⟦…⟧ tokens in `content` and WRITE to `path`.
 
@@ -1243,7 +1315,30 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_anonymize_text":
                 ok(_anonymise_text(args.get("text", "")))
             elif name == "bubble_shield_write":
-                r = _deanonymise_to_file(args.get("path", ""), args.get("content", ""))
+                # Finding #40: REFUSE to write restored real PII to a path a
+                # later agent built-in Read is NOT blocked from (outside any
+                # protected folder, OR allow-listed inside one). Enforced BEFORE
+                # any restore/write so no clear PII ever touches an unguarded
+                # location. The caller picks WHERE within the guarded folder —
+                # we only enforce the "must be guarded" invariant, no hardcoded dir.
+                _wpath = args.get("path", "")
+                if not _path_is_guarded(_wpath):
+                    fail(
+                        "⛔ Bubble Shield — écriture refusée. Le document RESTAURÉ "
+                        "(vraies valeurs client) ne peut PAS être écrit à cet "
+                        "emplacement : il n'est PAS protégé, donc l'IA pourrait le "
+                        "relire et les vrais noms reviendraient dans la session. "
+                        "Choisis un chemin À L'INTÉRIEUR du dossier client protégé "
+                        "(qui porte le marqueur .bubble-shield.json), mais PAS sous "
+                        "un sous-dossier autorisé en lecture (allow_paths, ex. "
+                        "`clean/`) ni avec une extension exemptée (allow_extensions). "
+                        "Exemple : la racine du dossier protégé, ou un sous-dossier "
+                        "`sorties/` non autorisé. Le fichier restera lisible par "
+                        "l'humain (Finder / la visionneuse locale Bubble Shield) — "
+                        "seul l'agent en est bloqué, et c'est la protection qui marche."
+                    )
+                    return
+                r = _deanonymise_to_file(_wpath, args.get("content", ""))
                 ok(f"✅ Document écrit : {r['path']} ({r['bytes_written']} octets, "
                    f"{r['tokens_restored']} valeur(s) réelle(s) restaurée(s)"
                    + (f", ⚠️ {r['tokens_unresolved']} jeton(s) inconnu(s) laissé(s) tel quel"
@@ -1326,6 +1421,62 @@ def _handle(req: dict) -> None:
                     ok(f"✅ Entrée liste blanche ajoutée ({keep_kind}) — confirm=True requis et fourni")
                 else:
                     fail(f"kind inconnu: {kind}. Valeurs valides: regex, gliner_label, keep")
+            elif name == "bubble_shield_add_known_pii":
+                # Client-flagged MISS: the client says "you forgot X". Add X to the
+                # persistent deny-list gazetteer so it is masked DETERMINISTICALLY in
+                # every later doc. This is the MANUAL counterpart to the AUTO high-conf
+                # path (seed_vault_into_gazetteer / maybe_add_detection) - for the
+                # misses only a human catches. Gate B explicit add: no confidence check.
+                value = (args.get("value") or "")
+                entity_type = (args.get("entity_type") or "NOM").strip() or "NOM"
+                confirm = bool(args.get("confirm", False))
+
+                # Poka-yoke: refuse unless the agent has confirmed with the client.
+                # Adding a word masks it EVERYWHERE - a common word would over-mask.
+                if not confirm:
+                    fail(
+                        "⛔ Bubble Shield — ajout refusé : confirm=true est requis. "
+                        "Avant d'ajouter, préviens le client : ce mot sera masqué "
+                        "PARTOUT où il apparaît, dans tous les documents. Si c'est un "
+                        "mot COURANT (prénom très répandu, mot du dictionnaire), cela "
+                        "peut SUR-MASQUER du texte légitime — vérifie qu'il est assez "
+                        "spécifique, puis rappelle avec confirm=true."
+                    )
+                    return
+
+                # Guardrail: a literal missed WORD, not a pattern.
+                if not value.strip():
+                    fail("⛔ Valeur vide : fournis le mot exact que le client signale comme manqué.")
+                    return
+                if any(c in value for c in ("\\", "[", "]", "{", "}")):
+                    fail(
+                        "⛔ Cette valeur ressemble à un MOTIF (regex), pas à un mot "
+                        "précis. Cet outil ajoute UN mot littéral manqué. Pour une "
+                        "CATÉGORIE/motif, utilise plutôt bubble_shield_add_field "
+                        "(kind=regex)."
+                    )
+                    return
+                import re as _re
+                if not _re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", entity_type):
+                    fail("⛔ entity_type doit être UPPER_SNAKE, ex. NOM, ADRESSE, EMAIL.")
+                    return
+
+                sys.path.insert(0, str(_vendor()))
+                from bubble_shield.known_pii_store import add_confirmed_pii as _add_known
+                # path=None -> default store, which resolves BUBBLE_SHIELD_HOME at call
+                # time (tests point it at a tmp store; prod uses ~/.bubble_shield).
+                added = _add_known(value.strip(), entity_type)
+                if added:
+                    ok(
+                        f"✅ « {value.strip()} » ajouté à la liste connue ({entity_type}). "
+                        "Il sera DÉSORMAIS masqué automatiquement partout où il apparaît, "
+                        "dans tous les documents à venir."
+                    )
+                else:
+                    ok(
+                        f"ℹ️ « {value.strip()} » est DÉJÀ dans la liste connue ({entity_type}) — "
+                        "il est déjà masqué partout. Rien à faire."
+                    )
             elif name == "bubble_shield_list_fields":
                 cfg = _load_custom_fields()
                 sys.path.insert(0, str(_vendor()))

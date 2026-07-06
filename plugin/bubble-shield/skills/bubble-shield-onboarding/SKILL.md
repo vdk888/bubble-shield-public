@@ -213,25 +213,38 @@ in `⟦…⟧` form — do NOT re-draft, do NOT try to fill in real values
 yourself; you don't have them and never will).
 
 Call **`bubble_shield_write`** with:
-- `path` = a file in the `clean/` sub-folder of the marked folder,
-  e.g. `<dossier>/clean/resultat-demo.txt` (or `.pdf`).
+- `path` = a file at the **root of the marked folder** (a GUARDED path),
+  e.g. `<dossier>/resultat-demo.txt` (or `.pdf`).
+  ⚠️ **NE PAS** écrire dans `clean/` : ce sous-dossier est en `allow_paths`
+  (lecture autorisée, réservé aux copies **anonymisées** de la skill
+  anonymize) — un fichier RESTAURÉ (vraies valeurs) y serait relisible par
+  l'IA. `bubble_shield_write` **refusera** un chemin non protégé (hors
+  dossier marqué, sous `clean/`, ou extension exemptée) : c'est voulu.
 - `content` = the token-form result from Temps A, verbatim.
 
 This is the "script that reuses the tokens to decrypt": Bubble Shield
 replaces every `⟦…⟧` token with its real value **from the local vault
-on the Mac**, writes the finished file to disk, and returns ONLY a
-success confirmation + a count of restored values — **never the clear
-content**. The real names never enter this conversation.
+on the Mac**, writes the finished file to disk (à un emplacement
+**protégé**), and returns ONLY a success confirmation + a count of
+restored values — **never the clear content**. The real names never enter
+this conversation.
 
 Then say (make the side-by-side explicit — this is the punchline):
 
-> « ✓ Fait. Ouvrez ce fichier sur votre Mac :
-> `<dossier>/clean/resultat-demo.txt`
+> « ✓ Fait. **Ouvrez vous-même ce fichier sur votre Mac** (dans le Finder,
+> ou via la visionneuse locale Bubble Shield) :
+> `<dossier>/resultat-demo.txt`
+>
+> Je ne le rouvrirai PAS, moi — et je ne le peux pas : ce fichier est dans
+> le dossier protégé, donc si j'essayais de le lire, Bubble Shield me
+> **bloquerait** (sinon les vrais noms reviendraient dans notre
+> conversation). **Ce blocage, c'est justement la protection qui
+> fonctionne.** C'est à vous, humain, de l'ouvrir.
 >
 > Comparez les deux :
 > • **Ce que j'ai vu, moi** (ci-dessus, en session) → des étiquettes.
-> • **Ce que votre Mac a produit** (le fichier) → le vrai résultat, avec
->   les vrais noms.
+> • **Ce que votre Mac a produit** (le fichier, que VOUS ouvrez) → le vrai
+>   résultat, avec les vrais noms.
 >
 > **Même tâche, même résultat — mais l'identité de votre client n'a
 > jamais quitté votre ordinateur.** L'IA a travaillé sur des étiquettes ;
@@ -242,11 +255,103 @@ Then say (make the side-by-side explicit — this is the punchline):
 > nom du cabinet du client depuis `deployment_allowlist.json`. Ne signez
 > JAMAIS « Bubble Invest » dans une démo client — c'est notre société.
 
+> 💡 **Pour AFFICHER le vrai document à l'écran du client** (au lieu de « ouvrez-le
+> dans le Finder »), enchaînez avec une visionneuse Cowork (`present_files` /
+> `create_artifact`) sur le fichier restauré — voir la section
+> **« Afficher un VRAI document au client »** juste ci-dessous. Le clair va à
+> l'écran du client, jamais dans votre contexte.
+
 ⚠️ **Ne trichez pas la démo.** Ne devinez pas, ne re-tapez pas, ne
 « complétez » jamais une vraie valeur à la place d'un token, même si le
 nom semble évident d'après le nom de fichier ou le contexte. Toute la
 preuve repose sur le fait que le résultat en session est 100 % en
 étiquettes et que seul `bubble_shield_write` (côté Mac) connaît le clair.
+
+---
+
+## Afficher un VRAI document au client — le circuit artefact / visionneuse (Cowork)
+
+Souvent le client veut **voir le résultat final avec les vrais noms**, pas juste
+« ouvrez le fichier dans le Finder ». En Cowork, vous pouvez le lui afficher
+DIRECTEMENT à l'écran — en toute sécurité — avec un **outil visionneuse Cowork**.
+La règle qui rend ça sûr : le clair va à l'ÉCRAN du client, jamais dans votre
+contexte à vous (l'assistant).
+
+### Le circuit en 4 temps (à suivre dans cet ordre)
+
+1. **Lire en jetons** — `bubble_shield_read(path=<fichier client>)`. Vous ne
+   voyez que des étiquettes (`⟦NOM_0001⟧`, `⟦IBAN_0001⟧`…).
+2. **Rédiger EN JETONS** — écrivez le document final (HTML, lettre, note…) en
+   n'utilisant QUE les étiquettes. Vous n'avez pas les vraies valeurs, et c'est
+   le principe.
+3. **Restaurer sur un chemin PROTÉGÉ** — `bubble_shield_write(path=…, content=…)`
+   avec votre brouillon-jetons. Bubble Shield remet les vraies valeurs **depuis
+   le coffre local** et écrit le fichier restauré sur le disque, **à la racine
+   du dossier protégé** (un chemin gardé) — **JAMAIS dans `clean/`** (refusé, et
+   relisible par l'IA). L'outil ne renvoie qu'une confirmation + un compte, jamais
+   le contenu en clair.
+4. **Afficher à l'humain** — appelez un **outil visionneuse Cowork** sur le
+   fichier RESTAURÉ pour le rendre à l'écran du client :
+   - **`present_files`** (argument `files: [{ file_path: <fichier restauré> }]`) —
+     affiche le/les fichier(s) tels quels dans le panneau Cowork ;
+   - **`create_artifact`** / **`update_artifact`** (argument `html_path: <fichier
+     HTML restauré>`) — publie un artefact riche (mise en page, avant/après…).
+
+   Le clair apparaît sur l'écran du client ; **vous, l'assistant, n'avez toujours
+   vu que des jetons.**
+
+### L'invariant à ne JAMAIS enfreindre
+
+> **N'écrivez JAMAIS vous-même une vraie valeur dans un artefact ou un fichier.**
+> Vous ne les avez pas — et si vous en tapiez une, c'est que vous l'auriez vue =
+> une fuite. Les vraies valeurs n'atteignent le client QUE via le fichier restauré
+> sur disque (produit par `bubble_shield_write`), affiché par une visionneuse.
+
+Autrement dit : votre brouillon d'artefact ne contient que des `⟦…⟧`. C'est
+`bubble_shield_write` (côté Mac) qui produit la version en clair, et la
+visionneuse ne fait que **la montrer** au client.
+
+### Exemple concret (le flux exact, testé)
+
+Le client demande : « montre-moi la situation patrimoniale de M. X, avec les
+vrais noms pour moi ». Vous enchaînez :
+
+1. `bubble_shield_read(path=".../clients/dupont/DCC.pdf")`
+   → vous recevez le contenu en jetons : `⟦NOM_0001⟧`, `⟦IBAN_0001⟧`, montants réels…
+2. Vous écrivez un HTML de synthèse **en jetons** (tableau État civil, patrimoine…),
+   avec `Write` vers un fichier de travail, p. ex.
+   `.../clients/dupont/situation.html` — **le HTML ne contient QUE des `⟦…⟧`**
+   pour l'identité (les montants réels, eux, sont autorisés en clair par choix).
+3. `bubble_shield_write(path=".../clients/dupont/situation-reelle.html", content=<votre HTML-jetons>)`
+   → renvoie « ✅ 15 valeur(s) réelle(s) restaurée(s) » + le chemin. **Pas le contenu.**
+   Le fichier `situation-reelle.html` sur disque contient maintenant les vrais noms.
+4. `create_artifact(html_path=".../clients/dupont/situation-reelle.html")`
+   (ou `present_files(files=[{file_path: ".../situation-reelle.html"}])`)
+   → l'artefact s'affiche à l'écran du client **avec les vrais noms**. Vous, vous
+   n'avez toujours vu que `⟦NOM_0001⟧`.
+
+Résultat : le client voit une fiche complète et réelle ; votre transcript ne
+contient aucun vrai nom. Dites-le-lui — c'est la démonstration la plus parlante
+du produit.
+
+### Pourquoi le garde ne bloque PAS ces visionneuses (alors qu'il bloque `Read`)
+
+Le garde Bubble Shield bloque `Read`/`cat`/les autres outils fichier sur un
+chemin protégé — sinon les vrais noms reviendraient dans votre contexte. Mais il
+**laisse passer** `present_files` / `create_artifact` / `update_artifact`, même
+sur un fichier restauré protégé, pour une raison précise et vérifiée : **ces
+outils ne renvoient à l'assistant qu'un chemin ou une confirmation, jamais le
+contenu du fichier.** Ils affichent à l'humain, pas à vous. C'est exactement la
+même garantie que `bubble_shield_read`/`write` : le client voit, l'IA ne voit pas.
+
+> ⚠️ Cette exemption ne vaut QUE tant que ces outils ne renvoient pas le corps du
+> fichier. Elle ne s'étend à AUCUN autre outil : tout autre `mcp__*` fichier, et
+> `Read`/`cat`, restent bloqués sur un chemin protégé.
+
+### En une phrase pour le client
+> « Je vous affiche le vrai document à l'écran sans jamais l'avoir lu moi-même :
+> votre Mac remet les vrais noms dans le fichier, et l'affichage vous le montre —
+> moi, je n'ai travaillé que sur des étiquettes. »
 
 ---
 
@@ -481,6 +586,32 @@ re-derive the template from the *shape*. Never store a real client value as a
 > Plain-language framing for the user: « Je vais apprendre à Bubble Shield à
 > reconnaître ce type d'information à partir de sa *forme* (pas de la vraie valeur),
 > pour qu'il le masque automatiquement la prochaine fois. »
+
+## "Tu as oublié CE mot précis" — add a client-flagged miss (Cowork-native)
+
+Different from the section above. `add_field` teaches a **pattern/category**
+(«tous les numéros de dossier»). This is for the other case: the client points at
+**one specific word** that appeared **in clair** and shouldn't have — «tu as oublié
+DELMARRE», «tu as laissé passer ce nom». The detector isn't perfect; bare proper
+nouns with no context score below threshold and slip through.
+
+**Add it to the liste connue (gazetteer) so it's masked EVERYWHERE from now on:**
+```
+bubble_shield_add_known_pii(value="Delmarre", confirm=true)   # entity_type="NOM" par défaut
+```
+It's then masked **deterministically** in every later document — no NER score needed.
+
+⚠️ **Warn the client BEFORE adding.** This word will be masked **partout où il
+apparaît**, dans tous les documents. If it's a **common word** (a very common first
+name, a dictionary word), it can **over-mask** legitimate text — confirm with the
+client that it's specific enough. `confirm=true` is **required** (poka-yoke: the
+tool refuses without it, to force you to have raised this). It rejects a
+pattern-looking value (`\d{5}`, `[A-Z]…`) and steers you to `add_field` — because a
+category is that other tool's job, not this one.
+
+**Division of labour:** high-confidence detections already enter the liste connue
+**automatically** — you do nothing. `bubble_shield_add_known_pii` is for the
+**misses only the client catches**.
 
 ## The accuracy pack — better DETECTION (optional, opt-in) — NOT "anonymise everywhere" in Cowork
 
