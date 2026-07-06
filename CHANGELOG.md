@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.20.5
+
+### Fixed
+- **`bubble_shield_list` no longer self-blocks.** The sanctioned folder-listing
+  tool (added in 1.20.2) was not in the guard's own-tool allow-list, so the guard
+  denied it on every protected folder — making file discovery impossible and
+  forcing the operator to paste paths by hand. It is now exempted like
+  `bubble_shield_read`/`write` (it returns masked filenames, fail-closed if NER is
+  down). The exemption stays narrow — non-sanctioned MCP file tools remain blocked.
+
 ## 1.20.4
 
 Security hardening of the Cowork sandbox-mount guard, surfaced by a live red-team.

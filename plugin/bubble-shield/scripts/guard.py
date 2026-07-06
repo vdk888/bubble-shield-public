@@ -236,7 +236,11 @@ def _discover_marker_roots(cwd: str, max_depth: int = 4) -> list[Path]:
 # block. Matched by suffix so the opaque-prefixed form (mcp__<server>__bubble_shield_read)
 # is covered too.
 _OWN_MCP_TOOL_SUFFIXES = ("bubble_shield_read", "bubble_shield_write",
-                          "bubble_shield_anonymize_text")
+                          "bubble_shield_anonymize_text",
+                          # list returns filenames MASKED through the anonymiser
+                          # (fail-closed if NER down) — the sanctioned discovery
+                          # path, safe like read/write. Was self-blocking (v1.20.5).
+                          "bubble_shield_list")
 
 # Cowork's HUMAN-VIEWER tools — the "render a file to the human screen" path.
 # These are NOT our tools; they belong to the Cowork platform. We exempt them for
