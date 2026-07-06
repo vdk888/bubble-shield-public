@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.20.6
+
+### Fixed
+- **NER daemon stays warm across a working session.** The idle-shutdown timeout
+  was 15 minutes, but the idle exit is clean (exit 0) and the LaunchAgent only
+  auto-restarts on a failure exit — so the daemon dropped mid-session and reads
+  refused (fail-closed) until a ~20-37s cold re-spawn. The idle timeout is now 4
+  hours (set `BUBBLE_SHIELD_NERD_IDLE=0` for an always-warm install), so a normal
+  working session no longer hits intermittent NER-down refusals.
+
 ## 1.20.5
 
 ### Fixed
