@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "bubble_shield",
   "display_name": "Bubble Shield",
-  "version": "1.20.6",
+  "version": "1.21.0",
   "description": "Fail-closed local PII anonymiser — reads/anonymises client data into reversible tokens that never leave the machine.",
   "long_description": "Bubble Shield's local stdio MCP server, packaged as an MCPB so it can ship inside the bubble-shield plugin (plugins may not declare bare stdio servers). Exposes bubble_shield_read / bubble_shield_anonymize_text / bubble_shield_write / bubble_shield_setup_ml / bubble_shield_enable_global plus custom-field tools. The engine is pure-python and vendored; the optional ML accuracy pack downloads separately on demand and is lazy-imported.",
   "author": {
@@ -51,6 +51,10 @@
     {
       "name": "bubble_shield_mail_read",
       "description": "Read e-mail anonymised — fetches over IMAP host-side and returns reversible tokens (fail-closed)."
+    },
+    {
+      "name": "bubble_shield_mail_apply",
+      "description": "Apply triage decisions to Gmail host-side over IMAP — set labels, archive (remove Inbox), and create reply DRAFTS (restored from tokens via the vault, never shown to the model). NEVER sends, NEVER deletes; capped per run; journalled."
     },
     {
       "name": "bubble_shield_write",

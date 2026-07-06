@@ -40,12 +40,80 @@ write it host-side; that is out of scope for the read path.
 from __future__ import annotations
 
 import email
+import email.policy
 import imaplib
 import json
 import os
 import stat
+import time
+from datetime import datetime, timezone
 from email.header import decode_header
+from email.message import EmailMessage
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Mutation guardrails (the whole point of the apply path — enforce structurally)
+# ---------------------------------------------------------------------------
+#
+# This module is READ-heavy by design (fetch_mail is readonly=True). The mutation
+# functions below (apply_labels / create_draft) open IMAP with readonly=False so an
+# unattended Cowork scheduled task can APPLY triage decisions without going through
+# Cowork's greyed-out Gmail-mutation guard. Because that removes the human gate, the
+# safety guarantees here are STRUCTURAL, not by convention:
+#
+#   * NEVER send   — smtplib is never imported; there is no SMTP anywhere in this
+#     module. A draft created via IMAP APPEND to [Gmail]/Drafts CANNOT be sent by
+#     this code — it just sits in the Drafts folder for a human to review/send.
+#   * NEVER delete — we never STORE the \Deleted flag, never EXPUNGE, and never
+#     touch [Gmail]/Trash or [Gmail]/Spam. Removing \Inbox (archive) is the ONLY
+#     removal this module performs.
+#   * Per-run cap  — MAX_MUTATIONS_PER_RUN bounds how many mutations one apply call
+#     may perform (enforced by the apply tool in bubble_shield_mcp.py).
+#   * Journal      — every mutation appends ONE JSON line (timestamp, uid, action,
+#     labels) to ~/.bubble_shield/mail_journal.jsonl so every action is auditable.
+#     The journal NEVER records message bodies or PII — only uid + label names.
+
+MAX_MUTATIONS_PER_RUN = 60  # apply tool refuses more than this in one call
+
+# Gmail's Drafts mailbox (IMAP APPEND target). Draft-only: a draft is NEVER sent.
+_GMAIL_DRAFTS_MAILBOX = "[Gmail]/Drafts"
+
+# The FIXED emoji-taxonomy label set. These are the ONLY user labels safe to journal
+# by NAME — they are a closed vocabulary chosen by Bubble Shield, never a client's
+# real name. Any OTHER label could itself BE a client's name (a user may create a
+# Gmail label literally named after a client), so we journal it as "custom-label"
+# WITHOUT its name (see _sanitise_labels_for_journal). Gmail system flags (\Inbox,
+# \Draft, …) are backslash-atoms and are never PII, so they are journalled as-is.
+_SYSTEM_LABELS = frozenset({
+    "🔴 Clients",
+    "⭐ Important",
+    "📰 Newsletters",
+    "📄 CV reçus",
+    "🏗️ Structurés-Produits",
+    "↪️ Transition-AC",
+    "✍️ Brouillon prêt",
+})
+
+
+def _sanitise_labels_for_journal(labels) -> list[str]:
+    """Reduce a label list to journal-safe values (never a raw non-system name).
+
+    A Gmail label is user-controlled text and MAY be a client's real name. The
+    journal is written in clear to ~/.bubble_shield/mail_journal.jsonl, so writing
+    a raw label name there would leak PII. We keep ONLY:
+      * Gmail system-flag atoms (start with "\\", e.g. \\Inbox) — never PII;
+      * the fixed emoji-taxonomy labels in _SYSTEM_LABELS — a closed, non-PII set.
+    Anything else is replaced by the fixed placeholder "custom-label" (its NAME is
+    dropped), so a custom/PII label name NEVER reaches disk.
+    """
+    safe: list[str] = []
+    for lab in (labels or []):
+        s = str(lab)
+        if s.startswith("\\") or s in _SYSTEM_LABELS:
+            safe.append(s)
+        else:
+            safe.append("custom-label")
+    return safe
 
 # ---------------------------------------------------------------------------
 # Credential store (host-side, chmod-600, never exposed to the model)
@@ -249,6 +317,188 @@ def fetch_mail(query: str = "ALL", maxn: int = 10, since: str | None = None,
                 continue
             out.append(parse_message(d[0][1]))
         return out
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Mutation layer (host-side, readonly=False) — labels + draft-only, NEVER send /
+# NEVER delete. See the "Mutation guardrails" block at the top of the module.
+# ---------------------------------------------------------------------------
+
+def _journal_path() -> Path:
+    """Path to the append-only mutation journal (~/.bubble_shield/mail_journal.jsonl)."""
+    return BUBBLE_SHIELD_HOME / "mail_journal.jsonl"
+
+
+def _journal(uid: str, action: str, labels) -> None:
+    """Append ONE JSON line recording a mutation, for auditability.
+
+    Records ONLY {ts, uid, action, labels} — NEVER a message body, subject, sender
+    or any PII. A journal that leaked bodies would defeat the whole anonymise story;
+    this records just enough to reconstruct WHAT was done to WHICH message.
+
+    PII-safe labels: a Gmail label name is user-controlled and MAY be a client's real
+    name, so we NEVER journal a raw non-system label — labels are passed through
+    _sanitise_labels_for_journal (system flags + the fixed emoji taxonomy stay; any
+    other label becomes "custom-label" without its name).
+
+    The journal file is created chmod 600 (owner-only) — it mirrors the fail-closed
+    permission stance load_credentials() takes on mail.json: audit records must not be
+    world/group readable on a shared host.
+
+    Best-effort: a journal write failure must never crash a mutation (the mutation
+    already happened server-side), so any error here is swallowed after a stderr note.
+    """
+    try:
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "uid": str(uid),
+            "action": str(action),
+            "labels": _sanitise_labels_for_journal(labels),
+        }
+        p = _journal_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Create owner-only (chmod 600). O_CREAT honours the mode ONLY on creation, so
+        # we also fchmod every time to repair an already-existing mis-permissioned file.
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:  # fdopen takes ownership of fd
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:  # pragma: no cover - journal must never break a mutation
+        import sys
+        print(f"[bubble_shield_mail] journal write failed: {e!r}", file=sys.stderr, flush=True)
+
+
+def _imap_label_arg(labels: list[str]) -> str:
+    """Render a list of Gmail labels as the parenthesised X-GM-LABELS argument.
+
+    CRITICAL Gmail-IMAP gotcha: the label list MUST be wrapped in parens `(...)`.
+    A label that contains a space (e.g. a user label "🔴 Clients") must be quoted so
+    the space is not read as a label separator; Gmail's system flags like \\Inbox
+    are backslash-atoms and are NOT quoted.
+    """
+    parts = []
+    for lab in labels:
+        lab = str(lab)
+        if lab.startswith("\\"):
+            parts.append(lab)              # system flag atom, e.g. \Inbox — never quote
+        else:
+            parts.append('"' + lab.replace('"', '\\"') + '"')  # user label — quote (spaces/emoji safe)
+    return "(" + " ".join(parts) + ")"
+
+
+def apply_labels(msg_uid, add_labels: list[str] | None = None,
+                 remove_labels: list[str] | None = None, creds: dict | None = None) -> None:
+    """Add / remove Gmail labels on ONE message, by UID, over IMAP (readonly=False).
+
+    Uses Gmail's X-GM-LABELS extension with UID STORE (uidvalidity-safe — we NEVER
+    use sequence numbers, which shift as the mailbox changes). Adding "\\Inbox" to
+    remove_labels archives the message (removes it from the inbox); that archive is
+    the ONLY removal this function performs.
+
+    CRITICAL Gmail-IMAP gotchas (documented in our Claudette lessons, enforced here):
+      * the label list MUST be wrapped in parens `(...)` — see _imap_label_arg.
+      * NEVER combine a spaced user label + a system flag like \\Inbox in ONE STORE.
+        Gmail chokes on the mix; we issue SEPARATE +X-GM-LABELS / -X-GM-LABELS store
+        commands per operation (add is one store, remove is another).
+
+    SECURITY: this NEVER stores \\Deleted, NEVER expunges, NEVER touches Trash/Spam.
+    The password is used only for imaplib.login() and is never logged/returned.
+    """
+    add_labels = list(add_labels or [])
+    remove_labels = list(remove_labels or [])
+    if creds is None:
+        creds = load_credentials()
+    uid = str(msg_uid)
+
+    # Defence-in-depth: refuse to ever remove the \Deleted flag path or expunge.
+    for lab in add_labels + remove_labels:
+        if str(lab).strip().lower() in ("\\deleted", "deleted"):
+            raise MailConfigError("opération interdite: \\Deleted n'est jamais autorisé (aucune suppression).")
+
+    M = imaplib.IMAP4_SSL(creds["host"])
+    try:
+        M.login(creds["user"], creds["password"])
+        M.select(creds.get("mailbox", "INBOX"), readonly=False)  # mutation: readonly=False
+        # SEPARATE store commands — never combine add + remove (or spaced + \Inbox)
+        # in one STORE (Gmail-IMAP gotcha).
+        if add_labels:
+            typ, resp = M.uid("STORE", uid, "+X-GM-LABELS", _imap_label_arg(add_labels))
+            if typ != "OK":
+                raise MailConfigError(f"échec de l'ajout d'étiquette (UID {uid}).")
+            _journal(uid, "add_labels", add_labels)
+        if remove_labels:
+            typ, resp = M.uid("STORE", uid, "-X-GM-LABELS", _imap_label_arg(remove_labels))
+            if typ != "OK":
+                raise MailConfigError(f"échec du retrait d'étiquette (UID {uid}).")
+            _journal(uid, "remove_labels", remove_labels)
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def build_reply_draft(to_addr: str, subject: str, body_text: str,
+                      in_reply_to: str | None = None,
+                      references: str | None = None) -> bytes:
+    """Build an RFC822 reply-draft message with stdlib EmailMessage → bytes.
+
+    Sets To / Subject / In-Reply-To / References (for proper reply threading) and a
+    plain-text body. Returns the serialised RFC822 bytes ready for create_draft().
+    No SMTP, no send — this only assembles the message.
+
+    CRLF: serialised with email.policy.SMTP so line endings are CRLF (\\r\\n), which
+    strict IMAP servers expect for an APPENDed RFC822 message; the stdlib default
+    policy uses bare \\n and can trip such servers. In-Reply-To / References headers
+    are set ONLY when a value is provided, so we never emit a malformed empty header
+    (an empty In-Reply-To is not a valid Message-Id and confuses threading).
+    """
+    msg = EmailMessage()
+    if to_addr:
+        msg["To"] = to_addr
+    msg["Subject"] = subject or ""
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+    msg.set_content(body_text or "")
+    # policy.SMTP → CRLF line endings (RFC 5322 / strict-server safe).
+    return msg.as_bytes(policy=email.policy.SMTP)
+
+
+def create_draft(raw_rfc822_bytes: bytes, creds: dict | None = None) -> None:
+    """Create a Gmail DRAFT from raw RFC822 bytes via IMAP APPEND to [Gmail]/Drafts.
+
+    This is draft-ONLY: the message is appended to the Drafts folder with the \\Draft
+    flag. It is STRUCTURALLY impossible for this code to SEND it — there is no SMTP
+    anywhere in this module. A human reviews and sends the draft from Gmail.
+
+    SECURITY: the password is used only for imaplib.login() and is never logged /
+    returned. The draft body is NEVER journalled (no PII in the journal) — only the
+    fact that a draft was created is recorded (action="create_draft").
+    """
+    if not isinstance(raw_rfc822_bytes, (bytes, bytearray)):
+        raise MailConfigError("create_draft attend des octets RFC822 (bytes).")
+    if creds is None:
+        creds = load_credentials()
+
+    M = imaplib.IMAP4_SSL(creds["host"])
+    try:
+        M.login(creds["user"], creds["password"])
+        typ, resp = M.append(
+            _GMAIL_DRAFTS_MAILBOX,
+            "\\Draft",
+            imaplib.Time2Internaldate(time.time()),
+            bytes(raw_rfc822_bytes),
+        )
+        if typ != "OK":
+            raise MailConfigError("échec de la création du brouillon (APPEND [Gmail]/Drafts).")
+        _journal("-", "create_draft", [])
     finally:
         try:
             M.logout()

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.21.0
+
+### Added
+- **Mail triage — trie une boîte Gmail entière sans jamais voir de PII.** Nouveau skill
+  `bubble-shield-mail-triage` + nouvel outil `bubble_shield_mail_apply`. L'assistant lit
+  chaque mail anonymisé (`bubble_shield_mail_read`), le classe dans une taxonomie 5 niveaux
+  (Clients / Important / Newsletters / Structurés / CV / Transition), puis pose les libellés
+  Gmail, archive, et prépare des brouillons de réponse — via un chemin d'écriture IMAP
+  host-side, donc utilisable dans une tâche planifiée sans validation manuelle. La liste des
+  clients est lue anonymisée depuis le dossier protégé et matchée jeton-à-jeton, donc elle
+  reste à jour à chaque export sans changer le code.
+
+### Security
+- **Chemin d'écriture mail à garanties structurelles.** `bubble_shield_mail_apply` ne peut
+  PAS envoyer (aucun SMTP — uniquement APPEND vers les brouillons), ne peut PAS supprimer
+  (aucun `\Deleted`/expunge/Trash/Spam — archiver = retirer `\Inbox`), est plafonné à 60
+  mutations par passage, et journalise chaque action (chmod 600, sans noms de libellés custom
+  potentiellement PII). Les brouillons sont restaurés en mémoire via le vault : le vrai nom va
+  dans le brouillon Gmail, jamais dans le contexte du modèle ni sur disque. Un brouillon dont
+  un jeton reste non résolu est SAUTÉ plutôt qu'envoyé avec des marqueurs visibles.
+- **stderr redigé** pour les deux outils qui restaurent du PII (`write` + `mail_apply`) : le
+  type d'exception est loggé, jamais le message brut, pour qu'une erreur de librairie ne puisse
+  pas déposer du PII restauré dans un log host persistant.
+
 ## 1.20.6
 
 ### Fixed

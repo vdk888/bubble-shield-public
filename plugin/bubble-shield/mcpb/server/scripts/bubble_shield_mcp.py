@@ -184,6 +184,60 @@ TOOLS = [
         },
     },
     {
+        "name": "bubble_shield_mail_apply",
+        "description": (
+            "Apply triage DECISIONS to e-mail host-side over IMAP — add Gmail labels, "
+            "archive (remove \\Inbox), and/or create a reply DRAFT — WITHOUT the raw "
+            "e-mail or the client's real values ever entering your context. This is the "
+            "symmetric mutation counterpart to bubble_shield_mail_read. Pass a list of "
+            "decisions, each keyed by message UID (from mail_read). For a draft, write "
+            "the body USING ⟦…⟧ tokens (body_tokens): Bubble Shield restores the real "
+            "values from the local vault in-memory and puts them into the Gmail draft — "
+            "the restored text is NEVER shown to you. It returns ONLY a per-decision "
+            "success/fail count, never any body. STRUCTURAL guarantees: it can NEVER "
+            "send (draft-only, no SMTP), NEVER delete (archive is the only removal), and "
+            "refuses more than 60 mutations in one call. Every action is journalled "
+            "host-side (uid + labels only, no PII). Credentials live host-side and are "
+            "never shown to you."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "array",
+                    "description": "List of per-message triage decisions to apply.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "uid": {"type": "string",
+                                    "description": "Message UID (from bubble_shield_mail_read)."},
+                            "add_labels": {"type": "array", "items": {"type": "string"},
+                                           "description": "Gmail labels to ADD (e.g. ['🔴 Clients'])."},
+                            "archive": {"type": "boolean",
+                                        "description": "If true, remove \\Inbox (archive the message). This is the only removal allowed."},
+                            "draft": {
+                                "type": "object",
+                                "description": "Optional reply draft to create for this message.",
+                                "properties": {
+                                    "to": {"type": "string",
+                                           "description": "Recipient (may itself be a ⟦…⟧ token to restore)."},
+                                    "in_reply_to": {"type": "string",
+                                                    "description": "Message-Id to thread the reply to (In-Reply-To/References)."},
+                                    "subject": {"type": "string",
+                                                "description": "Draft subject (may contain ⟦…⟧ tokens)."},
+                                    "body_tokens": {"type": "string",
+                                                    "description": "Draft body written WITH ⟦…⟧ tokens — restored to real values in-memory, never shown to you."}
+                                },
+                                "required": ["body_tokens"],
+                            }
+                        },
+                        "required": ["uid"],
+                    }
+                }
+            },
+            "required": ["decisions"],
+        },
+    },
+    {
         "name": "bubble_shield_setup_ml",
         "description": (
             "Install or check ALL on-device models in ONE pass — GLiNER + OpenAI "
@@ -886,6 +940,114 @@ def _anonymise_mail(query: str = "ALL", maxn: int = 10, since: str = None) -> st
     return header + ("\n\n" + ("─" * 40) + "\n\n").join(blocks)
 
 
+def _apply_mail(decisions: list) -> str:
+    """Apply a list of triage decisions host-side (labels / archive / reply-draft).
+
+    Symmetric mutation counterpart to _anonymise_mail. For each decision:
+      * apply_labels(add_labels, remove=["\\Inbox"] iff archive) — labels + archive.
+      * if a draft is present, RESTORE the ⟦…⟧ token-bearing body (and subject/to)
+        to real values with the SAME vault de-anonymiser bubble_shield_write uses
+        (_deanonymise_string, IN-MEMORY), then feed the restored RFC822 straight to
+        create_draft(). The restored real text is NEVER written to disk and NEVER
+        returned — this function returns ONLY per-decision success/fail COUNTS.
+
+    SECURITY / fail-closed:
+      * Per-run cap: refuses if len(decisions) > MAX_MUTATIONS_PER_RUN.
+      * NEVER embeds a body / restored PII in the returned summary (only counts + uid
+        + generic reason). The caller's generic handler also strips str(e) from any
+        exception text, so even an unexpected raise cannot leak the draft body.
+    """
+    sys.path.insert(0, str(_scripts_dir()))
+    from bubble_shield_mail import (
+        apply_labels, build_reply_draft, create_draft, load_credentials,
+        MAX_MUTATIONS_PER_RUN,
+    )
+    sys.path.insert(0, str(_vendor()))
+    from bubble_shield.vault import TOKEN_RE  # to detect UNRESOLVED ⟦…⟧ tokens
+
+    if not isinstance(decisions, list):
+        raise RuntimeError("decisions doit être une liste.")
+    if len(decisions) > MAX_MUTATIONS_PER_RUN:
+        # Fail-closed: refuse the WHOLE call rather than applying a partial batch.
+        raise RuntimeError(
+            f"trop de décisions ({len(decisions)}) — limite de sécurité "
+            f"{MAX_MUTATIONS_PER_RUN} mutations par appel.")
+
+    creds = load_credentials()  # raises MailConfigError (no secret leaked) if unset/mis-perm
+
+    labels_applied = 0
+    drafts_created = 0
+    drafts_skipped = 0
+    failures = 0
+    fail_uids: list[str] = []
+
+    for dec in decisions:
+        if not isinstance(dec, dict):
+            failures += 1
+            continue
+        uid = str(dec.get("uid", "")).strip()
+        if not uid:
+            failures += 1
+            continue
+        try:
+            add = list(dec.get("add_labels") or [])
+            remove = ["\\Inbox"] if dec.get("archive") else []
+            if add or remove:
+                apply_labels(uid, add_labels=add, remove_labels=remove, creds=creds)
+                labels_applied += 1
+
+            draft = dec.get("draft")
+            if draft:
+                body_tokens = draft.get("body_tokens", "")
+                subject_tokens = draft.get("subject", "")
+                to_tokens = draft.get("to", "")
+                # Option-A restore: real values go into the draft, restored text is
+                # NEVER returned to the model (build the RFC822 and hand it straight
+                # to create_draft — no disk write, no echo).
+                real_body = _deanonymise_string(body_tokens) if body_tokens else ""
+                real_subject = _deanonymise_string(subject_tokens) if subject_tokens else ""
+                real_to = _deanonymise_string(to_tokens) if to_tokens else ""
+                # SKIP-not-ship on unresolved tokens: if the vault could not restore
+                # a ⟦…⟧ token (no entry for this session), the restored text still
+                # carries a LITERAL token. Appending it would put a broken artifact
+                # (visible ⟦NOM_1⟧) into the user's real Gmail Drafts. Skip the draft,
+                # keep the labels/archive already applied above, and count it as
+                # skipped. NOTE: TOKEN_RE matches ONLY the placeholder pattern, never
+                # real PII — so this boolean check leaks nothing (we never read the
+                # restored value, only whether a token pattern survived).
+                if (TOKEN_RE.search(real_body) or TOKEN_RE.search(real_subject)
+                        or TOKEN_RE.search(real_to)):
+                    drafts_skipped += 1
+                else:
+                    irt = draft.get("in_reply_to")
+                    raw = build_reply_draft(
+                        to_addr=real_to, subject=real_subject, body_text=real_body,
+                        in_reply_to=irt, references=irt)
+                    create_draft(raw, creds=creds)
+                    drafts_created += 1
+        except Exception as e:
+            # NEVER surface str(e) here — a restore/append error could quote the draft
+            # body / restored PII. Log only the exception TYPE (its message/args may
+            # carry restored PII, and this stderr can be a host LaunchAgent log file =
+            # PII-at-rest). Record the uid + failure; the returned text stays fixed.
+            print(f"[bubble_shield] mail_apply decision uid={uid} failed: {type(e).__name__}",
+                  file=sys.stderr, flush=True)
+            failures += 1
+            fail_uids.append(uid)
+
+    summary = (
+        f"📬 Décisions appliquées (le contenu réel n'a jamais quitté l'hôte).\n"
+        f"  • {labels_applied} message(s) ré-étiqueté(s)/archivé(s)\n"
+        f"  • {drafts_created} brouillon(s) créé(s) (jamais envoyé(s))\n"
+        + (f"  • {drafts_skipped} brouillon(s) ignoré(s) : jetons non résolus "
+           f"(⟦…⟧ sans valeur au coffre — non ajouté aux brouillons)\n"
+           if drafts_skipped else "")
+        + f"  • {failures} échec(s)"
+        + (f" (UID: {', '.join(fail_uids)})" if fail_uids else "")
+    )
+    return summary
+
+
 def _ner_status() -> dict:
     """Return NER daemon status + liveness diagnostics. Read-only; triggers a
     best-effort re-arm spawn when the daemon is down (never blocks).
@@ -1017,6 +1179,23 @@ def _deanonymise_to_file(path: str, content: str) -> dict:
     remaining = len(set(TOKEN_RE.findall(restored)))
     return {"path": str(out), "tokens_restored": n_tokens - remaining,
             "tokens_unresolved": remaining, "bytes_written": len(restored.encode("utf-8"))}
+
+
+def _deanonymise_string(content: str) -> str:
+    """Restore real values from ⟦…⟧ tokens IN-MEMORY and return the restored string.
+
+    Same vault restore as `_deanonymise_to_file` (option-A flow), but the restored
+    text is NEVER written to disk and NEVER returned to the model — the ONLY caller
+    (the mail-apply tool) feeds it straight to create_draft() so the real name lands
+    in the Gmail draft while the restored text stays out of the session context.
+
+    Raises RuntimeError if there is no vault for this session (can't restore without
+    it — fail-closed rather than shipping ⟦…⟧ tokens into a live draft)."""
+    engine, vpath, _daemon_up = _engine()
+    if not vpath.is_file():
+        raise RuntimeError("aucun coffre (vault) pour cette session — "
+                           "lis d'abord des données via bubble_shield_read/mail_read")
+    return engine.deanonymize(content)
 
 
 # ---- ML accuracy-pack setup (async, host-side) -----------------------------
@@ -1312,6 +1491,13 @@ def _handle(req: dict) -> None:
                     maxn=args.get("max", 10),
                     since=args.get("since"))
                 ok(anon)
+            elif name == "bubble_shield_mail_apply":
+                # Mutation counterpart to mail_read. Applies labels/archive/draft
+                # host-side. Restores draft bodies IN-MEMORY via the vault (option-A)
+                # and returns ONLY per-decision counts — NEVER any body/PII. Any
+                # exception is caught below and converted to a FIXED fail message
+                # (no str(e) → no draft body / restored PII can leak).
+                ok(_apply_mail(args.get("decisions", [])))
             elif name == "bubble_shield_anonymize_text":
                 ok(_anonymise_text(args.get("text", "")))
             elif name == "bubble_shield_write":
@@ -1536,11 +1722,23 @@ def _handle(req: dict) -> None:
             # choked on. NEVER interpolate str(e) into the RETURNED tool text, or raw
             # PII would leak into the model's context through this "safe" error path.
             # Log the detail host-side (STDERR only) and return a FIXED message.
-            print(f"[bubble_shield] tool '{name}' failed: {e!r}", file=sys.stderr, flush=True)
+            # For the two tools that RESTORE real PII (write + mail_apply), even the
+            # stderr repr is unsafe (a lib error can quote the restored body, and this
+            # stderr may be a persisted LaunchAgent log = PII-at-rest) → log the
+            # exception TYPE only. Other tools never hold restored PII → full repr is
+            # fine and preserves debuggability.
+            if name in ("bubble_shield_write", "bubble_shield_mail_apply"):
+                print(f"[bubble_shield] tool '{name}' failed: {type(e).__name__}",
+                      file=sys.stderr, flush=True)
+            else:
+                print(f"[bubble_shield] tool '{name}' failed: {e!r}", file=sys.stderr, flush=True)
             if name == "bubble_shield_write":
                 fail("⛔ Bubble Shield n'a pas pu écrire le document. "
                      "Aucun fichier n'a été produit. "
                      "Le contenu brut n'est PAS renvoyé (sécurité).")
+            elif name == "bubble_shield_mail_apply":
+                fail("⛔ Bubble Shield n'a pas pu appliquer les décisions e-mail. "
+                     "Le contenu (brouillon / valeurs réelles) n'est PAS renvoyé (sécurité).")
             else:
                 fail("⛔ Échec de l'anonymisation. "
                      "Le contenu brut n'est PAS renvoyé (sécurité).")
