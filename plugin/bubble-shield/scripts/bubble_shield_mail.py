@@ -31,7 +31,7 @@ therefore live host-side and are read by THIS module, never returned to the mode
     read a world/group-readable creds file (fail-closed on a mis-permissioned secret).
   - The app-password NEVER leaves this module: it is passed straight to
     imaplib.login() and is never logged, never returned to the caller, never put in
-    an error message. fetch_mail() returns only (from, subject, body) tuples.
+    an error message. fetch_mail() returns only (uid, from, subject, body) tuples.
 
 Phase 1 keeps the setup minimal: the operator populates mail.json out-of-band (the
 docstring / README documents it). A future `bubble_shield_mail_setup` MCP tool can
@@ -277,13 +277,22 @@ def parse_message(raw_bytes: bytes) -> tuple[str, str, str]:
 
 
 def fetch_mail(query: str = "ALL", maxn: int = 10, since: str | None = None,
-               creds: dict | None = None) -> list[tuple[str, str, str]]:
-    """Fetch up to `maxn` messages over IMAP and return raw (from, subject, body).
+               creds: dict | None = None) -> list[tuple[str, str, str, str]]:
+    """Fetch up to `maxn` messages over IMAP and return raw (uid, from, subject, body).
 
     NOTE: the returned bodies are RAW and MUST be routed through the fail-closed
     `_anonymise_text` by the caller before the model sees them — this function
     performs NO anonymisation. It exists so Bubble Shield OWNS the read; the raw
     body never becomes a tool result on its own.
+
+    The `uid` is the Gmail/IMAP UID (a mailbox-local integer, decoded to a str). It
+    is FETCH-STABLE and lives in the SAME UID space that apply_labels() mutates via
+    ``M.uid("STORE", uid, …)`` — so the uid surfaced by the read can be passed
+    straight to the apply path to act on the SAME message. We use UID SEARCH + UID
+    FETCH (never bare SEARCH/FETCH, whose sequence numbers SHIFT as the mailbox
+    changes and would target the WRONG message when later fed to a UID STORE). The
+    uid is NOT PII (a mailbox-local counter), so the caller may surface it in clear;
+    only From/Subject/body ever carry PII and must be anonymised.
 
     Args:
       query: IMAP SEARCH criterion (UNSEEN, ALL, SEEN, 'FROM "x@y"', …).
@@ -306,16 +315,21 @@ def fetch_mail(query: str = "ALL", maxn: int = 10, since: str | None = None,
         if since:
             since = _validate_query(since)
             criteria = ["SINCE", since, query] if query != "ALL" else ["SINCE", since]
-        typ, data = M.search(None, *criteria)
+        # UID SEARCH → returns UIDs (fetch-stable, same UID space apply's STORE uses),
+        # NOT sequence numbers (which shift as the mailbox changes → wrong-message bug).
+        typ, data = M.uid("SEARCH", None, *criteria)
         if typ != "OK" or not data or not data[0]:
             return []
-        ids = data[0].split()[-maxn:]
-        out: list[tuple[str, str, str]] = []
-        for i in ids:
-            typ, d = M.fetch(i, "(RFC822)")
+        uids = data[0].split()[-maxn:]
+        out: list[tuple[str, str, str, str]] = []
+        for u in uids:
+            # UID FETCH by the same UID we'll later STORE against.
+            typ, d = M.uid("FETCH", u, "(RFC822)")
             if typ != "OK" or not d or not isinstance(d[0], tuple):
                 continue
-            out.append(parse_message(d[0][1]))
+            uid_str = u.decode("ascii", "replace") if isinstance(u, bytes) else str(u)
+            frm, subj, body = parse_message(d[0][1])
+            out.append((uid_str, frm, subj, body))
         return out
     finally:
         try:

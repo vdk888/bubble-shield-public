@@ -34,6 +34,11 @@ MIRROR_PAIRS = [
         PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_mcp.py",
     ),
     (
+        "bubble_shield_mail.py",
+        PLUGIN / "scripts" / "bubble_shield_mail.py",
+        PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_mail.py",
+    ),
+    (
         "bubble_shield_setup_ml.py",
         PLUGIN / "scripts" / "bubble_shield_setup_ml.py",
         PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_setup_ml.py",

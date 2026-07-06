@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.21.2
+
+### Fixed
+- **Mail triage can now actually apply its decisions.** `bubble_shield_mail_apply`
+  targets each message by UID, but `bubble_shield_mail_read` did not return one — and
+  read used unstable sequence numbers while apply used UIDs, a mismatched identifier
+  space. So an assistant could classify mail but could not label/archive/draft without
+  guessing an identifier (risking action on the wrong message), and correctly refused.
+  Read now uses UID SEARCH/FETCH and starts each message block with a `UID:` line (a
+  mailbox integer, not PII — never anonymised) that the assistant passes straight to
+  apply. The read→apply hand-off is verified byte-identical. Also added
+  `bubble_shield_mail.py` to the plugin↔bundle mirror-integrity tripwire.
+
 ## 1.21.1
 
 ### Fixed

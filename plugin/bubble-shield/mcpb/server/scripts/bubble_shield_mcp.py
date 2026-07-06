@@ -145,6 +145,10 @@ TOOLS = [
             "bubble_shield_read — if the NER daemon is down, this REFUSES rather than "
             "return raw e-mail. Uses the same local vault as files, so a client masked "
             "in a PDF gets the SAME token in their e-mail (cross-source consistency). "
+            "Each message block STARTS with a 'UID: <n>' line — a stable mailbox-local "
+            "identifier (not PII). Pass that exact UID as the 'uid' of a decision to "
+            "bubble_shield_mail_apply to label/archive/reply that SAME message; never "
+            "invent a UID. "
             "Credentials live host-side (~/.bubble_shield/mail.json) and are never "
             "shown to you."),
         "inputSchema": {
@@ -931,11 +935,15 @@ def _anonymise_mail(query: str = "ALL", maxn: int = 10, since: str = None) -> st
     if not msgs:
         return "📭 Aucun message ne correspond à cette recherche."
     blocks = []
-    for frm, subj, body in msgs:
+    for uid, frm, subj, body in msgs:
         raw = f"From: {frm}\nSubject: {subj}\n\n{body}"
-        # fail-CLOSED: raises NERDownError if the daemon is down → caller → isError
+        # fail-CLOSED: raises NERDownError if the daemon is down → caller → isError.
+        # ONLY From/Subject/body go through the anonymiser — the UID is a mailbox-local
+        # integer (never PII), so we PREPEND it in clear AFTER anonymising. The agent
+        # must pass this UID line straight to bubble_shield_mail_apply (it identifies
+        # the message in the same UID space apply's UID STORE mutates).
         cloaked = _anonymise_text(raw)
-        blocks.append(cloaked)
+        blocks.append(f"UID: {uid}\n{cloaked}")
     header = f"📧 {len(blocks)} message(s) anonymisé(s) (le contenu brut n'a jamais quitté l'hôte) :\n"
     return header + ("\n\n" + ("─" * 40) + "\n\n").join(blocks)
 
