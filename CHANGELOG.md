@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.20.4
+
+Security hardening of the Cowork sandbox-mount guard, surfaced by a live red-team.
+
+### Security
+- **`cd`-compound mount-alias bypass closed (#553).** A shell command that does its
+  own `cd` into a sandbox mount and then reads via a relative path
+  (`cd .../mnt/outputs && cat "../Dropbox/clients/x"`) bypassed the guard, because
+  the guard saw the session-root cwd, not the post-`cd` directory. The guard now
+  resolves the effective cwd from `cd` chains before classifying.
+- **Whole cwd-hiding class fail-closed (#553-B/C/D).** Constructs that hide the
+  effective directory from the guard — subshells `(...)`, `bash -c`, `pushd`,
+  `eval`, `cd $VAR`/`cd $(...)`, opaque `eval "$(...)"`, and mount paths assembled
+  from simple shell variables — now fail closed when combined with a read that
+  could reach a protected mount. Infra mounts (`outputs`/`uploads`/`.claude`/
+  `.remote-plugins`) and non-mount work are unaffected.
+
+### Fixed
+- **No more spurious "internal error" blocks.** A tool event with an unexpected
+  shape (command passed as a list, cwd as a number) made the guard fail closed
+  with a scary "internal error" on a perfectly legitimate command. The guard now
+  normalizes these shapes and reaches a correct decision instead of crashing.
+
 ## 1.20.3
 
 Security + feature release. Fixes surfaced by a live red-team pass against the

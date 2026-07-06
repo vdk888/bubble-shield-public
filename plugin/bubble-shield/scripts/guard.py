@@ -656,6 +656,399 @@ def _expand_braces(pattern: str) -> list[str]:
     return out
 
 
+# --- FINDING #553 (D): SIMPLE LITERAL var-assignment splice of a mount path -----
+# A leak can be assembled with NO `cd` and with the `/sessions/*/mnt/` literal
+# NEVER appearing in the command text — by stashing the mount prefix in a simple
+# literal shell variable, then splicing it into the read path:
+#     S=/sessions/foo; cat "$S/mnt/Dropbox/clients/f.pdf"   → literal spliced from $S
+#     DIR="/sessions/foo/mnt"; cat "$DIR/Dropbox/x.pdf"     → literal in $DIR
+# There is no `cd` (so #553-C's unresolvable-cd gate never fires) and the literal
+# `/sessions/*/mnt/` substring is absent from the command text (it lives in the
+# variable), so `_mentions_session_mnt` / the mnt-token classifier both miss it.
+#
+# FIX: a variable RESOLVER pre-pass. Parse SIMPLE, LITERAL assignments made earlier
+# IN THE SAME command (`VAR=<literal>`, bare or quoted, RHS a static string with no
+# `$`, no `$(…)`, no backtick, no glob), build a {VAR: value} map, then substitute
+# `$VAR` / `${VAR}` occurrences with their literal value. The RESOLVED command is
+# passed to the EXISTING detection (mnt-token classification, path extraction,
+# marker walk-up) so the hidden literal becomes visible and the existing literal-mnt
+# gate denies it. This DUPLICATES NO decision logic — the resolver only makes the
+# hidden literal visible.
+#
+# SUBSTITUTION IS FOR DETECTION ONLY: the original command is what runs; the
+# resolved form is only what the guard inspects.
+#
+# SCOPE (do-not-over-block): only LITERAL RHS values are resolved. `VAR=$(cmd)`,
+# `VAR=$OTHER` (indirection), `VAR=`glob → NOT resolved (left as-is; they stay
+# covered by the #553-C unresolvable-cd/opaque gates, or are a deeper residual). If
+# a substitution can't happen, the command falls through the existing gates
+# unchanged, so a benign `S=/tmp; cat "$S/x"` resolves to `cat /tmp/x` (ALLOW) and
+# an unresolved RHS creates no new block.
+_ASSIGN_RE = re.compile(r"""
+    (?:^|[;&|]|&&|\|\|)\s*             # a command-start boundary (start or separator)
+    ([A-Za-z_][A-Za-z0-9_]*)          # (1) the VAR name
+    =                                 # the =
+    (                                 # (2) the RHS, up to an unquoted boundary
+      "[^"]*"                         #   double-quoted run
+      | '[^']*'                       #   single-quoted run
+      | [^\s;&|<>()"'`]*              #   bare run (stops at whitespace / separators)
+    )
+""", re.VERBOSE)
+
+# RHS values we REFUSE to resolve (not a static literal): contains a `$` (var/cmd
+# subst), a backtick (cmd subst), or a glob metachar. Such a VAR is left unresolved.
+_NONLITERAL_RHS_RE = re.compile(r"[$`*?\[\]{}]")
+
+
+def _resolve_simple_var_assignments(command: str) -> str:
+    """Resolve SIMPLE literal `VAR=value` assignments made earlier in the SAME
+    command and substitute `$VAR` / `${VAR}` occurrences with their literal value.
+
+    Returns a "resolved command" string used ONLY for guard DETECTION (never for
+    execution). Only LITERAL RHS values are resolved (no `$`, `$(…)`, backtick, or
+    glob in the RHS); a non-literal RHS leaves that VAR unresolved so the command
+    falls through the existing gates unchanged. Idempotent-ish and bounded: a single
+    left-to-right pass; each `$VAR` is replaced by the value assigned to the LATEST
+    preceding literal assignment of that VAR (later assignments shadow earlier ones).
+
+    Multi-var chains resolve because each simple literal assignment is captured, so
+    `A=/sessions; B=foo; cat "$A/$B/mnt/x"` → `cat "/sessions/foo/mnt/x"`.
+    """
+    if not command or "=" not in command:
+        return command
+    var_map: dict[str, str] = {}
+    for m in _ASSIGN_RE.finditer(command):
+        name, raw_rhs = m.group(1), m.group(2)
+        # strip one layer of surrounding quotes
+        if len(raw_rhs) >= 2 and raw_rhs[0] in "\"'" and raw_rhs[-1] == raw_rhs[0]:
+            value = raw_rhs[1:-1]
+        else:
+            value = raw_rhs
+        if _NONLITERAL_RHS_RE.search(value):
+            # non-literal RHS (var/cmd-subst/glob) → do NOT resolve; drop any stale
+            # earlier literal binding so a later `$VAR` isn't mis-substituted with an
+            # outdated literal value (the reassignment shadows it as unresolvable).
+            var_map.pop(name, None)
+            continue
+        var_map[name] = value
+    if not var_map:
+        return command
+
+    # Substitute ${VAR} and $VAR occurrences (longest-name-first is unnecessary
+    # because $VAR matching is anchored by a non-word boundary after the name).
+    def _sub(mm: "re.Match[str]") -> str:
+        name = mm.group(1) or mm.group(2)
+        return var_map.get(name, mm.group(0))
+
+    # ${VAR}  OR  $VAR (VAR = identifier; the negative-lookahead stops $FOOBAR from
+    # matching a $FOO binding). Only names in the map are replaced (else left as-is).
+    var_ref_re = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+    return var_ref_re.sub(_sub, command)
+
+
+# --- FINDING #553: `cd`-compound bypass of the mnt-alias fail-closed -----------
+# The mnt-alias classification (`_iter_session_mnt_tokens`) and the relative-token
+# resolution (`_extract_command_paths`) both anchor a RELATIVE token against
+# `event.cwd`. That is only correct when `event.cwd` is already the effective
+# directory. But a compound command can do the `cd` ITSELF:
+#     cwd = /sessions/<s>                 (the untracked session ROOT)
+#     cmd = cd /sessions/<s>/mnt/outputs && cat "../Dropbox/clients/f.pdf"
+# The guard never parses `cd`, so `../Dropbox/...` joins against the session ROOT
+# (`/sessions/<s>/../Dropbox/...` → `/sessions/Dropbox/...`) instead of the mount
+# dir — it no longer matches `/sessions/*/mnt/...`, Fix C never fires, LEAK.
+#
+# FIX: parse a leading `cd X` / `cd X && cd Y && …` / `cd X; …` chain to compute
+# the EFFECTIVE cwd, then resolve relative tokens + re-run the mnt-classification
+# and marker walk-up against THAT effective cwd. Reuses the existing decision
+# logic unchanged — we only correct the base the relative tokens resolve against.
+_CD_SEP_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+
+
+def _unwrap_cd_target(tok: str) -> str:
+    """Strip surrounding quotes and de-escape a `cd` target token."""
+    tok = tok.strip()
+    if len(tok) >= 2 and tok[0] in "'\"" and tok[-1] == tok[0]:
+        tok = tok[1:-1]
+    else:
+        # de-escape backslash-escaped chars (e.g. `cd cl\ ients`)
+        tok = re.sub(r"\\(.)", r"\1", tok)
+    return tok
+
+
+def _effective_cwd_from_cd(command: str, cwd: str) -> str:
+    """Compute the EFFECTIVE cwd after applying any leading/chained `cd` commands.
+
+    Splits the command on shell separators (`&&`, `||`, `;`) and, for every
+    segment that is a bare `cd <target>`, applies it to a running cwd (joining a
+    relative target against the current running cwd, `..`/`.` collapsed lexically
+    with `os.path.normpath` — we do NOT `realpath`, because the target may be a
+    `/sessions/*/mnt/...` alias that doesn't exist on the host and must stay in
+    the alias namespace to be classified). A `cd` with no argument, with `-`, or
+    with options/globs/vars we can't resolve statically STOPS the walk (we can't
+    know the resulting cwd → keep the last known-good, conservative). Returns the
+    effective cwd string; falls back to the original `cwd` if no `cd` applies.
+
+    This is intentionally conservative and SIDE-EFFECT-FREE: it only reads the
+    command string. It is used solely to give the EXISTING relative-token and
+    mnt-alias logic the correct base to resolve against.
+    """
+    if not command or "cd" not in command:
+        return cwd
+    eff = cwd or ""
+    for seg in _CD_SEP_RE.split(command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        # Only a segment whose FIRST word is `cd` moves the cwd. Any other command
+        # (cat, grep, echo…) doesn't change cwd; keep walking to catch a later `cd`.
+        parts = seg.split(None, 1)
+        if parts[0] != "cd":
+            continue
+        if len(parts) == 1:
+            # bare `cd` → HOME; can't resolve to a mount reliably. Stop: treat the
+            # remaining relative tokens as un-anchored (they'll be handled by the
+            # absolute-token paths / needle scan, not mis-anchored against a mount).
+            return eff
+        target = _unwrap_cd_target(parts[1].strip())
+        # A `cd` target that itself carries a separator's tail shouldn't happen
+        # (we already split), but guard against embedded spaces/args: take the
+        # first whitespace-delimited token of the (unwrapped) target.
+        if target[:1] not in ("/", "~", ".") and "/" not in target:
+            # single bare segment like `cd Dropbox` — a relative dir move; keep it.
+            pass
+        else:
+            # take only the leading path token if extra args slipped in
+            target = target.split()[0] if target.split() else target
+        if target in ("-",) or target.startswith("$") or _GLOB_META_RE.search(target):
+            # `cd -`, `cd $VAR`, `cd glob*` → can't resolve statically. Stop the
+            # walk at the last known-good cwd (conservative; do not guess).
+            return eff
+        target = os.path.expanduser(target)
+        if os.path.isabs(target):
+            eff = os.path.normpath(target)
+        else:
+            eff = os.path.normpath(os.path.join(eff, target)) if eff else target
+    return eff
+
+
+# --- FINDING #553 (B): cwd-HIDING construct + mnt token → fail-close the CLASS --
+# The primary #553 fix parses a LEADING/CHAINED `cd X && …` to compute the
+# effective cwd, so a *resolvable, non-hidden* `cd` is handled precisely. But the
+# `cd` can be HIDDEN from that lexical parse inside a construct the guard cannot
+# cleanly resolve — a subshell `(...)`, a nested shell (`bash -c "…"`), `pushd`,
+# `eval`, or a command substitution `$(…)`/backticks. In every such case the
+# effective-cwd walk never sees the inner `cd`, so a relative read that lands in a
+# protected mount evades the mnt-alias fail-closed:
+#     (cd /sessions/<s>/mnt && cat "Dropbox/clients/f.pdf")      → LEAK
+#     bash -c "cd /sessions/<s>/mnt && cat Dropbox/clients/f.pdf" → LEAK
+#     pushd /sessions/<s>/mnt && cat "Dropbox/clients/f.pdf"      → LEAK
+#     eval "cd /sessions/<s>/mnt && cat Dropbox/clients/f.pdf"    → LEAK
+#
+# DECISION (Joris approved, option B): do NOT chase each construct with a parser.
+# FAIL-CLOSE on the CLASS. Rule:
+#   If a Bash command contains a cwd-HIDING / cwd-CHANGING construct the guard
+#   cannot cleanly resolve AND the command ALSO contains ANY `/sessions/*/mnt/`
+#   token (literal, ANYWHERE in the string) → DENY the whole command.
+#
+# ACCEPTED over-block (Joris approved): within a hiding construct we CANNOT prove
+# a `mnt/outputs` reference stays in outputs (the construct could `cd` elsewhere),
+# so ANY `/sessions/*/mnt/` token — EVEN an infra one — inside a hiding construct
+# → DENY. A hiding construct with NO `/sessions/*/mnt/` token at all → ALLOW (we
+# do NOT over-block `bash -c "echo hi"` or `(ls /tmp)`).
+#
+# The literal-token scan is deliberately SUBSTRING-based (not cwd-anchored): inside
+# a hiding construct we can't anchor a relative token, but any absolute alias
+# reference still carries the literal `/sessions/<name>/mnt/` prefix, and a relative
+# read only leaks when paired with a `cd` INTO the mount whose alias prefix is
+# itself present in the command. If NO literal `/sessions/*/mnt/` substring appears
+# anywhere, there is nothing for the hiding construct to escape into → ALLOW.
+# Match `/sessions/<name>/mnt` as a whole segment: `/mnt` must be followed by a
+# `/` (a deeper path), OR a token boundary (whitespace, quote, separator, or end).
+# This catches BOTH the absolute-alias read (`/sessions/x/mnt/Dropbox/f`) AND the
+# `cd` target with no trailing slash (`cd /sessions/x/mnt && …`).
+_SESSION_MNT_SUBSTR_RE = re.compile(r"/sessions/[^/\s'\"]+/mnt(?:/|[\s'\";&|)`>]|$)")
+
+# cwd-HIDING / cwd-CHANGING constructs the guard cannot cleanly resolve. Presence
+# of ANY of these makes the effective-cwd computation unreliable, so paired with a
+# mnt token we fail closed. Detected by cheap, over-inclusive patterns (a false
+# positive only costs an over-block, and ONLY when an mnt token is ALSO present):
+#   - subshell `(...)`                        — a bare `(` group
+#   - nested shell `bash -c` / `sh -c` / `zsh -c` (any `<shell> -c`)
+#   - `pushd` / `popd`                        — directory-stack moves
+#   - `eval`                                  — re-parses a built string
+#   - command substitution `$(...)` / backticks
+#   - `cd -`                                  — to OLDPWD (unknowable statically)
+#   - `cd $VAR` / `cd "$..."` / `cd ${...}`   — env-var target
+#   - `cd $(...)` / `cd `...``                — command-substitution target
+#   - `cd <glob>`                             — a `cd` target with a glob metachar
+_HIDING_CONSTRUCT_RES = (
+    re.compile(r"\("),                                   # subshell group open
+    re.compile(r"\$\("),                                 # $(...) command subst
+    re.compile(r"`"),                                    # backtick command subst
+    re.compile(r"(?:^|[\s;&|])(?:ba|z)?sh\s+-[a-zA-Z]*c\b"),  # bash/sh/zsh -c
+    re.compile(r"(?:^|[\s;&|])pushd\b"),                 # pushd
+    re.compile(r"(?:^|[\s;&|])popd\b"),                  # popd
+    re.compile(r"(?:^|[\s;&|])eval\b"),                  # eval
+    re.compile(r"(?:^|[\s;&|])cd\s+-(?:\s|;|&|\||$)"),   # cd -
+    re.compile(r"(?:^|[\s;&|])cd\s+[\"']?\$"),           # cd $VAR / cd "$..." / cd ${...}
+    re.compile(r"(?:^|[\s;&|])cd\s+[^\s;&|]*[*?\[\]{}]"),  # cd <glob-target>
+)
+
+
+def _has_hiding_construct(command: str) -> bool:
+    """True if `command` contains a cwd-HIDING / cwd-CHANGING construct the guard
+    cannot cleanly resolve (subshell, nested shell, pushd/popd, eval, command
+    substitution, `cd -`/`cd $VAR`/`cd $(...)`/`cd <glob>`). Over-inclusive by
+    design — a false positive only over-blocks, and ONLY when an mnt token is also
+    present (see the CLASS gate). The already-handled resolvable `cd X && …` (no
+    metachar target, no separator-hiding) is NOT flagged here."""
+    if not command:
+        return False
+    return any(rx.search(command) for rx in _HIDING_CONSTRUCT_RES)
+
+
+def _mentions_session_mnt(command: str) -> bool:
+    """True if a literal `/sessions/<name>/mnt/` substring appears ANYWHERE in the
+    command (cwd-INDEPENDENT). This is the token a hiding construct could escape
+    into; its mere presence alongside a hiding construct triggers the fail-close."""
+    return bool(command) and bool(_SESSION_MNT_SUBSTR_RE.search(command))
+
+
+# --- FINDING #553 (C): UNRESOLVABLE cd + relative read → fail-close (no literal) -
+# The #553-B CLASS gate above only fires when a hiding construct is paired with a
+# LITERAL `/sessions/*/mnt/` substring. That literal is DEFEATED when the mount
+# path is built from a variable / command-substitution / decoded blob so the token
+# never appears in the command text:
+#     cd "$SESS/mnt" && cat "Dropbox/clients/f.pdf"          → literal absent → LEAK
+#     p=$(printf /x/y); cd $p && cat "Dropbox/clients/f.pdf" → literal absent → LEAK
+#     cd $(echo /whatever) && cat relative/f.pdf             → literal absent → LEAK
+#     eval "$(echo <b64> | base64 -d)"                       → decoded cd invisible → LEAK
+#
+# KEY INSIGHT (Joris approved, option 2): a `cd` whose target the guard CANNOT
+# RESOLVE (env var `$VAR`/`${VAR}`, `$(…)`/backtick command-substitution, `cd -`,
+# glob target, or a decoded `eval "$(…)"`) is ALREADY a hiding construct. In a
+# Cowork session the guard cannot know where that `cd` lands; if it might land in a
+# mounted protected folder, a SUBSEQUENT RELATIVE file read would hit protected
+# content. So: UNRESOLVABLE cd  +  a relative (cwd-dependent) file read  → DENY,
+# EVEN with no literal `/sessions/*/mnt/` token. An ABSOLUTE read after the same cd
+# is cwd-INDEPENDENT (its target is fixed regardless of the unknown cwd) → ALLOW —
+# only relative reads are endangered by an unknown cwd.
+#
+# Detectors, deliberately narrow to avoid bricking normal shell use:
+#   _has_unresolvable_cd  → a `cd` whose target we can't statically resolve to a
+#     concrete path: `cd $VAR` / `cd "$..."` / `cd ${...}` / `cd $(...)` /
+#     `cd `...`` / `cd -` / `cd <glob>`. (A plain `cd /tmp` or `cd sub/dir` is
+#     RESOLVABLE and is NOT flagged — the effective-cwd walk handles it precisely.)
+#   _has_opaque_eval      → `eval "$(...)"` / `eval $(...)` / ``eval `...``` — the
+#     decoded command text is INVISIBLE, so we can't prove it contains no relative
+#     read. Judgment call (documented): fail-close on opaque eval regardless of a
+#     visible read, since the hidden text could read anything relative.
+#   _has_relative_read    → a subsequent file access on a RELATIVE / cwd-dependent
+#     path: a known content-reading verb (cat/head/tail/…) whose arg is a relative
+#     token, OR any relative slash-bearing path token anywhere. Absolute (`/…`,
+#     `~/…`) reads do NOT count (cwd-independent).
+
+# A `cd` target we can't statically resolve to a concrete path. Mirrors (a superset
+# of) the `cd`-hiding entries in _HIDING_CONSTRUCT_RES, but SCOPED to `cd` itself so
+# a benign subshell/`$()` elsewhere does not, on its own, count as an unresolvable cd.
+_UNRESOLVABLE_CD_RES = (
+    re.compile(r"(?:^|[\s;&|(])cd\s+[\"']?\$"),            # cd $VAR / cd "$..." / cd ${...} / cd $(...)
+    re.compile(r"(?:^|[\s;&|(])cd\s+[\"']?`"),            # cd `...`  (backtick target)
+    re.compile(r"(?:^|[\s;&|(])cd\s+-(?:\s|;|&|\||$)"),    # cd -  (OLDPWD, unknowable)
+    re.compile(r"(?:^|[\s;&|(])cd\s+[^\s;&|]*[*?\[\]{}]"), # cd <glob-target>
+)
+
+# `eval` of a command-substitution whose decoded text we can't see. Fail-close.
+_OPAQUE_EVAL_RE = re.compile(r"(?:^|[\s;&|(])eval\s+[\"']?(?:\$\(|`)")
+
+# Content-reading shell verbs. A relative-path arg to any of these after an
+# unresolvable cd is the dangerous read. Kept broad on the read side (missing a
+# reader is a hole; an extra verb only matters when an unresolvable cd is ALSO
+# present, i.e. exactly the obfuscation shape).
+_READ_VERBS = (
+    "cat", "head", "tail", "less", "more", "bat", "nl", "tac",
+    "base64", "xxd", "od", "hexdump", "strings", "grep", "egrep", "fgrep",
+    "rg", "ag", "awk", "sed", "cut", "sort", "uniq", "wc", "tr", "col",
+    "python", "python3", "perl", "ruby", "node", "cp", "mv", "install",
+    "tesseract", "pdftotext", "pdfimages", "file", "stat", "open", "dd",
+)
+
+
+def _has_unresolvable_cd(command: str) -> bool:
+    """True if `command` contains a `cd` whose target the guard CANNOT statically
+    resolve to a concrete path (env-var / command-substitution / backtick / `cd -`
+    / glob target). A plain resolvable `cd /abs` or `cd rel/dir` is NOT flagged —
+    the effective-cwd walk handles those precisely. Over-inclusive is safe: this
+    only bites when a subsequent RELATIVE read is ALSO present (the CLASS-C gate)."""
+    if not command or "cd" not in command:
+        return False
+    return any(rx.search(command) for rx in _UNRESOLVABLE_CD_RES)
+
+
+def _has_opaque_eval(command: str) -> bool:
+    """True if `command` contains `eval "$(...)"` / `eval $(...)` / ``eval `...``` —
+    an eval whose decoded content is invisible to the guard. Documented judgment
+    call: fail-close, because the hidden text could perform a relative read into a
+    mount and we cannot inspect it. A plain `eval "echo hi"` (literal, no command
+    substitution) is NOT flagged here (it is visible; #553-B handles it if it names
+    an mnt token)."""
+    return bool(command) and bool(_OPAQUE_EVAL_RE.search(command))
+
+
+def _has_relative_read(command: str) -> bool:
+    """True if `command` performs a file access on a RELATIVE (cwd-dependent) path.
+
+    Two signals, either suffices:
+      1) a known content-reading verb (_READ_VERBS) whose FIRST non-flag argument is
+         a relative token (not `/…`, not `~/…`, not a pure option) — catches
+         `cat Dropbox/x`, `cat x`, `grep foo notes.txt`, `head client/f`;
+      2) ANY relative slash-bearing path token anywhere (`_REL_TOKEN_RE`) — catches
+         redirections / arg positions the verb-scan misses (`< notes/secret`).
+
+    ABSOLUTE / home reads (`/…`, `~/…`) are cwd-INDEPENDENT and do NOT count: an
+    unresolvable `cd` cannot change where an absolute path points. `ls`, `pwd`,
+    `echo`, `date` are not readers → emit nothing (no over-block).
+
+    Heuristic, err toward detection: when an unresolvable cd is present, ANY
+    relative file read is treated as the obfuscation shape and denied."""
+    if not command:
+        return False
+    # 1) relative slash-bearing path token anywhere (Dropbox/x, notes/secret.txt).
+    if _REL_TOKEN_RE.search(command):
+        return True
+    # 2) a read-verb applied to a relative bare arg (cat x, grep foo bar.txt).
+    #    Split on shell separators so we inspect each simple command's head+args.
+    for seg in re.split(r"(?:&&|\|\||;|\||\n)", command):
+        toks = seg.strip().split()
+        if not toks:
+            continue
+        # strip a leading env-assignment prefix (FOO=bar cat x)
+        i = 0
+        while i < len(toks) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]):
+            i += 1
+        if i >= len(toks):
+            continue
+        verb = os.path.basename(toks[i])
+        if verb not in _READ_VERBS:
+            continue
+        # inspect the args for a relative (cwd-dependent) path-ish token
+        for arg in toks[i + 1:]:
+            a = arg.strip("'\"")
+            if not a or a.startswith("-"):
+                continue
+            if a.startswith("/") or a.startswith("~"):
+                # absolute/home read → cwd-independent → not endangered.
+                # keep scanning: a later arg could still be relative.
+                continue
+            if a.startswith("$") or a.startswith("`") or "$(" in a:
+                # an unresolvable arg itself — treat as relative-ish (unknown).
+                return True
+            # a bare or slash-bearing relative token used as a read target.
+            # (`secret`, `Dropbox/x`, `client/notes.txt`) → cwd-dependent read.
+            return True
+    return False
+
+
 # --- Cowork sandbox-mount-alias handling (FIX B / FIX C) -----------------------
 # Cowork runs the agent in a sandbox VM and mounts each folder the user connected
 # to the session under a DYNAMIC per-session alias:
@@ -854,8 +1247,32 @@ def _main(raw: str) -> None:
         return
 
     tool_name = event.get("tool_name", "")
-    tool_input = event.get("tool_input", {}) or {}
-    cwd = event.get("cwd", "") or os.getcwd()
+
+    # --- INPUT ROBUSTNESS (FINDING #553-B, part 2): NORMALISE/COERCE the event
+    # shape BEFORE any decision logic. The harness legitimately passes some events
+    # in a structured shape (tool_input as a LIST, cwd as an INT, command as a
+    # LIST). Historically these hit the blanket-except and fail-closed with a scary
+    # "🔒 erreur interne du guard", blocking the user's REAL work. We coerce them to
+    # the expected types so they reach a NORMAL decision instead. SECURITY: this is
+    # coerce-THEN-decide, never coerce-to-allow — a command passed as a list that
+    # touches a protected path must STILL be denied (see below: the list is joined
+    # into a scannable command string, not dropped). The blanket-except in main()
+    # stays as the ultimate backstop for a TRULY unexpected error.
+    tool_name = tool_name if isinstance(tool_name, str) else str(tool_name or "")
+
+    # tool_input: anything that isn't a dict → treat as empty dict. A list/str/None
+    # tool_input carries no path-bearing keys we can gate, so {} is the safe
+    # normalisation (the Bash-command path below re-derives `command` defensively).
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    # cwd: coerce to str. An INT/None/other cwd must not crash the join logic.
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str):
+        cwd = "" if cwd is None else str(cwd)
+    if not cwd:
+        cwd = os.getcwd()
 
     # GLOBAL config (optional; back-compat + CLI multi-folder). Markers compose
     # with it. The guard is NO LONGER inert just because the global config is
@@ -922,6 +1339,83 @@ def _main(raw: str) -> None:
         command = (tool_input.get("command")
                    or tool_input.get("script")
                    or tool_input.get("code") or "")
+        # ROBUSTNESS (FINDING #553-B, part 2): a structured command may arrive as a
+        # LIST (["cat", "/path"]) rather than a str. Join it with spaces so it is
+        # still SCANNED (coerce-then-decide, never coerce-to-allow: a list touching
+        # a protected path must still be denied). Any non-str/non-list → "".
+        if isinstance(command, (list, tuple)):
+            command = " ".join(str(x) for x in command)
+        elif not isinstance(command, str):
+            command = "" if command is None else str(command)
+
+        # FINDING #553-D: resolve SIMPLE literal `VAR=value` assignments made earlier
+        # in this same command and splice their values into `$VAR`/`${VAR}` refs, so a
+        # mount literal hidden in a variable (`S=/sessions/foo; cat "$S/mnt/…"`)
+        # becomes VISIBLE to every gate below. DETECTION ONLY — the ORIGINAL command
+        # runs; this resolved form is solely what the guard inspects. A non-literal
+        # RHS ($(…)/backtick/var/glob) is left unresolved, so benign/unresolved cases
+        # fall through the existing gates unchanged (no over-block). See
+        # _resolve_simple_var_assignments.
+        command = _resolve_simple_var_assignments(command)
+
+        # FINDING #553: a compound command can `cd` INTO a mount before reading a
+        # relative token, which would otherwise anchor against the untracked
+        # session cwd and bypass the mnt-alias fail-closed. Compute the EFFECTIVE
+        # cwd after applying any leading/chained `cd`, and resolve relative tokens
+        # (path extraction, bare-word, and mnt-alias classification) against THAT.
+        # For an absolute path or the mac-path scan, `cwd` is irrelevant, so this
+        # is purely additive — it only corrects the base of RELATIVE resolution.
+        eff_cwd = _effective_cwd_from_cd(command, cwd)
+
+        # --- FINDING #553 (B): cwd-HIDING construct + mnt token → fail-close CLASS.
+        # If the command hides the effective `cd` from our lexical parse (subshell,
+        # bash/sh/zsh -c, pushd/popd, eval, $()/backticks, cd -/cd $VAR/cd $(…)/
+        # cd <glob>) AND ALSO references any `/sessions/*/mnt/` token, we cannot
+        # prove where a relative read lands — DENY the whole command. This runs
+        # BEFORE the finer-grained resolvable-cd logic so a hidden construct can
+        # never fall through to an ALLOW. A hiding construct with NO mnt token, or
+        # an mnt token with NO hiding construct, is handled by the paths below (no
+        # over-block). See _has_hiding_construct / _mentions_session_mnt.
+        if _has_hiding_construct(command) and _mentions_session_mnt(command):
+            _deny(
+                f"{g_message}\n[Bubble Shield guard: construction masquant le "
+                "répertoire courant (sous-shell / bash -c / pushd / eval / $(…) / "
+                "cd non résoluble) combinée à une référence de montage sandbox "
+                "/sessions/*/mnt/ — le guard ne peut pas prouver où atterrit la "
+                "lecture, bloqué par sécurité (fail-closed sur la classe #553-B).]")
+            return
+
+        # --- FINDING #553 (C): UNRESOLVABLE cd + RELATIVE read → fail-close.
+        # #553-B above needs a LITERAL `/sessions/*/mnt/` token; that literal is
+        # DEFEATED when the mount path is built from a var / `$(…)` / decoded blob.
+        # KEY INSIGHT: an unresolvable `cd` target is ALREADY a hiding construct —
+        # the guard can't know where it lands. If it MIGHT land in a mounted
+        # protected folder and a SUBSEQUENT RELATIVE read would then hit protected
+        # content, the only safe posture is DENY, EVEN with no literal mnt token.
+        # An ABSOLUTE read after the same cd is cwd-INDEPENDENT (its target is fixed
+        # regardless of the unknown cwd) → NOT denied here. An unresolvable cd with
+        # NO relative read (`cd "$D" && echo done`, `cd "$D" && ls`) → NOT denied.
+        # Runs AFTER the #553-B literal gate and BEFORE the resolvable-cd path logic
+        # so the obfuscated shape can never fall through to an ALLOW. See
+        # _has_unresolvable_cd / _has_relative_read / _has_opaque_eval.
+        if _has_opaque_eval(command):
+            # `eval "$(…)"` — decoded text invisible; can't prove it performs no
+            # relative read. Documented judgment call: fail-close on opaque eval.
+            _deny(
+                f"{g_message}\n[Bubble Shield guard: eval d'une substitution de "
+                "commande opaque (eval \"$(…)\") — le contenu décodé est invisible "
+                "pour le guard et pourrait lire un fichier relatif dans un montage "
+                "protégé, bloqué par sécurité (fail-closed #553-C).]")
+            return
+        if _has_unresolvable_cd(command) and _has_relative_read(command):
+            _deny(
+                f"{g_message}\n[Bubble Shield guard: `cd` vers une cible non "
+                "résoluble (variable / $(…) / backtick / cd - / glob) suivie d'une "
+                "lecture de fichier par chemin RELATIF — le guard ne peut pas "
+                "prouver que la lecture n'atterrit pas dans un montage protégé, "
+                "bloqué par sécurité (fail-closed #553-C). Une lecture par chemin "
+                "ABSOLU après le même cd resterait autorisée.]")
+            return
 
         # --- PRIMARY: per-path marker walk-up on paths extracted from the command.
         # This is the robust, cwd-INDEPENDENT mechanism. We pull every absolute/home
@@ -931,7 +1425,7 @@ def _main(raw: str) -> None:
         # closes the proven exfil gap: `tesseract /a/b/Dossier/avis.jpg stdout` with
         # cwd=/Users/joris (an unrelated session root) now resolves the marker on
         # the FILE'S OWN ancestry instead of relying on cwd-anchored discovery.
-        for p in _extract_command_paths(command, cwd):
+        for p in _extract_command_paths(command, eff_cwd):
             blocked, message = decide_block(p)
             if not blocked:
                 continue
@@ -1033,7 +1527,20 @@ def _main(raw: str) -> None:
         # inode, so it must fail closed on every non-infra mount subtree even when
         # no protected_folders/markers are known to the host. See Fix C comment.
 
-        for tok, rest in _iter_session_mnt_tokens(command, cwd):
+        # Classify mnt-alias tokens against BOTH the original event.cwd AND the
+        # `cd`-derived effective cwd, and DENY if EITHER anchoring lands a relative
+        # token in a protected/non-infra mount (fail-closed union). This closes
+        # FINDING #553 (`cd` into a mount before a relative read) without letting a
+        # trailing/out-of-order `cd` re-anchor a would-be-blocked read into infra.
+        mnt_tokens: "list[tuple[str, str]]" = []
+        _seen_mnt: set[str] = set()
+        for base_cwd in (cwd, eff_cwd):
+            for tok, rest in _iter_session_mnt_tokens(command, base_cwd):
+                if tok in _seen_mnt:
+                    continue
+                _seen_mnt.add(tok)
+                mnt_tokens.append((tok, rest))
+        for tok, rest in mnt_tokens:
             first = _mnt_first_segment(rest)   # e.g. "clients" from "clients/x/y"
             if not first:
                 continue
