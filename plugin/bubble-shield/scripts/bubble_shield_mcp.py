@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -399,6 +400,94 @@ _NER_DOWN_ERROR = (
     "Si le problème persiste, relancez bubble_shield_setup_ml(action='status')."
 )
 
+# P0 SECURITY FIX (#589) — see ZeroDetectionError above for the full root cause.
+# This message now fires ONLY for the GARBLED/low-quality split of
+# zero_detection (see _text_quality_gate below) — a substantial doc where the
+# extracted text itself is too degraded (OCR noise, broken extraction) for the
+# recognizers to have had a fair shot. The genuinely-clean-prose split returns
+# normally with _ZERO_DETECTION_CLEAN_NOTE instead of raising this.
+_ZERO_DETECTION_ERROR = (
+    "⛔ Bubble Shield n'a pas pu analyser ce document de façon fiable (texte "
+    "illisible / extraction dégradée — probablement un PDF scanné/image ou une "
+    "extraction OCR de mauvaise qualité). Le contenu n'est PAS renvoyé ; "
+    "relisez le fichier original."
+)
+
+# P0 SECURITY FIX (#589) — TEXT-QUALITY GATE (Joris, validated on real data
+# 2026-07-07). A "zero_detection" verdict (masking COMPLETED, substantial doc,
+# entity_count==0) is ambiguous by candidate count alone: a garbage/OCR-broken
+# extraction can produce a stray false candidate while genuinely clean prose
+# produces none — the count doesn't separate "recognizers had nothing to find"
+# from "recognizers never had a fair shot at real text". What DOES separate
+# them, live-measured on real doc pairs:
+#   CLEAN prose:   real_word_ratio=0.84  avg_word_len=6.4  nonword_pct=0.7
+#   GARBAGE/OCR:   real_word_ratio=0.08  avg_word_len=2.4  nonword_pct=13.3
+# Huge margin. Thresholds below sit well clear of both ends, with extra
+# headroom on the clean side so a legit number/table-heavy CGP doc (real
+# words, just also lots of digits/figures) is NOT falsely refused —
+# real_word_ratio + avg_word_len are the PRIMARY signals (a table doc still
+# has plenty of real words of normal length); nonword_pct is SECONDARY
+# (symbol/glyph noise is the strongest OCR-garbage tell, but a legit doc with
+# some punctuation/currency signs must not trip it alone).
+# Tune here if a real clean-but-numeric doc ever trips this — these are the
+# ONLY three numbers that decide the split.
+_QUALITY_MIN_REAL_WORD_RATIO = 0.40
+_QUALITY_MIN_AVG_WORD_LEN = 3.5
+_QUALITY_MAX_NONWORD_PCT = 8.0
+
+# A "real word" for this gate: alphabetic (letters only, any Unicode letter —
+# so accented French text counts), at least 2 characters. Deliberately
+# excludes pure-digit tokens (a table of numbers is real DATA but shouldn't
+# inflate "real word" count) and single letters (OCR noise is full of them).
+_REAL_WORD_RE = re.compile(r"^[^\W\d_]{2,}$", re.UNICODE)
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+# Characters that are expected in normal prose/tables and must NOT count as
+# "nonword" noise: alnum + whitespace + common punctuation/currency/typography.
+_EXPECTED_CHARS = set(".,;:!?'\"()-/€%&@°#*+=_[]«»…–—")
+
+_ZERO_DETECTION_CLEAN_NOTE = (
+    "\n\n[⚠️ Bubble Shield : aucune donnée identifiante détectée — cela ne "
+    "garantit PAS l'absence de PII. Sur un document de ce type, « rien "
+    "trouvé » peut signifier qu'un nom ou une adresse est passé inaperçu. "
+    "Une relecture humaine est requise avant envoi.]")
+
+
+def _text_quality_gate(text: str) -> bool:
+    """Return True when `text` is clean-enough prose for a zero_detection
+    verdict to be trusted as "genuinely nothing to find" rather than
+    "extraction too degraded for detectors to have had a fair shot".
+
+    Computes real_word_ratio, avg_word_len, nonword_pct on `text` and compares
+    against the module-top calibrated constants. Refuses (returns False) if
+    ANY of the three signals is on the bad side of its threshold — see the
+    constants' comment above for the calibration data and rationale.
+    """
+    tokens = _TOKEN_RE.findall(text or "")
+    if not tokens:
+        # No tokens at all can't be "clean prose" — but this path is only ever
+        # reached for a substantial_text doc (>=8 words / >=40 chars per
+        # engine.py), so an empty token list here would itself be suspicious.
+        return False
+
+    real_words = [t for t in tokens if _REAL_WORD_RE.match(t)]
+    real_word_ratio = len(real_words) / len(tokens)
+    avg_word_len = (sum(len(t) for t in real_words) / len(real_words)) if real_words else 0.0
+
+    total_chars = len(text)
+    nonword_chars = sum(
+        1 for c in text
+        if not (c.isalnum() or c.isspace() or c in _EXPECTED_CHARS)
+    )
+    nonword_pct = (nonword_chars / total_chars * 100.0) if total_chars else 0.0
+
+    if real_word_ratio < _QUALITY_MIN_REAL_WORD_RATIO:
+        return False
+    if avg_word_len < _QUALITY_MIN_AVG_WORD_LEN:
+        return False
+    if nonword_pct > _QUALITY_MAX_NONWORD_PCT:
+        return False
+    return True
+
 
 def _try_spawn_daemon_from_mcp() -> None:
     """Best-effort daemon re-arm from the MCP server path. Fails open (never
@@ -612,6 +701,96 @@ class NERDownError(RuntimeError):
     """
 
 
+# P0 SECURITY FIX (#589) — zero-detection on a SUBSTANTIAL document is NOT safe
+# to return. Root cause (live-confirmed): _anonymise_text failed closed only
+# when the NER daemon was DOWN, but when the engine ran fine and found ZERO
+# detections on a substantial doc (engine.py's verdict_state=="zero_detection"),
+# it still returned res.anonymized — which on a zero-detection result IS THE
+# RAW INPUT TEXT — plus a soft "please review" note. A note is not containment:
+# the raw PII is already in the model's context. This leaked a real client's raw
+# PDF (43KB, 4 raw phone numbers, zero tokens) in a live session with the daemon
+# UP and healthy.
+class ZeroDetectionError(RuntimeError):
+    """Raised by _anonymise_text when a SUBSTANTIAL document (engine.py's
+    AnonymizationResult.verdict_state == "zero_detection") yields zero
+    detections AND the extracted text itself fails the text-quality gate
+    (_text_quality_gate — see its module-top constants/comment). "Found
+    nothing" cannot be certified "safe" when the text was too garbled/degraded
+    for the recognizers to have had a fair shot — so this is a hard refusal,
+    not a soft note appended to the raw text.
+
+    NOT raised when zero_detection fires on genuinely CLEAN prose — that is
+    the honest "no PII in this document" case (GLiNER had real text and
+    confidently found nothing) and returns normally with
+    _ZERO_DETECTION_CLEAN_NOTE instead. See the text-quality gate block in
+    _anonymise_text for the clean/garbled split.
+
+    Distinct from NERDownError (daemon offline) — this fires with the daemon
+    UP and healthy, on the engine's own honest verdict. Distinct from the
+    "nothing_to_do" state (trivially short/empty input, e.g. "ok" or a bare
+    date) which is NOT gated here — see AnonymizationResult.substantial_text
+    in engine.py (>=8 words AND >=40 chars) for the exact boundary.
+
+    Callers (the tools/call handler) must convert this to isError:true without
+    including any anonymized body or raw PII text — fail-closed contract,
+    same shape as NERDownError.
+    """
+
+
+# P0 SECURITY FIX (#589) — STRUCTURAL TRIPWIRE: fail closed whenever masking did
+# NOT PROVABLY COMPLETE, regardless of cause. Root cause of the live P0 leak
+# session (a 43KB PDF + a .docx, ZERO masking tokens,
+# isError=false, ZERO audit "anonymize" entries for the read): a masking run
+# silently failed to complete, yet the RAW extracted text was still returned.
+# The two error classes above (NERDownError, ZeroDetectionError) each cover ONE
+# known way completion can fail (daemon offline / substantial-doc-zero-hits).
+# This is the CATCH-ALL for every other way `res` could be something other than
+# a genuinely-completed AnonymizationResult by the time code reaches `return
+# res.anonymized + note`: engine.anonymize() returning None/a malformed object,
+# a monkeypatched/mocked engine in a future refactor, a partial object missing
+# verdict_state, or any other "looked fine at a glance but never finished."
+#
+# THE KEY DISTINCTION (do not confuse with ZeroDetectionError): this is NOT
+# about "zero PII was found" — a real completed run with verdict_state
+# 'nothing_to_do' or 'zero_detection' (handled above) still returns / is
+# handled by its own dedicated gate. This fires ONLY when the run itself is
+# not verifiably complete: `res` is missing entirely, or `res.verdict_state`
+# is not one of the engine's own canonical states. A valid state means
+# AnonymizationResult's own property machinery evaluated cleanly on a real
+# result object — i.e. engine.anonymize() ran to completion and returned a
+# real result.
+_VALID_VERDICT_STATES = frozenset(
+    {"leak", "low_confidence", "zero_detection", "nothing_to_do", "masked_ok"})
+
+_MASKING_INCOMPLETE_ERROR = (
+    "⛔ Bubble Shield n'a pas pu certifier qu'un masquage complet a eu lieu sur "
+    "ce document — le résultat de l'anonymisation est absent ou invalide. Par "
+    "sécurité, AUCUN contenu n'est renvoyé (le texte brut n'est jamais renvoyé "
+    "quand le masquage n'a pas pu être vérifié comme terminé). Relancez la "
+    "lecture ; si le problème persiste, contactez le support."
+)
+
+
+class MaskingIncompleteError(RuntimeError):
+    """Raised by _anonymise_text when engine.anonymize() did not provably run
+    to completion — i.e. `res` is not a real AnonymizationResult carrying a
+    known-valid `verdict_state`.
+
+    THE STRUCTURAL TRIPWIRE (#589): this is the fail-closed backstop for every
+    return path in _anonymise_text that is NOT already covered by NERDownError
+    (daemon offline) or ZeroDetectionError (substantial doc, zero hits, but a
+    COMPLETED run). It fires when completion itself cannot be verified — e.g.
+    `res` is None, or `res.verdict_state` is missing/not one of the engine's
+    canonical states — NOT when completion succeeded and simply found no PII
+    ('nothing_to_do' / a completed 'zero_detection' both still return/are
+    handled by their own gate; see the KEY DISTINCTION note above this class).
+
+    Callers (the tools/call handler) must convert this to isError:true without
+    including any anonymized body or raw PII text — fail-closed contract, same
+    shape as NERDownError/ZeroDetectionError.
+    """
+
+
 # #568 — async on-seed de-pollution trigger.
 #
 # After seed_vault_into_gazetteer() feeds newly-confirmed PII into the deny-list
@@ -669,6 +848,21 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
         _try_spawn_daemon_from_mcp()
         raise NERDownError(_NER_DOWN_ERROR)
     res = engine.anonymize(text)
+
+    # P0 SECURITY FIX (#589) — STRUCTURAL TRIPWIRE. `res` must be a genuinely
+    # COMPLETED AnonymizationResult before ANYTHING below trusts it (including
+    # persisting to the vault). A valid verdict_state can only be produced by
+    # AnonymizationResult's own property chain running on a real result object,
+    # so this is the earliest point a "did masking actually complete?" check
+    # can be made — placed BEFORE vault.save so an incomplete/invalid result
+    # never even gets persisted as if it were real masking output. This is the
+    # catch-all fail-closed gate for every path that is NOT already covered by
+    # NERDownError (daemon offline, above) or ZeroDetectionError (a COMPLETED
+    # run that legitimately found zero PII on a substantial doc, below) — see
+    # MaskingIncompleteError's docstring for the full rationale.
+    if res is None or getattr(res, "verdict_state", None) not in _VALID_VERDICT_STATES:
+        raise MaskingIncompleteError(_MASKING_INCOMPLETE_ERROR)
+
     engine.vault.save(str(vpath))
 
     # #390 — seed the vault into the deny-list gazetteer. Every IDENTIFYING value
@@ -697,18 +891,45 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
     except Exception:
         pass  # fail-open: sidecar write never breaks anonymization
 
+    # P0 SECURITY FIX (#589) — TEXT-QUALITY GATE on zero-detection for a
+    # SUBSTANTIAL document. The host-side, fail-open side effects above (vault
+    # save, deny-list seeding, de-pollution trigger, candidate sidecar) have
+    # already run — this gate only controls what comes back to the AGENT.
+    # verdict_state=="zero_detection" fires ONLY for a substantial doc
+    # (engine.py AnonymizationResult.substantial_text: >=8 words AND >=40
+    # chars) — the distinct "nothing_to_do" state (trivially short/empty
+    # input) is deliberately NOT gated here, so a genuinely tiny/empty input
+    # is never refused.
+    #
+    # Candidate COUNT alone is ambiguous here (a garbage/OCR extraction can
+    # produce a stray false candidate while clean prose produces none) — so
+    # the split is on TEXT QUALITY of the extracted text itself, not on
+    # entity_count (which is already 0 either way inside this branch):
+    #   - CLEAN prose (quality above _text_quality_gate's thresholds) → this
+    #     is the genuine "no PII in this document" case: GLiNER had real text
+    #     to work on and confidently found nothing. Falls through to the note
+    #     logic below and RETURNS — refusing this would be over-blocking a
+    #     legitimately clean document.
+    #   - GARBLED/low-quality text (below thresholds) → the extraction itself
+    #     was too degraded for the recognizers to have had a fair shot (OCR
+    #     noise, broken PDF text layer). "Found nothing" here is not an
+    #     honest verdict at all, so this is a HARD FAIL-CLOSED: raise, no
+    #     body returned. This is the real-incident leak class this fix
+    #     closes: a scanned-PDF financial document, OCR-degraded extraction.
+    _state = getattr(res, "verdict_state", None)
+    if _state == "zero_detection" and not _text_quality_gate(res.original):
+        raise ZeroDetectionError(_ZERO_DETECTION_ERROR)
+
     # Verdict note — keyed off the engine's canonical verdict_state so each state
     # gets the HONEST message. Critically, the zero-detection state (a substantial
     # doc where NOTHING was found) must NOT be presented as safe: "found nothing"
     # is not "safe", it's "nothing found", which on free text often means a
-    # name/address was MISSED. (Product-integrity fix 2026-07-02.)
-    _state = getattr(res, "verdict_state", None)
+    # name/address was MISSED. (Product-integrity fix 2026-07-02.) A zero_detection
+    # verdict only reaches this line when _text_quality_gate confirmed the text was
+    # clean enough for that "found nothing" to be a trustworthy verdict (see gate
+    # above) — the garbled split already raised and never gets here.
     if _state == "zero_detection":
-        note = (
-            "\n\n[⚠️ Bubble Shield : aucune donnée identifiante détectée — cela ne "
-            "garantit PAS l'absence de PII. Sur un document de ce type, « rien "
-            "trouvé » peut signifier qu'un nom ou une adresse est passé inaperçu. "
-            "Une relecture humaine est requise avant envoi.]")
+        note = _ZERO_DETECTION_CLEAN_NOTE
     elif _state == "low_confidence":
         note = (
             "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
@@ -1765,6 +1986,18 @@ def _handle(req: dict) -> None:
                 _error(id_, -32601, f"unknown tool: {name}")
         except NERDownError as e:
             # NER daemon is offline — fail-closed. No anonymized body, no raw PII.
+            fail(str(e))
+        except ZeroDetectionError as e:
+            # P0 SECURITY FIX (#589) — substantial doc, zero detections, daemon UP
+            # and healthy. Fail-closed: no anonymized body, no raw PII text.
+            fail(str(e))
+        except MaskingIncompleteError as e:
+            # P0 SECURITY FIX (#589) — STRUCTURAL TRIPWIRE: masking did not
+            # provably complete (no valid AnonymizationResult/verdict_state).
+            # Fail-closed: no anonymized body, no raw extracted/PII text. This
+            # is the exact class of hole that let a raw 43KB client PDF return
+            # with zero masking tokens and isError=false in the live P0
+            # leak session — see MaskingIncompleteError's docstring.
             fail(str(e))
         except Exception as e:
             # fail-CLOSED: the exception message may embed the raw input (mail body,
