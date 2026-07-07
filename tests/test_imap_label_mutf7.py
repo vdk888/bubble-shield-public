@@ -81,6 +81,16 @@ def test_mutf7_encode_ampersand_is_escaped():
     assert mail._mutf7_encode("&") == b"&-"
 
 
+def test_mutf7_encode_strips_variation_selector():
+    """U+FE0F (emoji variation selector) is stripped before encoding, because Gmail
+    strips it on storage — so a label encoded WITH or WITHOUT the VS yields the SAME
+    bytes, keeping add and remove symmetric (verified live: 🏗️/↪️/✍️ store VS-free)."""
+    with_vs = "🏗️ Structurés-Produits"
+    without_vs = "🏗 Structurés-Produits"
+    assert mail._mutf7_encode(with_vs) == mail._mutf7_encode(without_vs)
+    assert b"\xef\xb8\x8f" not in mail._mutf7_encode(with_vs)  # no U+FE0F bytes on wire
+
+
 def test_mutf7_encode_is_deterministic_for_add_remove_symmetry():
     """CRITICAL: add then remove of the SAME label must produce IDENTICAL bytes, or
     Gmail won't match the label on removal. The encoder is a pure function → identical."""
@@ -95,7 +105,10 @@ def test_mutf7_encode_every_taxonomy_label_is_ascii_and_roundtrips(lab):
     wire, and none breaks the add/remove round-trip (variation-selector emoji included)."""
     enc = mail._mutf7_encode(lab)
     assert all(b < 128 for b in enc), f"{lab!r} produced non-ASCII bytes: {enc!r}"
-    assert _mutf7_decode(enc) == lab, f"{lab!r} did not round-trip"
+    # The encoder strips the emoji variation selector U+FE0F (Gmail strips it on
+    # storage — verified live — so we send what Gmail keeps, making add/remove
+    # symmetric). Decode therefore round-trips to the VS-FREE label.
+    assert _mutf7_decode(enc) == lab.replace("️", ""), f"{lab!r} did not round-trip"
 
 
 # ---------------------------------------------------------------------------

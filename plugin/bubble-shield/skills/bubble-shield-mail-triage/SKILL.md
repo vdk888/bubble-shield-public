@@ -169,6 +169,22 @@ sans validation (une adresse vient du corps = zone d'injection possible).
 4. **Compte-rendu** : « X mails triés — répartition par label ; N brouillons de réponse + M
    de transfert prêts à valider. » Ne cite jamais de vrai nom (tu n'en as pas).
 
+## Corriger un tri (le client signale une erreur / change d'avis)
+Un tri n'est jamais figé. Si l'utilisateur dit « ce mail n'est pas un client, c'est une
+newsletter », « tu t'es trompé de catégorie », « remets-le en boîte », ou « change ce
+label » — tu **corriges** avec les mêmes décisions, en utilisant `remove_labels` et/ou
+`unarchive` :
+- **Changer de catégorie** : dans UNE décision, retire l'ancien label et ajoute le bon —
+  `{uid, remove_labels: ["🔴 Clients"], add_labels: ["📰 Newsletters"]}`.
+- **Enlever un label posé à tort** : `{uid, remove_labels: ["⭐ Important"]}`.
+- **Remettre en boîte un mail archivé par erreur** : `{uid, unarchive: true}` (rajoute
+  `\Inbox`). L'inverse d'`archive`.
+- Retirer un label ne fait que **dé-tagger** — ça ne supprime **jamais** le message (rien
+  n'est jamais supprimé). Identifie le mail par son `UID` (relis-le via
+  `bubble_shield_mail_read` si tu ne l'as plus). Ne mets jamais `\Inbox` dans
+  `remove_labels`/`add_labels` — utilise `archive`/`unarchive` pour ça.
+Après correction, refais un mini compte-rendu de ce que tu as changé.
+
 ## Tâche planifiée (matin)
 Pour l'exécution 3×/jour ou le matin : ce skill se déclenche depuis une tâche planifiée
 Cowork. La tâche n'a **aucune** validation à demander car les mutations passent par

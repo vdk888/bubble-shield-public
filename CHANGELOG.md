@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.21.5
+
+### Added
+- **Correct a triage — remove or change a label, un-archive a mail.** If the client
+  points out a mistake or changes their mind, the assistant can now fix a mail without
+  re-doing everything: `bubble_shield_mail_apply` accepts `remove_labels` (drop a wrong
+  tag), a change-category flow (remove the old label + add the right one in one
+  decision), and `unarchive` (bring an archived mail back into the inbox). Removing a
+  label only un-tags — it never deletes the message, and nothing is ever sent.
+
+### Fixed
+- **Emoji variation selector stripped so add/remove stay symmetric.** Gmail strips the
+  U+FE0F variation selector from labels like `🏗️`/`↪️`/`✍️` on storage; Bubble Shield now
+  strips it before encoding too, so a later label removal matches what Gmail actually
+  stored instead of relying on lenient server matching.
+
 ## 1.21.4
 
 ### Fixed

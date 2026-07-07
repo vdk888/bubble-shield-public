@@ -203,10 +203,16 @@ def test_create_draft_rejects_non_bytes(fake_imap):
 # Gmail-IMAP label gotchas — parens + separate STORE for \Inbox vs spaced label
 # ---------------------------------------------------------------------------
 def test_label_arg_is_parenthesised_and_quotes_spaced_labels():
+    # _imap_label_arg now returns BYTES with the user-label TEXT modified-UTF-7 encoded
+    # (RFC 3501 §5.1.3) — a raw str with emoji would ascii-encode → UnicodeEncodeError.
     arg = mail._imap_label_arg(["🔴 Clients", "\\Inbox"])
-    assert arg.startswith("(") and arg.endswith(")"), "label list MUST be wrapped in parens"
-    assert '"🔴 Clients"' in arg, "spaced user label must be quoted"
-    assert "\\Inbox" in arg and '"\\Inbox"' not in arg, "system flag \\Inbox must NOT be quoted"
+    assert isinstance(arg, bytes), "STORE arg must be BYTES (mutf7-encoded, imaplib-safe)"
+    assert arg.startswith(b"(") and arg.endswith(b")"), "label list MUST be wrapped in parens"
+    # spaced user label quoted; its text is mutf7-encoded (🔴 → &2D3dNA-)
+    assert b'"&2D3dNA- Clients"' in arg, "spaced user label must be quoted + mutf7-encoded"
+    assert b"\\Inbox" in arg and b'"\\Inbox"' not in arg, "system flag \\Inbox must NOT be quoted"
+    # no raw non-ASCII may survive into the wire bytes (the UnicodeEncodeError root cause)
+    assert all(b < 128 for b in arg), "STORE arg must be pure-ASCII bytes (no raw non-ASCII)"
 
 
 def test_apply_labels_uses_uid_store_with_parens(fake_imap):
@@ -221,13 +227,16 @@ def test_apply_labels_uses_uid_store_with_parens(fake_imap):
     assert "+X-GM-LABELS" in ops
     assert "-X-GM-LABELS" in ops
     assert len(inst.uid_calls) == 2, "add and remove must be SEPARATE STORE commands"
-    # every STORE arg is parenthesised
+    # every STORE arg is parenthesised BYTES with no raw non-ASCII (regression guard for
+    # the live UnicodeEncodeError: a str arg carrying 🔴 would blow up in imaplib).
     for cmd, uid, op, labelarg in inst.uid_calls:
         assert uid == "42"
-        assert labelarg.startswith("(") and labelarg.endswith(")")
-    # the spaced label and \Inbox are NEVER in the same STORE
+        assert isinstance(labelarg, bytes), "STORE arg passed to M.uid must be BYTES"
+        assert labelarg.startswith(b"(") and labelarg.endswith(b")")
+        assert all(b < 128 for b in labelarg), "STORE arg must contain NO raw non-ASCII"
+    # the spaced label (mutf7 &2D3dNA- Clients) and \Inbox are NEVER in the same STORE
     for cmd, uid, op, labelarg in inst.uid_calls:
-        assert not ("🔴 Clients" in labelarg and "\\Inbox" in labelarg), \
+        assert not (b"&2D3dNA- Clients" in labelarg and b"\\Inbox" in labelarg), \
             "spaced label must NOT be combined with \\Inbox in one STORE"
 
 
@@ -237,7 +246,8 @@ def test_apply_labels_archive_removes_inbox(fake_imap):
     assert len(inst.uid_calls) == 1
     cmd, uid, op, labelarg = inst.uid_calls[0]
     assert op == "-X-GM-LABELS"
-    assert "\\Inbox" in labelarg
+    # \Inbox is ASCII so it passes through mutf7 untouched — archive path is unchanged.
+    assert b"\\Inbox" in labelarg
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +357,35 @@ def test_build_reply_draft_omits_empty_threading_headers():
 # Fix B2 — a draft whose restored body still carries an unresolved ⟦…⟧ token
 #          is SKIPPED (never APPENDed) while labels/archive still apply.
 # ---------------------------------------------------------------------------
+def test_apply_mail_remove_labels_and_unarchive(monkeypatch):
+    """Correction flow: remove_labels re-tags a mistagged mail and unarchive brings
+    an archived mail back into the inbox — \\Inbox is ALWAYS a separate STORE from
+    user labels (never mixed in one command)."""
+    import bubble_shield_mcp as mcp
+    calls = []
+
+    def fake_apply_labels(uid, add_labels=None, remove_labels=None, creds=None):
+        calls.append((uid, list(add_labels or []), list(remove_labels or [])))
+
+    monkeypatch.setattr(mail, "apply_labels", fake_apply_labels)
+    monkeypatch.setattr(mail, "load_credentials", lambda: CREDS)
+
+    # change category: remove 🔴 Clients, add 📰 Newsletters (one user-label STORE pair)
+    mcp._apply_mail([{"uid": "7", "remove_labels": ["🔴 Clients"],
+                      "add_labels": ["📰 Newsletters"]}])
+    assert calls == [("7", ["📰 Newsletters"], ["🔴 Clients"])]
+
+    # unarchive: \Inbox added in its OWN call, never mixed with a user label
+    calls.clear()
+    mcp._apply_mail([{"uid": "7", "add_labels": ["⭐ Important"], "unarchive": True}])
+    assert ("7", ["⭐ Important"], []) in calls          # user label alone
+    assert ("7", ["\\Inbox"], []) in calls               # \Inbox alone
+    # a caller who wrongly puts \Inbox in add_labels: it's stripped from the user set
+    calls.clear()
+    mcp._apply_mail([{"uid": "7", "add_labels": ["\\Inbox", "⭐ Important"]}])
+    assert calls == [("7", ["⭐ Important"], [])]         # \Inbox dropped from user add
+
+
 def test_apply_mail_skips_draft_with_unresolved_token(monkeypatch):
     """If _deanonymise_string leaves a literal ⟦…⟧ token, the draft is SKIPPED
     (no APPEND), the labels are still applied, and the counts report the skip."""
@@ -374,8 +413,12 @@ def test_apply_mail_skips_draft_with_unresolved_token(monkeypatch):
                   "body_tokens": "Bonjour ⟦NOM_0001⟧"},  # 4+ digits → valid TOKEN_RE
     }]
     summary = mcp._apply_mail(decisions)
-    # labels applied...
-    assert applied["labels"] == [("42", ["🔴 Clients"], ["\\Inbox"])]
+    # labels applied — user labels and the \Inbox archive are now SEPARATE STORE
+    # calls (never mix a spaced/emoji label with \Inbox in one command).
+    assert applied["labels"] == [
+        ("42", ["🔴 Clients"], []),      # user-label add (remove_labels defaults to [])
+        ("42", None, ["\\Inbox"]),       # archive = remove \Inbox, on its own
+    ]
     # ...but the draft was NOT appended
     assert applied["drafts"] == [], "draft with unresolved token must NOT be appended"
     assert "ignoré" in summary and "0 brouillon(s) créé" in summary

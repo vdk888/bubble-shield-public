@@ -216,8 +216,12 @@ TOOLS = [
                                     "description": "Message UID (from bubble_shield_mail_read)."},
                             "add_labels": {"type": "array", "items": {"type": "string"},
                                            "description": "Gmail labels to ADD (e.g. ['🔴 Clients'])."},
+                            "remove_labels": {"type": "array", "items": {"type": "string"},
+                                              "description": "Gmail labels to REMOVE from this message — use to CORRECT a mistagged mail or CHANGE a category (remove the wrong label, add the right one in the same decision). Removing a label only un-tags; it never deletes the message. Do NOT put '\\Inbox' here — use 'unarchive' for that."},
                             "archive": {"type": "boolean",
                                         "description": "If true, remove \\Inbox (archive the message). This is the only removal allowed."},
+                            "unarchive": {"type": "boolean",
+                                          "description": "If true, ADD \\Inbox back (bring an archived message back INTO the inbox) — the inverse of archive, e.g. if a mail was archived by mistake."},
                             "draft": {
                                 "type": "object",
                                 "description": "Optional reply draft to create for this message.",
@@ -998,10 +1002,25 @@ def _apply_mail(decisions: list) -> str:
             failures += 1
             continue
         try:
-            add = list(dec.get("add_labels") or [])
-            remove = ["\\Inbox"] if dec.get("archive") else []
+            # USER labels (may be spaced/emoji) — kept STRICTLY separate from the
+            # \Inbox system flag: mixing a spaced label + \Inbox in one STORE is a
+            # Gmail-IMAP gotcha. We drop any \Inbox the caller wrongly put in the
+            # user-label lists (archive/unarchive are the sanctioned way to touch it).
+            add = [l for l in (dec.get("add_labels") or [])
+                   if str(l).strip().lower() not in ("\\inbox", "inbox")]
+            remove = [l for l in (dec.get("remove_labels") or [])
+                      if str(l).strip().lower() not in ("\\inbox", "inbox")]
+            did = False
             if add or remove:
                 apply_labels(uid, add_labels=add, remove_labels=remove, creds=creds)
+                did = True
+            # \Inbox in its OWN store call (never combined with user labels).
+            # archive = remove \Inbox; unarchive = add it back.
+            if dec.get("archive"):
+                apply_labels(uid, remove_labels=["\\Inbox"], creds=creds); did = True
+            if dec.get("unarchive"):
+                apply_labels(uid, add_labels=["\\Inbox"], creds=creds); did = True
+            if did:
                 labels_applied += 1
 
             draft = dec.get("draft")

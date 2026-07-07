@@ -388,8 +388,15 @@ def _mutf7_encode(s: str) -> bytes:
 
     Deterministic: the same input always yields the same bytes, so an add and a later
     remove of the SAME label produce IDENTICAL encoded bytes — Gmail matches on removal.
+
+    NOTE: Gmail STRIPS the emoji variation selector U+FE0F on storage (verified live:
+    '🏗️ Structurés' stores as '🏗 Structurés'). We strip it BEFORE encoding so what we
+    SEND matches what Gmail STORES — otherwise a later remove (re-encoded WITH the VS)
+    would rely on Gmail's lenient matching. Stripping makes add/remove symmetric by
+    construction, not by luck.
     """
     import base64
+    s = s.replace("️", "")  # drop VARIATION SELECTOR-16 (Gmail strips it on store)
     res = bytearray()
     buf = ""
 
