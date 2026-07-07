@@ -59,6 +59,63 @@ are FR-first) but the engine is generic and the entity list is easy to extend.
 | 2 | NER | Microsoft Presidio + spaCy | off | person names, locations in prose |
 | 3 | Local LLM | Ollama (your machine) | off | names, orgs, places the regex misses |
 
+## Mail triage
+
+Bubble Shield can triage a whole Gmail inbox — several times a day, or on a
+morning scheduled task — **without the assistant ever seeing real client PII.**
+Each message is read *already pseudonymised* (`⟦tokens⟧`), classified into a
+5-tier taxonomy (**Clients / Important / Newsletters / Structurés / CV /
+Transition**), then labelled and archived; a reply/transfer *draft* can be
+prepared in the user's voice. Shipped as the `bubble-shield-mail-triage` skill
+plus two MCP tools.
+
+**Two tools, one host-side write path:**
+
+| Tool | What it does | What the model sees |
+|---|---|---|
+| `bubble_shield_mail_read` | Fetches Gmail over IMAP, returns each message **pseudonymised** | `De: ⟦EMAIL_7⟧` / `Bonjour ⟦NOM_1⟧, …` + a `UID:` line (a mailbox integer, not PII) |
+| `bubble_shield_mail_apply` | Applies triage decisions host-side | only a success/failure summary — never the body |
+
+The raw mail never enters the model context, and a reply draft is restored to
+the real names **inside Gmail** via the local vault — so the assistant writes
+`Bonjour ⟦NOM_1⟧` and Gmail ends up with the real name, without the model ever
+seeing it.
+
+**Structural guarantees (the reason it's safe unattended):**
+
+- **Never sends.** `bubble_shield_mail_apply` has no SMTP — it can only APPEND to
+  the drafts folder. Drafts only; a human sends.
+- **Never deletes.** No `\Deleted`/expunge/Trash/Spam path. "Archive" = removing
+  `\Inbox` only, which is fully reversible (`unarchive` restores it). A
+  mis-classified mail is always recoverable from *All Mail*.
+- **Fail-closed.** If the NER detector is down, `bubble_shield_mail_read`
+  **refuses** rather than return raw mail — triage suspends until it's back,
+  it never falls back to reading PII in the clear.
+- **Capped and journalled.** Mutations are capped per pass and each action is
+  logged (chmod 600, without custom label names that could be PII). A draft with
+  an unresolved token is **skipped**, never sent with visible markers.
+- **A restored draft doesn't re-enter the model's context:** the real name is
+  restored *in-memory* into the Gmail draft — it is never returned to the assistant
+  nor written to disk, and stderr is redacted (exception *type* only, never the
+  message/body).
+
+**Correction is first-class.** If a mail is mis-tagged, the assistant fixes it
+with the same tool — `remove_labels` (drop a wrong tag), a change-category flow
+(remove the old label + add the right one in one decision), or `unarchive`
+(bring it back into the inbox). Removing a label only un-tags — it never deletes.
+
+**Why host-side IMAP.** Cowork greys out its own Gmail-mutation tools in an
+unattended run, and a native Gmail connector would return raw mail to the model.
+Because both mail tools run host-side, the skill works from a scheduled task with
+**no manual validation** — it reads, judges, applies, and posts a report.
+
+**The client list stays current with no code change.** The advisor's client
+list is read *pseudonymised* from the protected folder (`clients/clients_routing.csv`)
+and matched **token-to-token** against the mails: thanks to the shared vault, a
+client's email carries the *same* token in the list and in the mail, so
+classification runs on consistent tokens, never real addresses. Re-exporting the
+list from a CRM/O2S refreshes the routing the next day — no redeploy.
+
 ## Quickstart
 
 ```bash
