@@ -107,6 +107,20 @@ flowchart LR
 
 C'est un cercle vertueux : chaque décision que vous prenez rend l'outil meilleur, **sans réglage technique**.
 
+### Le nettoyage automatique de la liste connue (« dé-pollution »)
+
+La liste connue est volontairement **large** : Shield préfère y ajouter un mot par excès de prudence plutôt que de rater un vrai nom. Avec le temps, cette prudence a un coût : quelques mots courants ou étiquettes de formulaire, capitalisés par hasard dans un document, se glissent dans la liste et se retrouvent masqués inutilement à chaque fois qu'ils reviennent — au détriment de la lisibilité.
+
+La **dé-pollution** est un nettoyage automatique en arrière-plan qui retire ces faux positifs de la liste connue — **sans jamais toucher à ce qui est détecté et masqué par ailleurs.** Elle ne change rien à la protection ; elle rend seulement le texte final plus lisible.
+
+Comment elle décide, en deux temps :
+1. **Les cas évidents** (un mot courant, sans majuscule) sont écartés par un simple calcul de fréquence — instantané, sans IA.
+2. **Les cas ambigus** (un mot avec une majuscule — beaucoup de noms de famille français sont aussi des mots courants) sont soumis à un **petit modèle d'IA local**, qui tourne **sur votre Mac uniquement** (aucune donnée ne part en ligne). On lui pose une seule question par mot : « nom de famille, ou mot courant ? ». Seule une réponse **sans ambiguïté** « mot courant » retire l'entrée ; tout le reste — réponse incertaine, modèle indisponible, erreur — laisse l'entrée **masquée**, comme avant.
+
+**Correction automatique, avec garde-fou humain.** Un mot retiré par erreur n'est jamais perdu pour de bon : s'il réapparaît plus tard comme un vrai nom plausible, la détection normale le remet dans la liste. Chaque décision de dé-pollution est journalisée pour une revue humaine, et vous pouvez **figer** une entrée (« sticky ») pour qu'elle ne soit plus jamais retouchée automatiquement.
+
+**En résumé :** la dé-pollution rend la liste connue plus lisible avec le temps, sans jamais réduire ce qu'elle protège — la règle d'or du §3 (en cas de doute, on masque) s'applique aussi à elle.
+
 ---
 
 ## 5. L'application de contrôle (sur votre Mac)

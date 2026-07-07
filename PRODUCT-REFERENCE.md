@@ -117,6 +117,50 @@ engine active — **the configuration a properly-onboarded advisor runs**:
 
 ---
 
+## 3.5. Gazetteer de-pollution — reducing over-masking [TECH] / [COMMERCIAL-BASE]
+
+The cross-session name gazetteer (§3's persistent "known PII" deny-list, which lets Bubble
+Shield keep masking a name it has seen once even outside the document where it first
+appeared) is deliberately biased toward **over-collection**: it is cheap to add an entry, and
+a missed real name is the risk that matters. Over time this accumulates **false positives** —
+form-label words and common capitalised nouns that get swept in alongside real names, and then
+get masked unnecessarily every time they recur, hurting readability.
+
+**De-pollution is a background process that removes exactly those false positives — it never
+touches masking recall going forward.** Nothing about what gets *detected* changes; de-pollution
+only re-evaluates entries already sitting in the gazetteer.
+
+**The decision cascade, in two stages:**
+- **Stage 1 — frequency + structure (statistical, no model).** A lowercase, high-frequency
+  common word is confidently dropped by pure word-frequency statistics alone — instant, no
+  inference cost.
+- **Stage 2 — on-device model adjudication (the ambiguous remainder).** Capitalised entries
+  are genuinely hard to call with statistics alone (many real French surnames are themselves
+  common words), so they are handed to a small **local language model** running as a
+  background daemon bound to `127.0.0.1` — **no network egress, nothing leaves the machine.**
+  The model answers one narrow question per candidate ("common word, or a surname?") and only
+  an unambiguous "common word" verdict is accepted. Any ambiguity, any daemon error, or the
+  daemon being offline all resolve identically: **the entry stays masked.**
+
+This is fail-toward-masking end to end: de-pollution can only ever make output *more readable*
+(fewer unnecessary maskings of ordinary words), and structurally cannot weaken protection —
+worst case, an entry that should have been dropped simply stays masked, which is the same
+safe-by-default posture as before de-pollution existed.
+
+**Self-correcting, with a human backstop.** Removing an entry from the gazetteer is never
+permanent-by-omission: if the value later reappears as a plausible name, ordinary detection
+re-adds it. Every de-pollution decision is logged to a review queue for audit, and a human
+reviewer can mark an entry **sticky** — a manual override that pins the decision (kept or
+dropped) and that de-pollution will not revisit automatically.
+
+**Commercial framing:** this is a readability/quality improvement, not a new protection
+claim — do **not** describe de-pollution as improving recall or accuracy of detection. It
+addresses a specific, honest side-effect of the deliberately-aggressive gazetteer design
+(over-masking of common words over time), while leaving the fail-closed detection guarantee
+of §2–§3 completely unchanged.
+
+---
+
 ## 4. Where it runs — surfaces [TECH]
 
 - **Cowork (Claude Desktop)** — the target platform for the CGP clients. Fully covered.

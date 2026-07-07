@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.22.0
+
+### Added
+- **Gazetteer de-pollution pipeline (#568).** The always-mask gazetteer
+  self-pollutes (over-masked common words get seeded in as permanent
+  false-positive entries); a new triage→Gemma-classify→remove-PII→audit-log
+  pipeline (`depollute.py` + `gemma_classifier.py`, backed by a warm local
+  Gemma daemon `bubble_shield_gemmad.py`) can now filter and self-correct the
+  gazetteer, on demand ("Clean now" button + audit view in the review queue)
+  or automatically (async trigger right after a new value is seeded).
+  Fail-safe by design: any classification ambiguity defaults to keep-masking.
+
+### Fixed
+- **`add_candidate` honors the caller's `gaz_path`** instead of silently
+  defaulting to the main gazetteer — root cause of a latent audit-log gap
+  affecting any caller (including de-pollution itself) operating on a
+  non-default gazetteer.
+- **MCPB bundle mirror re-synced.** The shipped `.mcpb` server copy had
+  fallen behind the plugin copy on `known_pii_store.py` / `review_queue.py`
+  (including the `gaz_path` fix above) and was missing the new de-pollution
+  files entirely; both trees are byte-identical again
+  (`tests/test_mirror_copies_identical.py`).
+
 ## 1.21.5
 
 ### Added

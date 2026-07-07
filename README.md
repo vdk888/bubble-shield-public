@@ -59,6 +59,53 @@ are FR-first) but the engine is generic and the entity list is easy to extend.
 | 2 | NER | Microsoft Presidio + spaCy | off | person names, locations in prose |
 | 3 | Local LLM | Ollama (your machine) | off | names, orgs, places the regex misses |
 
+## Gazetteer de-pollution
+
+The cross-session name gazetteer (the deny-list that lets Bubble Shield keep
+masking a name it has seen before, even outside the document it first appeared
+in) is deliberately biased toward over-collection: anything that even looks
+like a proper noun gets added, because a missed real name is the risk that
+matters. Over time this means the gazetteer accumulates **false positives** —
+form-label words and common nouns that happened to be capitalised in a source
+document and got swept in alongside real names.
+
+De-pollution is a background pass that removes exactly those false positives
+from the gazetteer — **without ever touching masking recall.** It changes
+nothing about what gets detected or masked going forward; it only decides
+whether an *already-flagged* gazetteer entry should keep being treated as a
+name.
+
+**How it decides, in two stages:**
+
+1. **Frequency + structure triage (no model, instant).** A lowercase, high
+   -frequency common word is judged safe to drop with pure statistics — no
+   inference needed.
+2. **On-device model adjudication (the ambiguous middle).** Capitalised
+   entries are genuinely ambiguous — many real French surnames are also
+   common words — so frequency alone cannot decide them safely. Those go to a
+   small **local, on-device language model** running as a background daemon
+   on `127.0.0.1` only (no network egress, nothing ever leaves the machine).
+   The model is asked one question per candidate — "is this a surname, or a
+   common word / form label?" — and only an *unambiguous* "common word"
+   answer is accepted. Anything unclear, any daemon error, or the daemon
+   simply being unavailable all resolve the same way: **the entry stays
+   masked.** This is a fail-toward-masking design end to end — de-pollution
+   can only ever make masking *more readable*, never less protective.
+
+**Self-correcting, with a human backstop.** An entry that's removed from the
+gazetteer isn't blocked from re-entering it — if the same value shows up
+again as a plausible name later, ordinary detection re-adds it, so a
+misclassification is never permanent. Every de-pollution decision is also
+logged to a review queue for human audit, and a human can mark an entry
+**sticky** — a manual override that de-pollution will not touch, for the rare
+case where an automated decision needs to be pinned one way or the other by
+a person instead of the model.
+
+**Net effect:** the gazetteer stays sensitive to real names (recall
+unchanged) while shedding the noise that made masked output harder to read.
+De-pollution is a readability improvement layered *on top of* the existing
+fail-closed detection guarantee, not a replacement for it.
+
 ## Mail triage
 
 Bubble Shield can triage a whole Gmail inbox — several times a day, or on a

@@ -21,7 +21,11 @@ import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from bubble_shield.gazetteer import FRENCH_FIRST_NAMES
+from bubble_shield.gazetteer import (
+    FRENCH_FIRST_NAMES,
+    FRENCH_FIRST_NAMES_HOMOGRAPH,
+    FRENCH_FIRST_NAMES_PLAIN,
+)
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,16 @@ class Recognizer:
     # only mask when the mod-97 control key validates). Keeps the fail-closed
     # behaviour of IBAN/ISIN/SIRET (drop_if_unvalidated=False) untouched.
     drop_if_unvalidated: bool = False
+    # Context-aware gate (#477): receives (full_text, match_start, match_end) — unlike
+    # `validator`, which only sees the captured value. Used by the homograph-forename
+    # recognizer to require a civility cue (M./Mme/…) earlier in the SAME LINE before
+    # masking a common-word/brand homograph forename ("Robert", "Colette") via the
+    # untitled path. A `re` fixed-width lookbehind can't express "cue anywhere earlier
+    # in the line" (variable length), so this runs as a plain post-match text check
+    # instead. Always paired with drop_if_context_fails=True: no cue → no mask
+    # (precision-only; never affects any other recognizer).
+    context_validator: Optional[Callable[[str, int, int], bool]] = None
+    drop_if_context_fails: bool = False
 
     def find(self, text: str) -> List[Match]:
         out: List[Match] = []
@@ -129,6 +143,12 @@ class Recognizer:
                     continue  # precision: no checksum, no mask
                 else:
                     score = self.score_if_unvalidated
+            if self.context_validator is not None:
+                if not self.context_validator(text, start, end):
+                    if self.drop_if_context_fails:
+                        continue  # precision: no corroborating context cue, no mask
+                    else:
+                        score = min(score, self.score_if_unvalidated)
             out.append(Match(start, end, self.entity_type, value, score, self.priority))
         return out
 
@@ -152,6 +172,29 @@ _NAMEWORD = rf"(?!(?:{_NAME_STOPWORDS})\b)[A-ZÉÈÀÂÎÔÛ][A-Za-zÀ-ÿ'’\-]
 
 # First-name gazetteer alternation (built once).
 _FIRST = "|".join(sorted((re.escape(n) for n in FRENCH_FIRST_NAMES), key=len, reverse=True))
+# #477: the untitled bare-name recognizer is split in two —
+#   _FIRST_PLAIN      fires unconditionally (unchanged recall/precision).
+#   _FIRST_HOMOGRAPH  fires only with a civility cue earlier in the line
+#                     (see _homograph_title_nearby below).
+_FIRST_PLAIN = "|".join(sorted((re.escape(n) for n in FRENCH_FIRST_NAMES_PLAIN), key=len, reverse=True))
+_FIRST_HOMOGRAPH = "|".join(sorted((re.escape(n) for n in FRENCH_FIRST_NAMES_HOMOGRAPH), key=len, reverse=True))
+
+# Same window discipline as context_boost.py: look back a bounded number of chars,
+# never past a newline (a title on the previous line/field is not "this mention").
+_HOMOGRAPH_TITLE_WINDOW = 60
+_TITRE_RE = re.compile(rf"\b{_TITRE}\b", re.UNICODE)
+
+
+def _homograph_title_nearby(text: str, start: int, end: int) -> bool:
+    """True iff a civility title (M./Mme/Monsieur/…) appears earlier on the SAME
+    LINE within _HOMOGRAPH_TITLE_WINDOW chars of a homograph-forename match.
+    This is the "additional signal" #477 asks for: a homograph like "Robert" or
+    "Colette" only masks via the untitled path when a title cue corroborates that
+    it's being used as a person's name, not a dictionary/brand reference."""
+    lo = max(0, start - _HOMOGRAPH_TITLE_WINDOW)
+    line_start = text.rfind("\n", lo, start)
+    lo = max(lo, line_start + 1)  # never cross a newline into a previous field/line
+    return bool(_TITRE_RE.search(text, lo, start))
 
 # Job title / profession. A poste in a named company identifies a person almost
 # as well as a name ("directeur marketing chez TotalEnergies" → you can find who
@@ -247,9 +290,17 @@ RECOGNIZERS: List[Recognizer] = [
                re.compile(rf"\b{_TITRE}[^\S\n]+{_NAMEWORD}(?:[^\S\n]+{_NAMEWORD}){{0,3}}"), 50,
                score_if_unvalidated=0.8),
     # Untitled "Prénom Nom" via first-name gazetteer (the surname is the word(s) after).
+    # Split #477: non-homograph forenames fire unconditionally (unchanged); the
+    # small homograph subset (Robert, Colette…) additionally requires a civility
+    # title cue earlier on the same line, or it's dropped (precision fix — over-
+    # masking of common-word/brand homographs like "Le Petit Robert Illustré").
     Recognizer("NOM",
-               re.compile(rf"\b(?:{_FIRST})[^\S\n]+{_NAMEWORD}(?:[^\S\n]+{_NAMEWORD}){{0,2}}"), 45,
+               re.compile(rf"\b(?:{_FIRST_PLAIN})[^\S\n]+{_NAMEWORD}(?:[^\S\n]+{_NAMEWORD}){{0,2}}"), 45,
                score_if_unvalidated=0.7),
+    Recognizer("NOM",
+               re.compile(rf"\b(?:{_FIRST_HOMOGRAPH})[^\S\n]+{_NAMEWORD}(?:[^\S\n]+{_NAMEWORD}){{0,2}}"), 45,
+               score_if_unvalidated=0.7,
+               context_validator=_homograph_title_nearby, drop_if_context_fails=True),
     # Job title / profession (lower priority than NOM so a name is typed as NOM,
     # not POSTE). Length-first overlap resolution still redacts the larger span.
     Recognizer("POSTE",

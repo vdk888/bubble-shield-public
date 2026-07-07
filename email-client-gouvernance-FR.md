@@ -89,6 +89,21 @@ improbable où une donnée passerait, son exposition reste **limitée dans le te
 À confirmer/activer selon votre contrat — c'est une couche qui s'**ajoute** au
 coffre, jamais qui le remplace.
 
+## Une précision sur la lisibilité (ce n'est pas une couche de protection en plus)
+
+Un point de confort, à ne pas confondre avec les couches de protection ci-dessus :
+la liste des noms déjà confirmés — qui permet à Bubble Shield de continuer à
+masquer un nom vu une fois, même en dehors du document d'origine — est
+volontairement **large** par prudence, et accumule donc, avec le temps, quelques
+mots courants masqués à tort. Un nettoyage automatique en arrière-plan (« la
+gazetteer de-pollution ») retire ces faux positifs pour rendre les documents
+plus lisibles, en s'appuyant en partie sur un petit modèle d'IA **local, sur
+votre machine, sans connexion réseau**. Ce nettoyage ne modifie **jamais** ce qui
+est détecté ni masqué par ailleurs — en cas de doute, l'entrée reste masquée,
+exactement comme avant. C'est une amélioration de confort, pas une nouvelle
+garantie de protection : le cadrage juridique ci-dessus (pseudonymisation
+locale, art. 25 & 32) est inchangé.
+
 ## Le cas des e-mails : lecture anonymisée côté machine (la minimisation appliquée à la boîte)
 
 La précision technique ci-dessus reste vraie : il n'existe pas de filtre invisible

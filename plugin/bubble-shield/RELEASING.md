@@ -68,6 +68,39 @@ download into a separate runtime venv.
    (semver: patch = fix, minor = feature, major = breaking)
 2. Add a `CHANGELOG.md` entry for the new version.
 3. Run the tests: `python3 scripts/test_guard.py && python3 scripts/test_guard_marker.py && python3 scripts/test_tripwire.py` and `claude plugin validate .` from the repo root.
+3b. **Regenerate the dated #572 recall/precision report** (the RGPD art. 32(1)(d)
+    effectiveness-evidence artifact — see `bench/docs/572-recall-benchmark-corpus-design.md`).
+    This is an **on-demand run, not a scheduled/CI job** — the daemon-up half needs the
+    2.7GB ML pack, which is not assumed to be available in CI; a human runs it manually
+    at each release:
+    ```bash
+    # from the repo root, with the ML-pack venv available
+    ~/.bubble_shield/ml-env/bin/python \
+      plugin/bubble-shield/scripts/bubble_shield_nerd.py --port 8723 &
+    # wait for /health -> self_test: pass (~20-45s cold)
+
+    ~/.bubble_shield/ml-env/bin/python bench/run_daemon_up_bench.py \
+      bench/fixtures/corpus_572.json \
+      --json bench/out/daemon-up-recall-572-$(date +%F).json
+    ~/.bubble_shield/ml-env/bin/python bench/run_daemon_up_bench.py \
+      bench/fixtures/corpus_572.json --regex-only \
+      --json bench/out/regex-only-recall-572-$(date +%F).json
+
+    python3 bench/gen_report_572.py \
+      --daemon-up bench/out/daemon-up-recall-572-$(date +%F).json \
+      --regex-only bench/out/regex-only-recall-572-$(date +%F).json \
+      --corpus bench/fixtures/corpus_572.json
+    ```
+    Commit the new dated `bench/out/REPORT-572-<date>.{json,md}` alongside the release.
+    If the daemon-up run could not be completed (ML pack unavailable), the report
+    script says so explicitly on page 1 — do NOT hand out a report silently missing
+    the daemon-up column; re-run once the ML pack is available instead.
+    (Why not a scheduled job: the fail-closed + `residual_when_safe` flags already
+    catch leaks live on real client docs, red-team catches leak classes, and the KPI
+    dashboard (#567) surfaces the headline number to a human before any hand-off — a
+    cron adds the heavy ML dependency + a silent-break risk for a regression class
+    already covered by faster live signals. This benchmark's unique job is producing
+    the dated, versioned regulator artifact, not continuous monitoring.)
 4. Commit + push to `vdk888/bubble-shield` (private dev repo).
 4b. **Publish to the PUBLIC distribution repo `vdk888/bubble-shield-public`** (this
     is where clients install from — no GitHub account needed because it's public).

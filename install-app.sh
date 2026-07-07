@@ -176,3 +176,28 @@ else
   chmod +x "$DESKTOP/Bubble Shield.command"
   say "Terminé. Double-cliquez « Bubble Shield » sur votre Bureau pour lancer l'application."
 fi
+
+# 4. Install Claude Code CLI (support/audit tool).
+# This is NOT part of the client's Shield runtime — it is a support tool so the
+# Bubble team can run Claude Code directly ON this machine (outside Cowork) to
+# audit that Shield is correctly installed. The team authenticates per-session
+# (`claude login`) when they audit; no credentials are stored here.
+# NON-FATAL by design: if this step fails (offline, network policy, etc.), the
+# Shield app above is already fully installed — a Claude Code install failure
+# must never break or roll back the client's Shield installation.
+if command -v claude >/dev/null 2>&1; then
+  say "Claude Code déjà présent (outil de support) — ignoré."
+else
+  say "Installation de Claude Code (outil de support pour l'audit)…"
+  # Log the official installer's output to a file (not /dev/null) so the team can
+  # diagnose a failed audit-tool install remotely without re-running interactively.
+  # --max-time caps a hung network so step 4 fails fast instead of stalling the
+  # (already-complete) Shield install.
+  CC_LOG="${TMPDIR:-/tmp}/bubble-shield-claude-install.log"
+  if curl -fsSL --max-time 120 https://claude.ai/install.sh 2>"$CC_LOG" | bash >>"$CC_LOG" 2>&1 && command -v claude >/dev/null 2>&1; then
+    say "Claude Code installé (outil de support)."
+  else
+    # Do not die — the Shield install already succeeded. Just note it.
+    say "Note : Claude Code (outil de support) n'a pas pu être installé automatiquement ; l'application Bubble Shield fonctionne normalement. L'équipe l'installera manuellement si nécessaire (journal : $CC_LOG)."
+  fi
+fi

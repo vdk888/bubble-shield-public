@@ -210,16 +210,25 @@ def add_confirmed_pii(
     return True
 
 
-def seed_vault_into_gazetteer(vault, *, path: Optional[str | Path] = None) -> int:
+def seed_vault_into_gazetteer(
+    vault,
+    *,
+    path: Optional[str | Path] = None,
+    queue_path: Optional[str | Path] = None,
+) -> int:
     """#390 — seed every IDENTIFYING value in `vault` into the deny-list gazetteer.
 
     A value sitting in the per-mission vault has already been masked → it IS
-    confirmed PII for this client. We add it to the gazetteer (via the no-gate
-    explicit-add path `add_confirmed_pii`, which is correct here — a vault value
-    is confirmed, not a probabilistic guess). The already-wired known-PII
-    recognizer then catches it DETERMINISTICALLY in every subsequent doc, even
-    if the probabilistic NER (GLiNER) misses it. This closes the leak where a
-    name vaulted on doc 1 leaked in clear on doc 2 because the NER missed it.
+    confirmed PII for this client. We add it to the gazetteer via
+    `reseed_with_conflict_check` (#568 Task 9) rather than calling
+    `add_confirmed_pii` directly: this still always seeds the value (masking
+    wins, fail-toward-masking), but ALSO flags a conflict for a human
+    tiebreaker if the value was recently Gemma-un-masked (sitting pending in
+    the review queue) — the engine and Gemma disagree, so a human decides.
+    The already-wired known-PII recognizer then catches the seeded value
+    DETERMINISTICALLY in every subsequent doc, even if the probabilistic NER
+    (GLiNER) misses it. This closes the leak where a name vaulted on doc 1
+    leaked in clear on doc 2 because the NER missed it.
 
     The vault stores token→value in `to_value`; the entity type is encoded in
     the token (⟦NOM_0001⟧ → "NOM"). We seed ONLY identifying types, derived from
@@ -248,11 +257,90 @@ def seed_vault_into_gazetteer(vault, *, path: Optional[str | Path] = None) -> in
             is_identifying = meta.get("identifying", True) if meta else True
             if not is_identifying:
                 continue
-            if add_confirmed_pii(value, etype, path=path):
+            if reseed_with_conflict_check(
+                value, etype, gaz_path=path, queue_path=queue_path
+            ):
                 added += 1
         except Exception:
             continue  # fail-open per entry
     return added
+
+
+def reseed_with_conflict_check(
+    value: str,
+    entity_type: str,
+    *,
+    gaz_path: Optional[str | Path] = None,
+    queue_path: Optional[str | Path] = None,
+) -> bool:
+    """#568 Task 9 — re-add `value` to the gazetteer; if it was recently
+    depollute-un-masked by Gemma (i.e. it is currently sitting PENDING in the
+    review queue), ALSO flag a conflict for a human tiebreaker.
+
+    The engine and Gemma disagree here: the engine wants to mask again, Gemma
+    (the more accurate judge) recently decided to un-mask it. Rather than let
+    either side silently win, we:
+
+      1. ALWAYS seed the value into the gazetteer (fail-toward-masking —
+         masking wins, unconditionally, regardless of the conflict).
+      2. IF the value was pending in the review queue (Gemma un-masked it
+         recently) → additionally re-queue it as a candidate. This is
+         ADDITIVE — a review-queue entry for a human — and never blocks or
+         reverts the seed. Gemma re-adjudicates on the next async pass
+         (already wired via Task 7); a human can confirm (sticky-keep-masked)
+         or dismiss (sticky-allowlist) it from the queue.
+
+    Both the gazetteer write and the queue check/write are individually
+    fail-open: a queue read/write failure must never prevent the seed from
+    happening (the seed is the safety-relevant side of this function).
+
+    ORDERING (CRITICAL — #568 Task 9 review fix): the conflict flag is written
+    to the queue BEFORE the gazetteer seed, not after. add_candidate() has its
+    own GAZETTEER-SKIP bounding rule (#1 in review_queue.py) that silently
+    no-ops if `value` is already in the (default) gazetteer — a rule that
+    exists to avoid queuing values that are already known, unrelated to this
+    function. On the production call shape (seed_vault_into_gazetteer /
+    bubble_shield_mcp.py, both using DEFAULT gaz_path/queue_path), add_confirmed_pii
+    and add_candidate's skip-check read the SAME default gazetteer file. If the
+    seed ran first, add_candidate would see "already known" (from the seed we
+    JUST performed) and silently drop the conflict entry — the entire Task 9
+    deliverable never fires. Flagging the conflict first means add_candidate's
+    skip-check still sees the pre-seed gazetteer state, so the conflict entry
+    is written; the seed then still ALWAYS runs afterward unconditionally,
+    preserving fail-toward-masking (seed always wins; the conflict flag never
+    blocks or reverts it).
+
+    Returns True if a NEW gazetteer entry was inserted (mirrors
+    `add_confirmed_pii`'s return value), regardless of whether a conflict was
+    also flagged.
+    """
+    from bubble_shield import review_queue as rq
+
+    was_unmasked = False
+    try:
+        was_unmasked = any(
+            item.get("value") == value for item in rq.list_pending(path=queue_path)
+        )
+    except Exception:
+        was_unmasked = False  # fail-open: queue trouble must not block the seed
+
+    if was_unmasked:
+        try:
+            # Additive conflict flag for a human tiebreaker. Reuses
+            # add_candidate's existing pending/dedup machinery; the doc arg
+            # is a synthetic marker so the conflict is distinguishable in the
+            # queue's doc_refs trail without inventing a parallel schema.
+            # MUST run before add_confirmed_pii below — see ORDERING note.
+            rq.add_candidate(value, entity_type, "conflict:reseed", path=queue_path)
+        except Exception:
+            pass  # additive only — never let this affect the seed's outcome
+
+    # The seed is the safety-relevant side of this function: it ALWAYS runs,
+    # unconditionally, regardless of whether the conflict flag above
+    # succeeded, was skipped, or errored (fail-toward-masking).
+    inserted = add_confirmed_pii(value, entity_type, path=gaz_path)
+
+    return inserted
 
 
 def maybe_add_detection(

@@ -43,7 +43,11 @@ USAGE
 
 Runs under the client's system python3 (3.9+). Creates the venv with the same
 interpreter. Network needed once (pip + model download, ~420MB for GLiNER,
-~917MB+ for OpenAI).
+~917MB+ for OpenAI, ~4GB for the #568 Gemma NOM/MOT judge via
+install_gemma_env()). After this one-time, no-PII install step, every model
+is loaded from local disk — the GLiNER/OpenAI daemon and the Gemma daemon
+(HF_HUB_OFFLINE=1 in its LaunchAgent, see install_gemma_launchagent) never
+reach the network again.
 """
 from __future__ import annotations
 
@@ -60,6 +64,16 @@ BUBBLE_SHIELD_HOME = Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".b
 ML_ENV = BUBBLE_SHIELD_HOME / "ml-env"
 MODELS_DIR = BUBBLE_SHIELD_HOME / "models"
 MANIFEST = BUBBLE_SHIELD_HOME / "ml.json"
+
+# #568 — Gemma NOM/MOT judge (gazetteer de-pollution) venv. STABLE path (#561
+# lesson): a per-session plugin cache path gets garbage-collected on every
+# plugin update, orphaning anything installed there. This mirrors ML_ENV.
+GEMMA_ENV = BUBBLE_SHIELD_HOME / "gemma-env"
+
+# Must match gemma_classifier.py's / bubble_shield_gemmad.py's MODEL_ID — this
+# is the exact HF repo install_gemma_env() pre-downloads so warm_up() never
+# hits the network at first login (#568 final-review must-fix).
+GEMMA_MODEL_ID = "mlx-community/gemma-3n-E4B-it-lm-4bit"
 
 # Stable, non-ephemeral home for the daemon SCRIPT + its vendored deps. The
 # plugin's own scripts/ dir is an EPHEMERAL per-session Cowork plugin cache
@@ -119,6 +133,20 @@ PIP_DEPS_OPENAI = ["onnxruntime>=1.27", "tokenizers"]  # openai model needs ort 
 # LaunchAgent so the warm daemon starts at login (the "no intervention" path).
 LAUNCH_LABEL = "com.bubbleinvest.bubble-shield-nerd"
 LAUNCH_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_LABEL}.plist"
+
+# #568 — LaunchAgent for the Gemma NOM/MOT judge daemon (bubble_shield_gemmad.py).
+# Mirrors LAUNCH_LABEL/LAUNCH_PLIST above; separate label/plist since it's a
+# distinct process (own venv, own port 8724) from the GLiNER nerd daemon.
+GEMMA_LAUNCH_LABEL = "com.bubbleshield.gemmad"
+GEMMA_LAUNCH_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{GEMMA_LAUNCH_LABEL}.plist"
+
+# The daemon script + its one sibling import, copied into STABLE_DAEMON_ROOT
+# alongside the GLiNER daemon's files (same #561 stable-path lesson: launchd
+# must never point at the ephemeral per-session plugin cache).
+_GEMMA_DAEMON_SCRIPTS = (
+    "bubble_shield_gemmad.py",   # the daemon itself
+    "gemma_classifier.py",       # bubble_shield_gemmad.py imports this sibling
+)
 
 
 def log(msg: str) -> None:
@@ -193,6 +221,78 @@ def ensure_deps(py: Path, need_openai: bool = False) -> None:
             f"     pip install --pre ort-nightly \\\n"
             f"       --extra-index-url {NIGHTLY_INDEX}\n"
             f"   pip error: {r.stderr[:300]}")
+
+
+def install_gemma_env() -> Path:
+    """Create the #568 Gemma NOM/MOT judge venv (mlx-lm + wordfreq) AND
+    pre-download the Gemma model snapshot into the HF hub cache.
+
+    Mirrors ensure_venv()/ensure_deps() for the ML pack: a dedicated venv at
+    the STABLE path GEMMA_ENV (~/.bubble_shield/gemma-env by default, or
+    BUBBLE_SHIELD_HOME-relative under test) — never a per-session plugin cache
+    path (#561 lesson: a plugin update must not orphan it). Idempotent: skips
+    venv creation if already present, and pip install is safe to re-run.
+
+    #568 final-review must-fix: this used to stop at pip-install, leaving the
+    Gemma model itself to be fetched from HuggingFace lazily at the daemon's
+    FIRST warm_up() (i.e. at first login) — contradicting the "no egress"
+    claim and, if HF was unreachable at that moment, silently leaving
+    de-pollution off (fail-toward-masking still holds, but the accuracy
+    feature never turns on). Mirrors the GLiNER path's download_model(): we
+    now pre-fetch the model snapshot HERE, at install time, into the HF hub
+    cache (via `mlx_lm.load`, which is also what warm_up() calls — so the
+    exact same cache entry warm_up() will read is populated here). Combined
+    with HF_HUB_OFFLINE=1 in the daemon's LaunchAgent env
+    (install_gemma_launchagent), the daemon can then NEVER reach HF at
+    runtime — genuinely zero egress after this one-time install step.
+
+    Returns the venv dir (not the python path) per the brief's interface.
+    """
+    if not (GEMMA_ENV / "bin" / "python").exists():
+        log(f"• creating gemma-env venv at {GEMMA_ENV} …")
+        GEMMA_ENV.parent.mkdir(parents=True, exist_ok=True)
+        venv.create(GEMMA_ENV, with_pip=True)
+        log("✓ gemma-env venv created")
+    else:
+        log(f"✓ gemma-env venv already present: {GEMMA_ENV}")
+    py = GEMMA_ENV / "bin" / "python"
+    subprocess.run([str(py), "-m", "pip", "install", "-q", "mlx-lm", "wordfreq"], check=True)
+    log("✓ gemma-env deps installed (mlx-lm, wordfreq)")
+    download_gemma_model(py)
+    return GEMMA_ENV
+
+
+def download_gemma_model(py: Path, model_id: str = GEMMA_MODEL_ID) -> str:
+    """Pre-download the Gemma model snapshot into the HF hub cache, using the
+    SAME call (`mlx_lm.load`) that GemmaClassifier.warm_up() makes at runtime
+    — so this populates exactly the cache entry warm_up() will later read.
+
+    Skip-if-present (mirrors download_model()'s model_present() convention):
+    if the model repo is already staged in the HF hub cache, mlx_lm.load()
+    is a fast local load with no network — safe to re-run every install.
+    Runs WITHOUT HF_HUB_OFFLINE so the (one-time, no-PII) fetch can happen;
+    the runtime daemon later runs WITH HF_HUB_OFFLINE=1 so it never re-fetches.
+
+    Returns "present" if the model was already cached, "done" if this call
+    performed the download. Raises on failure (surfaced by main()'s existing
+    subprocess.CalledProcessError / generic Exception handling) — never
+    silently continues without model weights, since fail-toward-masking
+    depends on the daemon simply not starting if setup fails."""
+    already_cached = _hub_cache_model_dir(model_id).is_dir()
+    if already_cached:
+        log(f"✓ gemma model already cached (skip): {model_id}")
+    else:
+        log(f"• downloading gemma model {model_id} into the HF hub cache "
+            f"(one-time, no PII) …")
+    code = (
+        "import sys;"
+        "from mlx_lm import load;"
+        f"load({model_id!r});"
+        "print('OK')"
+    )
+    subprocess.run([str(py), "-c", code], check=True)
+    log(f"✓ gemma model ready (cached, will load offline from now on): {model_id}")
+    return "present" if already_cached else "done"
 
 
 def model_present(model_id: str, onnx_file: str) -> bool:
@@ -557,6 +657,104 @@ def install_launchagent(py: Path) -> None:
             f"   (the hook will lazy-start the daemon anyway — not fatal)")
 
 
+def install_gemma_daemon_to_stable_path() -> Path:
+    """Copy bubble_shield_gemmad.py + its sibling gemma_classifier.py out of the
+    ephemeral plugin cache into STABLE_DAEMON_ROOT, mirroring
+    install_daemon_to_stable_path() (the GLiNER nerd equivalent, #561).
+
+    The Gemma daemon has no vendor/ dependency (it only imports mlx_lm at
+    runtime, from the gemma-env venv, plus its one sibling module) — so this
+    only needs the two-file allowlist in _GEMMA_DAEMON_SCRIPTS, copied into the
+    SAME STABLE_DAEMON_ROOT/scripts/ dir the GLiNER daemon uses (no separate
+    root needed; the two daemons' files simply coexist there).
+
+    Overwrites on each run, same as the GLiNER copy — a re-run after a plugin
+    update refreshes the stable copy to the current source. Returns the stable
+    bubble_shield_gemmad.py path."""
+    src_scripts = Path(__file__).resolve().parent
+    dst_scripts = STABLE_DAEMON_ROOT / "scripts"
+    dst_scripts.mkdir(parents=True, exist_ok=True)
+    for name in _GEMMA_DAEMON_SCRIPTS:
+        src_f = src_scripts / name
+        if src_f.is_file():
+            shutil.copy2(src_f, dst_scripts / name)
+    stable_gemmad = dst_scripts / "bubble_shield_gemmad.py"
+    if not stable_gemmad.is_file():
+        raise FileNotFoundError(
+            f"gemma daemon copy incomplete: {stable_gemmad} missing after allowlist copy")
+    log(f"✓ gemma daemon installed to stable path: {stable_gemmad}")
+    return stable_gemmad
+
+
+def install_gemma_launchagent(py: Path) -> None:
+    """Write + load a LaunchAgent so the Gemma NOM/MOT judge daemon
+    (bubble_shield_gemmad.py) starts at login and is kept alive on crash.
+
+    Mirrors install_launchagent() above: LABEL=com.bubbleshield.gemmad,
+    ProgramArguments=[<gemma-env python>, <stable path>/bubble_shield_gemmad.py],
+    RunAtLoad=True, KeepAlive on non-zero exit. Stable path (#561): we first
+    copy the daemon script out of the ephemeral per-session plugin cache into
+    ~/.bubble_shield/daemon, and point launchd at THAT copy — never at
+    Path(__file__), which Cowork garbage-collects on every plugin update.
+
+    If the stable copy fails (permissions, disk), falls back to the __file__
+    path so setup never hard-fails — mirrors install_launchagent's fallback.
+
+    #568 final-review must-fix: also sets HF_HUB_OFFLINE=1 in the plist's
+    EnvironmentVariables. bubble_shield_gemmad.py's warm_up() calls
+    mlx_lm.load() IN-PROCESS (not a subprocess like the OCR pack), so an env
+    var set here on the launchd-spawned process is inherited by that call.
+    The model is already local from install_gemma_env()'s pre-download, so
+    this just removes the daemon's ABILITY to ever reach HuggingFace at
+    runtime — the same offline-enforcement pattern bubble_shield_setup_ocr.py /
+    bubble_shield_extract.py already use for the OCR pack."""
+    try:
+        gemmad = install_gemma_daemon_to_stable_path()
+    except Exception as e:  # noqa: BLE001 — never hard-fail setup on the copy
+        gemmad = Path(__file__).resolve().parent / "bubble_shield_gemmad.py"
+        log(f"⚠️ could not install gemma daemon to stable path ({e}); "
+            f"falling back to ephemeral plugin path {gemmad}. The daemon may "
+            f"stop starting from launchd after the next plugin update.")
+    logf = BUBBLE_SHIELD_HOME / "gemmad.log"
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{GEMMA_LAUNCH_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{py}</string>
+    <string>{gemmad}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BUBBLE_SHIELD_HOME</key><string>{BUBBLE_SHIELD_HOME}</string>
+    <key>HF_HUB_OFFLINE</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>{logf}</string>
+  <key>StandardErrorPath</key><string>{logf}</string>
+</dict>
+</plist>
+"""
+    GEMMA_LAUNCH_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    GEMMA_LAUNCH_PLIST.write_text(plist, encoding="utf-8")
+    # reload (unload-then-load) so a re-run picks up changes; ignore unload errors
+    subprocess.run(["launchctl", "unload", str(GEMMA_LAUNCH_PLIST)],
+                   capture_output=True)
+    r = subprocess.run(["launchctl", "load", str(GEMMA_LAUNCH_PLIST)],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        log(f"✓ LaunchAgent installed + loaded ({GEMMA_LAUNCH_LABEL}) — "
+            f"gemma daemon starts at login")
+    else:
+        log(f"⚠️ LaunchAgent written but load returned {r.returncode}: {r.stderr.strip()}\n"
+            f"   (not fatal — the gemma judge falls back to skipped when the daemon is down)")
+
+
 def verify(py: Path, model_id: str, onnx_file: str) -> bool:
     """Load the ONNX GLiNER model in the venv and run one detection. Proves it works."""
     local = _local_dir(model_id)
@@ -631,6 +829,14 @@ def main() -> int:
     ap.add_argument("--openai-onnx", default=OPENAI_DEFAULT_ONNX,
                     help=f"OpenAI ONNX file to use (default: {OPENAI_DEFAULT_ONNX} ~917MB; "
                          "alternative: onnx/model_quantized.onnx ~1.62GB)")
+    # #568 gap fix — the Gemma NOM/MOT de-pollution judge is fetched by DEFAULT
+    # now too: a non-technical client onboarding via the MCP tool must get the
+    # Gemma daemon provisioned automatically (no terminal). --no-gemma is kept
+    # as an explicit opt-out, mirroring --no-openai.
+    ap.add_argument("--gemma", action="store_true", default=True,
+                    help="provision the Gemma NOM/MOT de-pollution judge (default ON since #568-autowire)")
+    ap.add_argument("--no-gemma", dest="gemma", action="store_false",
+                    help="skip provisioning the Gemma judge (de-pollution safely no-ops without it)")
     args = ap.parse_args()
 
     if args.gc or args.gc_dry_run:
@@ -641,6 +847,8 @@ def main() -> int:
     log(f"  GLiNER model: {args.model} ({args.onnx})")
     if args.openai:
         log(f"  OpenAI model: {args.openai_model} ({args.openai_onnx})")
+    if args.gemma:
+        log(f"  Gemma judge: {GEMMA_MODEL_ID} (#568 de-pollution)")
 
     if args.check_only:
         py = _venv_python(ML_ENV)
@@ -690,6 +898,25 @@ def main() -> int:
             ok = verify_openai(py, openai_model_id, openai_onnx_file)
         if ok and not args.no_launchd:
             install_launchagent(py)
+            # #568 gap fix — provision the Gemma de-pollution judge right after
+            # the GLiNER daemon, so the agent's normal onboarding pass (the
+            # bubble_shield_setup_ml MCP tool) auto-installs it with zero
+            # terminal for the client. FAIL-OPEN PER MODEL (mirrors the
+            # OpenAI-PF pattern above): any failure here logs + records
+            # states["gemma"] = "error" but must NEVER abort the GLiNER
+            # install or flip the overall return code — de-pollution simply
+            # no-ops safely if Gemma isn't provisioned, which is already the
+            # correct degraded behaviour.
+            if args.gemma:
+                try:
+                    gemma_env = install_gemma_env()
+                    install_gemma_daemon_to_stable_path()
+                    install_gemma_launchagent(_venv_python(gemma_env))
+                    states["gemma"] = "ready"
+                except Exception as e:  # noqa: BLE001 — fail-open on one model
+                    states["gemma"] = "error"
+                    log(f"⚠️ Gemma judge provisioning failed (de-pollution will "
+                        f"no-op; GLiNER install unaffected): {e}")
     except subprocess.CalledProcessError as e:
         log(f"✗ a setup step failed: {e}")
         return 1
@@ -699,11 +926,13 @@ def main() -> int:
 
     # Structured per-model status line (#387) — machine-readable for the MCP /
     # onboarding so it can name each model + its state to the user.
-    _label = {"present": "déjà présent", "done": "téléchargé",
+    _label = {"present": "déjà présent", "done": "téléchargé", "ready": "prêt",
               "error": "échec", "absent": "absent"}
     parts = [f"GLiNER {_label.get(states.get('gliner', 'absent'))}"]
     if args.openai:
         parts.append(f"OpenAI-PF {_label.get(states.get('openai', 'absent'))}")
+    if args.gemma:
+        parts.append(f"Gemma {_label.get(states.get('gemma', 'absent'))}")
     log("MODEL_STATUS " + json.dumps(states))
     log("📦 Modèles : " + " · ".join(parts))
 

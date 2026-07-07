@@ -158,12 +158,23 @@ def add_candidate(
     doc: str,
     *,
     path: Optional[str | Path] = None,
+    gaz_path: Optional[str | Path] = None,
 ) -> str | None:
     """Add a candidate value to the pending queue (or update if already pending).
 
     Bounding rule #1 GAZETTEER-SKIP:
         If `value` is ALREADY in the gazetteer → SKIP entirely.  It will be
         masked deterministically on the next doc; no human review needed.
+
+        `gaz_path` lets a caller operating on a NON-default gazetteer (e.g.
+        depollute_gazetteer, which un-masks a value from a custom gaz_path)
+        make this check honor the SAME store it's operating on, instead of
+        always reading the default gazetteer. When gaz_path is None (all
+        existing callers), behavior is UNCHANGED — the check still reads the
+        default gazetteer, exactly as before (#568 T5/T9 root-cause fix:
+        the hardcoded path=None here silently dropped audit-log entries
+        whenever a value un-masked from a non-default store also happened to
+        exist in the default one).
 
     Bounding rule #2 DEDUP:
         If the normalized token is ALREADY a PENDING item → increment
@@ -182,8 +193,9 @@ def add_candidate(
     normalized = _normalize(value.strip())
 
     # --- #1 GAZETTEER-SKIP ---------------------------------------------------
-    if is_known_pii(value.strip(), path=None):
-        # Already in the gazetteer: will be masked deterministically.  Skip.
+    if is_known_pii(value.strip(), path=gaz_path):
+        # Already in the (caller-relevant) gazetteer: will be masked
+        # deterministically.  Skip.
         return None
 
     p = _resolve_path(path)

@@ -612,6 +612,36 @@ class NERDownError(RuntimeError):
     """
 
 
+# #568 — async on-seed de-pollution trigger.
+#
+# After seed_vault_into_gazetteer() feeds newly-confirmed PII into the deny-list
+# gazetteer, run a de-pollution pass (Gemma-adjudicated triage of low-confidence
+# gazetteer entries) so junk/label tokens don't linger as false "confirmed PII".
+# This MUST be non-blocking: it runs in a daemon background thread so the Cowork
+# read path returns immediately, and it MUST NEVER break or slow the read on
+# failure (same fail-open doctrine as seed_vault_into_gazetteer itself).
+def _run_depollute_pass():
+    """Run one de-pollution pass over the gazetteer. Fail-open: never raises."""
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield.depollute import depollute_gazetteer, daemon_classify
+        depollute_gazetteer(daemon_classify)
+    except Exception:
+        pass  # fail-open: de-pollution must NEVER break or slow the read path
+
+
+def _fire_depollute_async():
+    """Kick off _run_depollute_pass() on a daemon thread and return immediately.
+
+    Returns the Thread (mainly so tests can join() it) — callers on the hot
+    path must NOT join/wait on it.
+    """
+    import threading
+    t = threading.Thread(target=_run_depollute_pass, daemon=True)
+    t.start()
+    return t
+
+
 def _anonymise_text(text: str, filename_basename: str = "") -> str:
     """Anonymise a block of text. Used by bubble_shield_anonymize_text and bubble_shield_read.
 
@@ -652,6 +682,7 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
         sys.path.insert(0, str(_vendor()))
         from bubble_shield.known_pii_store import seed_vault_into_gazetteer
         seed_vault_into_gazetteer(engine.vault)
+        _fire_depollute_async()   # #568: async de-pollution, never blocks the read
     except Exception:
         pass  # fail-open: deny-list seeding never breaks/slows anonymisation
 

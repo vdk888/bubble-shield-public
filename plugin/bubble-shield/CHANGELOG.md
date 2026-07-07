@@ -5,6 +5,44 @@ All notable changes to the plugin. Bump the version in BOTH
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
 `claude plugin update` will report "already at latest" and skip the new code.
 
+## 1.22.0 — 2026-07-07 — FEATURE: gazetteer de-pollution (#568, A+D→Gemma cascade)
+
+The always-mask gazetteer (`known_pii_store.py`) self-pollutes: every value the
+engine ever over-masks as a name gets seeded in permanently, hiding legitimate
+content forever after. This release adds a repeatable de-pollution pipeline
+instead of a one-time cleanup, since the seeding never stops:
+
+- **New `depollute.py` pipeline.** Triages every gazetteer entry through a
+  cheap word-frequency + structural filter (A+D) first, then escalates only
+  the ambiguous middle to a local Gemma classifier (`gemma_classifier.py`,
+  MLX `gemma-3n-E4B-it-4bit`) for a NOM/MOT verdict. Fail-safe: any parse
+  ambiguity defaults to NOM (keeps masking) rather than risk a leak.
+- **New `bubble_shield_gemmad.py` daemon.** Keeps the Gemma model warm behind
+  a local `/classify` HTTP endpoint so de-pollution calls don't pay
+  cold-start cost per token; the pipeline fails closed to the daemon-down
+  path if the daemon isn't reachable.
+- **"Clean now" button + de-pollution audit view** in the review-queue UI —
+  runs the pipeline on demand and shows what was removed/kept and why.
+- **Async on-seed trigger.** De-pollution now also runs (non-blocking) right
+  after a new value is seeded into the gazetteer, so junk is caught close to
+  when it's introduced instead of only during an on-demand sweep.
+- **Fix (root cause, also closes a latent audit-log gap):** `add_candidate`
+  now honors the caller's `gaz_path` instead of silently defaulting to the
+  main gazetteer — this was dropping audit-log entries for callers operating
+  on a non-default gazetteer (e.g. the de-pollution un-mask path itself).
+- **Fix:** the gazetteer conflict flag now fires correctly on a default-path
+  reseed, and `_parse_verdict` defaults to NOM on any ambiguity (fail-safe).
+
+Design doc: `docs/superpowers/specs/2026-07-07-gazetteer-depollution-design.md`.
+
+**MCPB mirror sync.** `depollute.py`, `gemma_classifier.py`, and
+`bubble_shield_gemmad.py` are new vendored/scripted files added by this
+release — they, plus the `known_pii_store.py` / `review_queue.py` fixes
+above, are now copied into `mcpb/server/{vendor/bubble_shield,scripts}/` so
+the shipped `.mcpb` bundle runs the same de-pollution code and the same
+`gaz_path` audit-log fix as the plugin copy (was previously deferred/drifted
+during the #568 build; `tests/test_mirror_copies_identical.py` now passes).
+
 ## 1.20.2 — 2026-07-05 — FEATURE: folder-listing discovery (Glob allow + bubble_shield_list)
 
 The agent can now discover *which* file to read inside a protected folder without

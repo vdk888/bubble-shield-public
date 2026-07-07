@@ -5,6 +5,19 @@ This is a recall aid, not an exhaustive registry. It lets the NOM recognizer
 fire on "Jean Dupont" without a M./Mme cue. Names missed here are exactly
 what the reliability bench measures; the optional Presidio/NER layer
 (presidio_ext) is the way to push name recall higher when ML is available.
+
+HOMOGRAPH_FIRST_NAMES (#477): a small subset of FRENCH_FIRST_NAMES that are
+ALSO common nouns, book titles, or brand names — "Robert" (Le Petit Robert,
+Robert Half), "Colette" (Colette Capital, the writer). For these, the bare
+"Prénom Capitalisé" pattern over-masks (e.g. "Le Petit Robert Illustré" →
+"Robert Illustré"). recognizers.py requires an ADDITIONAL corroborating
+signal (a civility title M./Mme/... earlier in the line) before masking a
+homograph via the untitled path — see the two-recognizer split around
+_FIRST_HOMOGRAPH / _FIRST_PLAIN. Titled occurrences ("M. Robert Dupont")
+are unaffected: they're caught by the separate _TITRE recognizer, which
+does not consult this gazetteer at all. This is a PRECISION-only change:
+it narrows over-masking of common-word/brand homographs without touching
+recall on titled names or on any non-homograph forename.
 """
 from __future__ import annotations
 
@@ -48,7 +61,7 @@ FRENCH_FIRST_NAMES = {
     "Fabrice", "Ludovic", "Grégory", "Jonathan", "Franck", "Cyril", "Mickaël",
     "Michaël", "Guy", "Roger", "Robert", "René", "Marcel", "Lucien", "Raymond",
     "Yannick", "Loïc", "Erwan", "Gwenaël", "Karim", "Rachid", "Mehdi", "Anthony",
-    "Kevin", "Fabrice", "Régis", "Serge", "Alexis", "Corentin", "Valentin",
+    "Kevin", "Régis", "Serge", "Alexis", "Corentin", "Valentin",
     # féminins
     "Frédérique", "Dominique", "Christelle", "Séverine", "Angélique", "Vanessa",
     "Sonia", "Nadia", "Solène", "Morgane", "Anaïs", "Coralie", "Amélie",
@@ -56,3 +69,22 @@ FRENCH_FIRST_NAMES = {
     "Simone", "Micheline", "Paulette", "Bernadette", "Yvette", "Ginette",
     "Sabine", "Muriel", "Nadège", "Marion", "Fanny", "Élise",
 }
+
+# #477: forenames that collide with a common noun, book title, or well-known
+# brand — the untitled "Prénom Nom" recognizer over-masks these when the
+# 2nd token happens to be a capitalised common word too ("Le Petit Robert
+# Illustré", "Robert Half", "Colette Capital"). Kept intentionally SMALL and
+# reviewed: each entry here is a documented real collision, not a guess —
+# adding a name here TRADES some untitled bare-name recall for precision, so
+# it should only grow with a concrete false-positive report (mirrors the
+# common_words.py curation discipline).
+FRENCH_FIRST_NAMES_HOMOGRAPH = {
+    "Robert",    # Le Petit Robert (dictionnaire), Robert Half (cabinet RH)
+    "Colette",   # Colette Capital (fonds), Colette (autrice / ex-concept store)
+}
+
+# The "plain" set fires the untitled bare-name pattern with no extra signal —
+# unchanged behaviour. Homographs are pulled OUT of the plain-fire set so the
+# untitled regex doesn't include them; they get their own, title-gated
+# regex in recognizers.py instead.
+FRENCH_FIRST_NAMES_PLAIN = FRENCH_FIRST_NAMES - FRENCH_FIRST_NAMES_HOMOGRAPH
