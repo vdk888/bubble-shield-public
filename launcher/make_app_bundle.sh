@@ -24,10 +24,22 @@ mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 # is shown because a .app's MacOS executable runs without a visible shell window.
 cat > "$DEST/Contents/MacOS/BubbleShield" <<EOF
 #!/bin/bash
+# Rosetta-proof native-arch launch: uname -m LIES under x86 translation, so use
+# sysctl hw.optional.arm64 to detect real Apple Silicon and force the arm64 slice
+# that matches the arm64 compiled wheels (else "incompatible architecture" crash).
+if [ "\$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+  TARGET_ARCH="arm64"
+else
+  TARGET_ARCH="x86_64"
+fi
+if [ "\$(/usr/bin/arch)" != "\$TARGET_ARCH" ] && [ -z "\${BS_ARCH_REEXEC:-}" ]; then
+  export BS_ARCH_REEXEC=1
+  exec /usr/bin/arch -"\$TARGET_ARCH" /bin/bash "\$0" "\$@"
+fi
 APP_DIR="$APP_DIR"
 export BUBBLE_SHIELD_HOME="\$HOME/.bubble_shield"
 export PYTHONPATH="\$APP_DIR:\$APP_DIR/plugin/bubble-shield/vendor"
-exec "\$APP_DIR/.venv/bin/python" -m launcher
+exec /usr/bin/arch -"\$TARGET_ARCH" "\$APP_DIR/.venv/bin/python" -m launcher
 EOF
 chmod +x "$DEST/Contents/MacOS/BubbleShield"
 

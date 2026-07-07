@@ -139,7 +139,36 @@ fi
 # Fallback path (PY_ONLINE_FALLBACK=1) = the rare Mac with no ABI-matching
 # interpreter: install ONLINE from PyPI with the best interpreter we found.
 say "Préparation de l'environnement Python ($("$PY" --version 2>&1))…"
-"$PY" -m venv "$APP_DIR/.venv" || die "échec de la création du venv."
+
+# Stale/wrong-ABI venv guard (fix for the live 2026-07-07 ResolutionImpossible
+# bug): install-app.sh is idempotent — `git pull` above updates the app in
+# place, and historically an EXISTING .venv was always reused as-is, with no
+# check that it actually matches the interpreter we just selected. A client
+# who first installed on a Mac where e.g. Homebrew python3.12 shadowed stock
+# python3 (the #396b case) ends up with a .venv built for 3.12, holding old
+# unpinned deps from before constraints.txt existed (pywebview 6.x, etc). On
+# the next update, this script would try to `pip install --no-index` the
+# vendored cp39-only wheels INTO that 3.12 venv — cp39 wheels can't install
+# under 3.12, and the pre-existing pywebview 6.x conflicts with the pinned
+# pywebview==3.4, so pip fails with "ResolutionImpossible". Reusing a venv is
+# only safe when its Python ABI matches the interpreter chosen above ($PY).
+if [ -x "$APP_DIR/.venv/bin/python" ]; then
+  EXISTING_VER="$(py_version "$APP_DIR/.venv/bin/python")" || EXISTING_VER=""
+  SELECTED_VER="$(py_version "$PY")" || SELECTED_VER=""
+  if [ -z "$EXISTING_VER" ] || [ "$EXISTING_VER" != "$SELECTED_VER" ]; then
+    say "environnement Python incompatible détecté, reconstruction…"
+    rm -rf "$APP_DIR/.venv"
+  fi
+fi
+
+# Rebuilding a venv is cheap (the wheels/PyPI packages are re-installed right
+# below regardless) and always safe — this only ever removes $APP_DIR/.venv,
+# never the app checkout or any user data. Only create it if it isn't already
+# there (either never existed, or was just removed above as stale) — a
+# matching-ABI venv from a prior install is reused untouched (fast path).
+if [ ! -d "$APP_DIR/.venv" ]; then
+  "$PY" -m venv "$APP_DIR/.venv" || die "échec de la création du venv."
+fi
 if [ "$PY_ONLINE_FALLBACK" -eq 0 ] && [ -d "$WHEELS" ] && ls "$WHEELS"/*.whl >/dev/null 2>&1; then
   # Offline path: install ONLY from the bundled wheels, never touch the network.
   "$APP_DIR/.venv/bin/python" -m pip install --quiet --no-index --find-links="$WHEELS" \

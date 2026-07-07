@@ -473,6 +473,7 @@ td.num { text-align: right; font-family: var(--mono); color: var(--muted); }
 .verdict--ok { background: var(--safe-bg); color: var(--safe); border: 1px solid var(--safe-line); }
 .verdict--warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-line); }
 .verdict--err { background: #f0eef0; color: #6c6862; border: 1px solid var(--line); }
+.verdict--info { background: #eef3f8; color: #4a6a85; border: 1px solid var(--line); }
 
 .config-table .ct-code { font-family: var(--mono); font-size: .72rem;
   color: var(--faint); margin-left: .5rem; }

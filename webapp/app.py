@@ -10,9 +10,12 @@ Run:  uvicorn webapp.app:app --host 127.0.0.1 --port 8765
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
 import re
 import os
+import secrets
 import zipfile
 from pathlib import Path
 from typing import List, Optional
@@ -126,6 +129,47 @@ def _mask_value(value: str) -> str:
         else:
             parts.append(tok[:2] + "•" * min(len(tok) - 2, 6))
     return " ".join(parts) if parts else "•••"
+
+
+# #346 — opaque row-id for the gazetteer listing.
+#
+# The previous scheme put base64.urlsafe_b64encode(value) in a hidden form
+# field: base64 is an ENCODING, not encryption, so a devtools atob() on the
+# hidden input recovered the confirmed-PII cleartext straight out of the DOM.
+#
+# Fix: HMAC-SHA256(value, key=_GAZETTEER_ROW_ID_KEY), truncated. This is a
+# ONE-WAY function — unlike base64 (or any reversible re-encoding, which the
+# card explicitly forbids), the id cannot be inverted back to the value even
+# by someone who can read the id and knows the algorithm, because the secret
+# key never leaves the server process. It is deterministic *given the key*,
+# so the same value always maps to the same id for the lifetime of this
+# process (stable across page reloads) without persisting anything new to
+# disk or introducing per-request tokens that would break a normal
+# GET-the-page-then-POST-the-form flow.
+_GAZETTEER_ROW_ID_KEY = secrets.token_bytes(32)
+
+
+def _gazetteer_row_id(value: str) -> str:
+    """Opaque, non-reversible id for a gazetteer entry, keyed on its value.
+
+    Case/whitespace-insensitive (matches known_pii_store's own case-insensitive
+    value matching) so the id a page-load computed still resolves the right
+    entry even if callers vary casing.
+    """
+    norm = str(value).strip().lower()
+    digest = hmac.new(_GAZETTEER_ROW_ID_KEY, norm.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[:24]
+
+
+def _gazetteer_value_for_id(row_id: str, gz) -> str:
+    """Resolve an opaque row-id back to its gazetteer value by recomputing the
+    HMAC for every current entry and matching — the id itself carries no
+    recoverable information, so this is the only way back to the value, and it
+    only works server-side (where the secret key lives)."""
+    for e in gz.entries:
+        if _gazetteer_row_id(e.value) == row_id:
+            return e.value
+    return ""
 
 
 app = FastAPI(title="Bubble Shield — Anonymiseur (démo locale)")
@@ -757,6 +801,7 @@ def review_inbox(request: Request):
     import bubble_shield.review_queue as rq
 
     flash = request.query_params.get("flash")
+    flash_count = request.query_params.get("flash_count")
 
     # 1 — drain EVERY candidate sidecar (fail-open).
     # The plugin/daemon writes sub-threshold candidates under whatever mission
@@ -781,12 +826,23 @@ def review_inbox(request: Request):
     except Exception:
         pending = []
 
+    # #568 T8 — flag depollute-sourced items (the T5 pipeline logs every
+    # gazetteer un-mask via add_candidate(v, entity_type, "depollute", ...),
+    # which lands "depollute" in doc_refs). These are audit items: a human
+    # "confirm" here = force-keep-masked (sticky, re-adds to gazetteer);
+    # "dismiss" = accept the un-mask. Reuses the existing confirm/dismiss
+    # buttons — no new UI framework, just a label so the reviewer knows why
+    # the item is here.
+    for item in pending:
+        item["from_depollute"] = "depollute" in (item.get("doc_refs") or [])
+
     return templates.TemplateResponse(
         request,
         "review.html",
         {
             "pending": pending,
             "flash": flash,
+            "flash_count": flash_count,
             "pending_count": len(pending),
         },
     )
@@ -847,14 +903,45 @@ def review_dismissed(request: Request):
     )
 
 
+def _depollute_now() -> dict:
+    """Run one full de-pollution sweep against the default gazetteer + queue.
+
+    Wires the already-built pipeline (depollute_gazetteer) to the prod
+    classify_fn (daemon_classify, the local Gemma daemon). Imported lazily so
+    the route (and its test, which monkeypatches this function directly) never
+    pays the import cost / needs a live daemon just to exercise the redirect.
+    """
+    from bubble_shield.depollute import depollute_gazetteer, daemon_classify
+    return depollute_gazetteer(daemon_classify)
+
+
+@app.post("/gazetteer/depollute")
+async def gazetteer_depollute(request: Request):
+    """Manual 'Clean now' trigger: run a full de-pollution sweep on demand,
+    then redirect to the review inbox with a flash count so the human can see
+    + override every un-mask (source == 'depollute' items, audited below)."""
+    from fastapi.responses import RedirectResponse
+
+    try:
+        res = _depollute_now()
+    except Exception:
+        res = {"unmasked": [], "logged": 0}
+    _audit_event(mission="gazetteer", event="gazetteer_depollute",
+                 counts={"unmasked": len(res.get("unmasked", [])),
+                         "logged": res.get("logged", 0)})
+    return RedirectResponse(
+        url=f"/review?flash=depollute&flash_count={res.get('logged', 0)}",
+        status_code=303,
+    )
+
+
 @app.get("/gazetteer", response_class=HTMLResponse)
 def gazetteer_view(request: Request):
     """List confirmed known-PII (masked) with a per-row remove button."""
     from bubble_shield.known_pii_store import load_gazetteer
-    import base64
     try:
         gz = load_gazetteer()
-        rows = [{"value_b64": base64.urlsafe_b64encode(e.value.encode()).decode(),
+        rows = [{"row_id": _gazetteer_row_id(e.value),
                  "masked": _mask_value(e.value), "entity_type": e.entity_type}
                 for e in gz.entries]
     except Exception:
@@ -866,28 +953,29 @@ def gazetteer_view(request: Request):
 
 
 @app.post("/gazetteer/remove")
-async def gazetteer_remove(request: Request, value: str = Form(""), value_b64: str = Form("")):
+async def gazetteer_remove(request: Request, row_id: str = Form("")):
     """Remove one entry from the gazetteer; audit (no raw value).
 
-    The listing page posts ``value_b64`` (base64 of the raw value) so the
-    cleartext is never in the page DOM (masking constraint). A direct caller
-    may post ``value`` (raw) instead. ``value`` takes precedence if both set.
+    The listing page posts the entry's opaque ``row_id`` (an HMAC of the raw
+    value, keyed on a server-only secret — see ``_gazetteer_row_id``) instead
+    of the value itself, so nothing reversible ever sits in the page DOM. The
+    server resolves ``row_id`` back to the raw value itself, server-side only.
     """
     from bubble_shield.known_pii_store import load_gazetteer, remove_pii
     from fastapi.responses import RedirectResponse
-    if not value and value_b64:
-        import base64
-        try:
-            value = base64.urlsafe_b64decode(value_b64.encode()).decode()
-        except Exception:
-            value = ""
-    etype = "NOM"
     try:
-        etype = load_gazetteer().entity_type_of(value)
+        gz = load_gazetteer()
     except Exception:
-        pass
+        gz = None
+    value = _gazetteer_value_for_id(row_id, gz) if gz is not None else ""
+    etype = "NOM"
+    if gz is not None:
+        try:
+            etype = gz.entity_type_of(value)
+        except Exception:
+            pass
     try:
-        ok = remove_pii(value)
+        ok = bool(value) and remove_pii(value)
         flash = "retire" if ok else "absent"
         _audit_event(mission="gazetteer", event="gazetteer_remove",
                      entity_type=etype, counts={etype: 1})

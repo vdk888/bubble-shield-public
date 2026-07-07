@@ -39,7 +39,7 @@
     </div>
     <div class="stat-card{% if stats.unsafe_runs %} stat-card--warn{% endif %}">
       <div class="stat-num">{{ stats.unsafe_runs }}</div>
-      <div class="stat-lbl">à relire (PII résiduelle possible)</div>
+      <div class="stat-lbl">signalées à risque (PII résiduelle possible)</div>
     </div>
     <div class="stat-card{% if stats.error_runs %} stat-card--warn{% endif %}">
       <div class="stat-num">{{ stats.error_runs }}</div>
@@ -52,6 +52,10 @@
     <div class="stat-card">
       <div class="stat-num">{{ stats.total_entities }}</div>
       <div class="stat-lbl">données masquées au total</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.reveal_runs }}</div>
+      <div class="stat-lbl">restaurations (vault_reveal, hors risque)</div>
     </div>
   </div>
 
@@ -77,6 +81,8 @@
         <td>
           {% if e.event == "error" %}
             <span class="verdict verdict--err">erreur</span>
+          {% elif e.event == "vault_reveal" %}
+            <span class="verdict verdict--info">↩ restauration</span>
           {% elif e.safe_to_send %}
             <span class="verdict verdict--ok">✓ sûr</span>
           {% else %}

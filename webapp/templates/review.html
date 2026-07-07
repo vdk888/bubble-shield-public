@@ -18,6 +18,15 @@
 <p class="notice notice--ok">Donnée confirmée et ajoutée au répertoire de masquage automatique.</p>
 {% elif flash == "ignore" %}
 <p class="notice notice--ok">Candidat ignoré et archivé dans le journal.</p>
+{% elif flash == "depollute" %}
+<p class="notice notice--ok">
+  Nettoyage terminé —
+  {% if flash_count and flash_count != "0" %}
+    <strong>{{ flash_count }}</strong> donnée(s) dé-masquée(s), à vérifier ci-dessous.
+  {% else %}
+    aucune donnée dé-masquée.
+  {% endif %}
+</p>
 {% elif flash == "erreur" %}
 <p class="notice">Une erreur est survenue lors de la résolution. Veuillez réessayer.</p>
 {% endif %}
@@ -43,6 +52,9 @@
       <span class="rq-value">{{ item.value }}</span>
       <span class="rq-badge rq-badge--type">{{ item.entity_type }}</span>
       <span class="rq-badge rq-badge--count">{{ item.occurrence_count }} occurrence{% if item.occurrence_count > 1 %}s{% endif %}</span>
+      {% if item.from_depollute %}
+      <span class="rq-badge rq-badge--depollute">dé-masqué par Gemma — confirmer pour re-masquer</span>
+      {% endif %}
     </div>
 
     {% if item.doc_refs %}

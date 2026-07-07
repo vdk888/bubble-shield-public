@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Mapping
 
 # Verdict buckets we care about for risk control.
 EVENT_ERROR = "error"
+EVENT_ANONYMIZE = "anonymize"
+EVENT_VAULT_REVEAL = "vault_reveal"
 
 
 def _is_unsafe(entry: Mapping[str, Any]) -> bool:
@@ -38,9 +40,17 @@ def summarize(entries: List[Mapping[str, Any]], *, recent: int = 50) -> Dict[str
 
     `recent` caps the "last N runs" detail list (newest first) so the page stays
     readable; the headline totals still cover everything passed in.
+
+    #587: `runs` (the risk-control population) is ONLY `event == "anonymize"`
+    entries. `vault_reveal` entries are document RESTORES (the OPPOSITE of a
+    risk — the opposite of "residual PII") and have no `safe_to_send` key, so
+    the fail-closed `_is_unsafe()` used to flag every single one as "à
+    relire". They are surfaced separately as `reveal_runs`, never merged into
+    the anonymise/risk numbers.
     """
-    runs = [e for e in entries if e.get("event") != EVENT_ERROR]
+    runs = [e for e in entries if e.get("event") == EVENT_ANONYMIZE]
     errors = [e for e in entries if e.get("event") == EVENT_ERROR]
+    reveals = [e for e in entries if e.get("event") == EVENT_VAULT_REVEAL]
 
     total_runs = len(runs)
     unsafe = [e for e in runs if _is_unsafe(e)]
@@ -66,6 +76,7 @@ def summarize(entries: List[Mapping[str, Any]], *, recent: int = 50) -> Dict[str
         "safe_runs": safe_runs,
         "unsafe_runs": len(unsafe),
         "error_runs": len(errors),
+        "reveal_runs": len(reveals),
         "safe_rate": round(safe_rate, 3),
         "total_entities": total_entities,
         "entity_totals": dict(entity_totals.most_common()),
