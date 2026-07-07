@@ -197,7 +197,7 @@ C'est le point d'architecture clé. Dans une tâche planifiée non surveillée, 
 
 Ce qui rend le tri à la fois **précis et générique**, c'est que le cabinet dépose sa liste de vrais clients dans le **dossier protégé** (`clients/clients_routing.csv`) et que Shield la matche contre les mails **sans jamais voir un vrai email** :
 
-1. La liste est lue **étiquetée** comme n'importe quel fichier protégé : `⟦EMAIL_7⟧,GUILLAUME`, `⟦EMAIL_12⟧,TRANSITION`…
+1. La liste est lue **étiquetée** comme n'importe quel fichier protégé : `⟦EMAIL_7⟧,CLIENT`, `⟦EMAIL_12⟧,TRANSITION`…
 2. Grâce au **coffre partagé**, l'email d'un client porte **le même jeton** dans la liste ET dans le mail (`De: ⟦EMAIL_7⟧`). Le rattachement se fait donc **jeton-à-jeton** — jamais sur de vrais emails.
 3. **Auto-actualisation :** le cabinet ré-exporte sa liste O2S (ou tout CRM) quand il veut ; comme la liste est relue à chaque passage, le tri se met à jour **sans toucher au code, sans redéploiement**.
 

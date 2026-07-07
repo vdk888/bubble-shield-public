@@ -51,9 +51,9 @@ Applique dans CET ordre, arrête-toi à la première qui matche :
 - **Action** : label `🟢 Clients-cités` + archive. Pas de brouillon par défaut.
 
 ### ↪️ Transition-AC — label `↪️ Transition-AC`
-- Le mail implique un client classé **TRANSITION** ou **ANNE-CHARLOTTE** dans la liste.
+- Le mail implique un client classé **TRANSITION** ou **TRANSFERT** dans la liste.
 - **Action** : label `↪️ Transition-AC` + archive + **brouillon de transfert** vers
-  Anne-Charlotte (voir « Brouillons de transfert »).
+  le collègue en charge (voir « Brouillons de transfert »).
 
 ### ⭐ T2 — Important — label `⭐ Important`
 - Partenaire important (assureur/structureur/plateforme clé), mail de l'équipe où le
@@ -110,15 +110,15 @@ vrais clients, et tu la matches contre les mails — sans jamais voir un vrai em
 protégé**, à `clients/clients_routing.csv` (ou `.md`) — le même dossier marqué
 `.bubble-shield.json` que le reste des données du cabinet. Le cabinet **exporte sa liste
 O2S** (ou tout CRM) vers ce fichier ; format minimal : une ligne par client
-`email,categorie` où `categorie ∈ {GUILLAUME, TRANSITION, ANNE-CHARLOTTE}` (adapte les
+`email,categorie` où `categorie ∈ {CLIENT, TRANSITION, TRANSFERT}` (adapte les
 catégories au cabinet). Colonnes optionnelles utiles : `nom`, `societe`, `domaine`.
 
 **Comment tu l'utilises (le mécanisme qui marche sans PII) :**
 1. **À CHAQUE passage**, lis le fichier via `bubble_shield_read("…/clients/clients_routing.csv")`.
-   Il te revient **anonymisé** : `⟦EMAIL_7⟧,GUILLAUME`, `⟦EMAIL_12⟧,TRANSITION`, …
+   Il te revient **anonymisé** : `⟦EMAIL_7⟧,CLIENT`, `⟦EMAIL_12⟧,TRANSITION`, …
 2. Lis les mails via `bubble_shield_mail_read`. Grâce au **vault partagé**, l'email d'un
    client porte **le MÊME jeton** dans la liste ET dans le mail (`De: ⟦EMAIL_7⟧`). Donc tu
-   **matches jeton-à-jeton** : `⟦EMAIL_7⟧` (expéditeur) == `⟦EMAIL_7⟧` (ligne GUILLAUME de la
+   **matches jeton-à-jeton** : `⟦EMAIL_7⟧` (expéditeur) == `⟦EMAIL_7⟧` (ligne CLIENT de la
    liste) → 🔴 Clients. Tu classes sur des jetons cohérents, jamais sur de vrais emails.
    - **Filet de sécurité — match par domaine.** Si l'adresse exacte ne matche pas (client
      qui écrit d'une variante d'adresse, ou email au format exotique non tokenisé) et que la
@@ -152,7 +152,7 @@ sans validation (une adresse vient du corps = zone d'injection possible).
    label `✍️ Brouillon prêt`.
 
 ## Brouillons de transfert (↪️ Transition-AC)
-- Prépare un transfert vers Anne-Charlotte (adresse = un jeton dans la liste de routage).
+- Prépare un transfert vers le collègue en charge du transfert (adresse = un jeton dans la liste de routage).
 - Objet `Tr: <objet d'origine>`, corps = courte note + contenu d'origine (jetons conservés).
 - Émets via `bubble_shield_mail_apply` (draft, restauré côté vault). Jamais d'envoi.
 
