@@ -99,11 +99,11 @@ TOOLS = [
             "for files the extension, inferred modality (pdf, scan, spreadsheet, …) and "
             "byte size, so you can choose 'the PDF', 'the scan', or 'the newest'. "
             "NON-recursive: lists only the immediate children (call again on a subfolder "
-            "to go deeper). File NAMES that may contain client PII are returned MASKED "
-            "with reversible ⟦…⟧ tokens (you see the structure/modality/date, not the "
-            "real name). NEVER returns file CONTENT — for that, use bubble_shield_read. "
-            "Fail-closed like bubble_shield_read: if the NER daemon is down it REFUSES "
-            "rather than leak raw filenames."),
+            "to go deeper). Entry NAMES are returned IN CLEAR (unmasked) — a folder/file "
+            "name is a navigation label the user already owns and sees on their own "
+            "machine, so you can navigate and reference folders/files BY NAME. NEVER "
+            "returns file CONTENT — for that, use bubble_shield_read, which masks "
+            "PII in the file's content before you see it."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -782,11 +782,15 @@ def _anonymise_file(path: str) -> str:
 #     structure the agent doesn't need to pick a file; the agent can list a
 #     subfolder explicitly by calling the tool again on it. Subdirs are marked
 #     with type="dir" so the agent knows what it can descend into.
-#   - Entry NAMES are masked through _anonymise_text (the SAME fail-closed masker
-#     as bubble_shield_read): a PII-bearing filename comes back tokenised, so the
-#     agent sees structure/modality/date, not the real name. If the NER daemon is
-#     down, _anonymise_text raises NERDownError and this whole call fails closed
-#     (isError, no raw filenames) — identical contract to bubble_shield_read.
+#   - Entry NAMES are returned UNMASKED (in clear), for BOTH dirs and files. A
+#     folder/file name is a navigation label the user OWNS and already SEES on
+#     their own machine — the user is the one who typed/chose the client name to
+#     navigate by. Masking listing names doesn't add privacy (the user already
+#     knows the names) but destroys usability (can't navigate a picker full of
+#     ⟦…⟧ tokens). PII protection belongs to file CONTENT, which is
+#     bubble_shield_read's job (via _anonymise_file / _anonymise_text) — this
+#     tool never touches content. The `protected` flag is still reported
+#     (informational) but no longer drives any masking here.
 #   - A hard CAP (_LIST_MAX_ENTRIES) bounds a folder with thousands of files so
 #     the listing can't blow up; when hit, `truncated` is reported.
 
@@ -861,17 +865,13 @@ def _is_protected_folder(p: Path) -> bool:
 
 def _list_folder(folder: str) -> str:
     """List the immediate children of `folder` (NON-recursive). Returns a JSON
-    listing: for each entry its NAME (masked if the folder is protected), relative
-    path, type (file|dir), and for files the extension + inferred modality + byte
-    size. NEVER reads or returns file CONTENT.
+    listing: for each entry its NAME (always IN CLEAR — a navigation label the
+    user already owns/sees, not PII protection scope), type (file|dir), and for
+    files the extension + inferred modality + byte size. NEVER reads or returns
+    file CONTENT — content masking is bubble_shield_read's job.
 
-    Fail-CLOSED on masking: if the folder is protected and the NER daemon is down,
-    _anonymise_text raises NERDownError → the caller converts it to isError with no
-    raw filenames leaked (same contract as bubble_shield_read).
-
-    Non-protected folder: a plain (unmasked) listing is returned with
-    protected=false, so the tool never crashes when pointed outside a marked
-    folder — it's simply a normal directory listing there.
+    The `protected` flag is reported (informational) but does not affect this
+    tool's output — names are unmasked whether or not the folder is protected.
     """
     p = Path(os.path.expanduser(folder)).resolve()
     if not p.exists():
@@ -919,18 +919,8 @@ def _list_folder(folder: str) -> str:
                 item["size"] = None
         entries.append(item)
 
-    # Mask entry NAMES if the folder is protected. We run the WHOLE set of names
-    # through _anonymise_text in one call (so tokens stay consistent) and map each
-    # masked name back onto its entry. If the daemon is down, _anonymise_text
-    # raises NERDownError → fail-closed (no raw names ever returned).
-    if protected and entries:
-        joined = "\n".join(it["name"] for it in entries)
-        masked = _anonymise_text(joined)  # raises NERDownError when daemon down
-        # _anonymise_text may append a verdict/kept-policy NOTE after a blank line;
-        # take only the first len(entries) lines (the masked names, in order).
-        masked_lines = masked.split("\n")[:len(entries)]
-        for it, ml in zip(entries, masked_lines):
-            it["name"] = ml
+    # Entry NAMES are returned IN CLEAR — see design-decision comments above.
+    # No _anonymise_text call here; this tool never masks names.
 
     result = {
         "folder": str(p),

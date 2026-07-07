@@ -225,11 +225,49 @@ the advisor's broader obligations.* That honesty is itself a selling point to a 
 ## 7. Roadmap / known gaps being closed [TECH]
 - **Email protection** (`bubble_shield_mail_read` + `bubble_shield_mail_apply`, IMAP) —
   **shipped** (v1.21.x); replaces the raw Gmail connector. Full reference in §9.
+- **Gazetteer de-pollution** (A+D→Gemma cascade, self-correcting) — **shipped** (v1.22.0). Full
+  reference in §3.5.
 - **Detection tuning** — closing the two measured leak shapes (bare title-case names in prose;
   hyphen-grouped IBANs).
 - **Vault encryption-at-rest as default** (currently available, being made default).
 - **Compliance pack** (DPA template, DPIA template, transfer-analysis note) — proposed as a
   packaged client deliverable, turning "a tool" into "a compliant workflow."
+
+### 7.1 The architecture roadmap — two phases (the strategic direction) [TECH]
+
+Bubble Shield masks at the **tool layer** today: the `bubble_shield_read` / `bubble_shield_list`
+MCP tools return already-anonymised text, so the agent only ever holds `⟦tokens⟧`. This exists for
+one concrete reason: **Cowork runs remotely on Anthropic's servers** (not on the client's Mac), so
+there is no local network hop to intercept — tool-layer masking is the *only* viable approach for
+Cowork. (Verified 2026-07-07: Cowork execution is remote; its own in-VM egress proxy has documented
+allowlist bugs; a local `127.0.0.1` proxy is physically outside Cowork's path.)
+
+The tool-layer design has a structural cost: **the agent never sees real data, so anything it must
+reference *by name* can break** — e.g. masked folder names in a listing make it impossible for the
+user to tell the agent which client folder to open (the 2026-07-07 folder-navigation bug). These are
+handled today by surgical per-surface fixes (a folder/file *name* is a navigation label the user owns
+and already sees on their machine → returned in clear; file *contents* stay masked).
+
+**Phase 2 — egress-proxy masking (once clients migrate Cowork → Claude Code CLI).** A local reverse
+proxy on `127.0.0.1` masks PII **only on the last hop to Anthropic's API**. The agent keeps the
+**real data in its context** (folder navigation, file references, natural reasoning all work) while
+nothing identifying crosses to the AI subprocessor. This **dissolves the entire "masking breaks
+reference" bug class** and is an even cleaner RGPD art.46 story (pseudonymisation literally *at the
+transfer boundary*). Crucially, it **reuses Shield's whole engine** (recognisers, vault, Gemma
+de-pollution, gazetteer) — only the *integration point* changes (proxy body-rewrite instead of MCP
+tool output), so it is a re-plumbing, not a rewrite.
+
+**Why Phase 2 is gated on the migration (verified 2026-07-07):** Claude Code CLI **can** be pointed
+at a local proxy — it honours `ANTHROPIC_BASE_URL` + `HTTPS_PROXY`, has **no hard cert-pinning**, and
+Anthropic explicitly documents support for local TLS-inspection proxies (`NODE_EXTRA_CA_CERTS`). So
+the egress-proxy architecture becomes fully viable the moment a client is on Claude Code CLI. Until
+then, Cowork clients stay on tool-layer masking. Reference implementation shape: klovys99
+(github.com/Korbicorp/klovys99) — same idea, with Shield's superior FR/finance engine. Tracked as
+board card **#585** (design-first when the migration lands).
+
+**Net roadmap:** *tool-layer masking + surgical per-bug fixes today (Cowork era)* → *egress-proxy
+masking tomorrow (Claude Code era)*. Both phases share one engine; the choice is purely *where* the
+masking boundary sits, driven by *where the client's session runs*.
 
 ---
 

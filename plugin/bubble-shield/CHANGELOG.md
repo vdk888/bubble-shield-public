@@ -1,5 +1,11 @@
 # Changelog — bubble-shield
 
+## 1.22.1
+
+- fix(list): `bubble_shield_list` returns folder/file NAMES in clear (they are navigation labels the user owns and already sees on their machine) — masking them broke the user's ability to tell the agent which client folder to open. File CONTENTS stay fully masked (`bubble_shield_read` unchanged). The listing no longer depends on the NER daemon.
+- docs: two-phase architecture roadmap in PRODUCT-REFERENCE §7.1 (tool-layer masking now / egress-proxy after Cowork→Claude Code migration).
+
+
 All notable changes to the plugin. Bump the version in BOTH
 `plugin/bubble-shield/.claude-plugin/plugin.json` and the repo-root
 `.claude-plugin/marketplace.json` (two places) on every release, or clients'
