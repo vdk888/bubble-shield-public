@@ -435,6 +435,47 @@ _QUALITY_MIN_REAL_WORD_RATIO = 0.40
 _QUALITY_MIN_AVG_WORD_LEN = 3.5
 _QUALITY_MAX_NONWORD_PCT = 8.0
 
+# P0 #589-B — structured-form fingerprint. A liasse fiscale / CERFA / bilan is a
+# high-recall-risk document whose columnar extraction defeats regex+NER anchors, so a
+# masked_ok result on it cannot be trusted (see the 2026-07-08 incident). We detect the
+# DOCUMENT CLASS by French fiscal/KYC form-number fingerprints — a nameable, explainable
+# signal (the quality gate's nonword score does NOT separate these: a tax form of numbers
+# reads as clean prose). At >= _FORM_MARKER_MIN distinct markers, escalate to Gemma.
+_FORM_MARKER_MIN = 3
+_STRUCTURED_FORM_MARKERS = [
+    # Form numbers — NO \b word boundary (glued/degraded extraction defeats \b; that
+    # gluing is the exact incident failure mode). Match the form-number token even when
+    # fused to adjacent text: "resultat2033B", "N°2065-SD".
+    re.compile(r"N°\s?20\d{2}(?:-[A-Z]{1,3})?"),          # N° 2065-SD, N° 2033
+    re.compile(r"20(?:3[0-9]|5[0-9]|65)-?[A-Z]{1,3}"),    # 2033-B, 2058-A, glued "2033B" (hyphen optional for glue-tolerance; suffix letter still required so bare years don't match)
+    re.compile(r"CERFA", re.I),
+    re.compile(r"liasse", re.I),
+    re.compile(r"ETATS?\s+FISCAUX", re.I),
+    # LABEL markers — a bilan/compte de résultat often has NO form numbers, only these
+    # standard headings. Each is specific enough that 3 DISTINCT of them (the >=3 floor)
+    # signals a structured fiscal document, not ordinary prose.
+    re.compile(r"BILAN\s+(?:ACTIF|PASSIF|SIMPLIFI)", re.I),
+    re.compile(r"COMPTE\s+DE\s+R[ÉE]SULTAT", re.I),
+    re.compile(r"CAPITAUX\s+PROPRES", re.I),
+    re.compile(r"IMMOBILISATIONS?\s+(?:CORPORELLES|INCORPORELLES|FINANCI)", re.I),
+    re.compile(r"R[ÉE]GIME\s+R[ÉE]EL", re.I),
+    re.compile(r"IMP[ÔO]T\s+SUR\s+LES\s+SOCI[ÉE]T[ÉE]S", re.I),
+]
+
+def _is_structured_form(text: str) -> bool:
+    """True when `text` looks like a French fiscal/KYC structured form (liasse,
+    CERFA, bilan). Counts DISTINCT form-number fingerprints; fires at
+    _FORM_MARKER_MIN. Pure — no I/O. See #589-B."""
+    if not text:
+        return False
+    hits = sum(1 for rx in _STRUCTURED_FORM_MARKERS if rx.search(text))
+    if hits >= _FORM_MARKER_MIN:
+        return True
+    # A single marker regex can match many times (a real liasse repeats 2033-x); also
+    # count total distinct matches of the numeric-form pattern as a fallback signal.
+    nums = set(_STRUCTURED_FORM_MARKERS[1].findall(text))
+    return (hits + max(0, len(nums) - 1)) >= _FORM_MARKER_MIN
+
 # A "real word" for this gate: alphabetic (letters only, any Unicode letter —
 # so accented French text counts), at least 2 characters. Deliberately
 # excludes pure-digit tokens (a table of numbers is real DATA but shouldn't
@@ -791,6 +832,99 @@ class MaskingIncompleteError(RuntimeError):
     """
 
 
+# P0 #589-B — a STRUCTURED FORM (liasse/CERFA, detected by _is_structured_form)
+# needs a deeper, local Gemma second pass: degraded columnar extraction on these
+# forms can hide entities from the fast pass while the doc still reads as clean
+# prose to the quality gate, so a completed masked_ok/low_confidence verdict on
+# a structured form cannot be trusted at face value. We escalate BECAUSE the
+# fast pass is unreliable on this doc — so ANY failure of the escalation itself
+# (daemon down/unreachable, timeout, non-200, malformed JSON, or empty spans on
+# a substantial form) must fail closed. NEVER fall back to res.anonymized here.
+_STRUCTURED_FORM_UNVERIFIED_ERROR = (
+    "Bubble Shield a identifié un formulaire structuré (liasse/CERFA) nécessitant une "
+    "seconde passe approfondie, mais celle-ci n'a pas pu s'exécuter de façon fiable. "
+    "Le contenu n'est PAS renvoyé ; relisez le fichier original."
+)
+
+
+class StructuredFormUnverifiedError(RuntimeError):
+    """#589-B — a structured form was detected but the Gemma second pass could not be
+    trusted (daemon down/timeout/malformed, or empty spans on a substantial form). We
+    escalated BECAUSE the fast pass is unreliable on this doc, so we MUST NOT fall back
+    to it. Callers convert this to isError:true with NO body."""
+
+
+_GEMMA_PORT = 8724
+
+
+def _structured_form_note() -> str:
+    return ("\n\n[⚠️ Bubble Shield : formulaire structuré (liasse/CERFA) — une seconde "
+            "passe approfondie (locale) a été appliquée. Traitement plus long pour ce "
+            "document. Une relecture humaine reste conseillée avant envoi.]")
+
+
+def _gemma_extract_call(text: str):
+    """POST text to the local Gemma daemon /extract_pii. Returns the spans list.
+    Raises on any transport/HTTP/parse failure (caller fails closed)."""
+    import urllib.request, json as _json
+    data = _json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{_GEMMA_PORT}/extract_pii", data=data,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:   # 30s: Gemma on a full block
+        payload = _json.loads(r.read().decode("utf-8"))
+    if not payload.get("ok"):
+        raise RuntimeError("gemma extract not ok")
+    return list(payload.get("spans", []))
+
+
+def _gemma_second_pass(res, engine) -> str:
+    """#589-B — on a structured form, use Gemma to find PII the fast pass missed and mask
+    it into the SAME vault. Fail-closed on ANY failure (never return the fast-pass body).
+
+    Note-honesty fix (reviewer flag, post-#589-B): the "seconde passe approfondie"
+    note is appended HERE, and ONLY when at least one span was actually applied to
+    the output. Keeping the append inside this function (rather than gating at the
+    call site) keeps the "did we actually mask anything" fact local to where it's
+    computed, so callers can't drift out of sync with it.
+
+    Final-review fix (#589-B): the sub-120-char carve-out for the fail-closed check
+    below has been REMOVED. A structured form applying zero masking now fails closed
+    at ANY length — including short bodies, which previously fell through and
+    returned an unmasked body silently. Since the note above is only appended when
+    `applied` is True, and the function now always raises when `applied` is False,
+    the note-is-absent-without-a-span invariant holds trivially (there is no longer
+    a code path that returns un-noted, unmasked output).
+
+    Fail-open hole fix (reviewer flag, #589-B): the fail-closed check is evaluated
+    AFTER the masking loop on whether masking was actually APPLIED, not merely on
+    whether Gemma returned a non-empty spans list. A non-empty spans list whose
+    values don't textually match res.anonymized (stale/hallucinated/malformed
+    spans) must fail closed exactly like empty spans — both mean "nothing was
+    verified/masked" on a substantial form.
+    """
+    try:
+        spans = _gemma_extract_call(res.anonymized)
+    except Exception as e:
+        raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR) from e
+    out = res.anonymized
+    applied = False
+    for sp in spans:
+        val, typ = sp.get("text", ""), sp.get("type", "MOT")
+        if val and val in out:
+            token = engine.vault.token_for(val, typ)
+            out = out.replace(val, token)
+            applied = True
+    # Fail-closed: a structured form where the second pass applied NO masking cannot be
+    # certified — regardless of length. (If it fingerprinted as a form, "nothing to mask"
+    # is itself suspicious; the 120-char carve-out is dropped per the #589-B final review.)
+    if not applied:
+        raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR)
+    if applied:
+        out += _structured_form_note()
+    return out
+
+
 # #568 — async on-seed de-pollution trigger.
 #
 # After seed_vault_into_gazetteer() feeds newly-confirmed PII into the deny-list
@@ -919,6 +1053,15 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
     _state = getattr(res, "verdict_state", None)
     if _state == "zero_detection" and not _text_quality_gate(res.original):
         raise ZeroDetectionError(_ZERO_DETECTION_ERROR)
+
+    # P0 #589-B — a COMPLETED masked_ok/low_confidence result on a STRUCTURED FORM cannot be
+    # trusted (degraded columnar extraction hides entities from the fast pass; the doc still
+    # reads as clean prose so the quality gate never fires). Escalate to a Gemma second pass,
+    # or fail closed. Runs only for positively-identified forms — all other docs are unchanged.
+    # Note-honesty fix: _gemma_second_pass appends _structured_form_note() itself, and ONLY
+    # when it actually applied at least one span — do not append it again here.
+    if _is_structured_form(res.original):
+        return _gemma_second_pass(res, engine)
 
     # Verdict note — keyed off the engine's canonical verdict_state so each state
     # gets the HONEST message. Critically, the zero-detection state (a substantial
@@ -1998,6 +2141,12 @@ def _handle(req: dict) -> None:
             # is the exact class of hole that let a raw 43KB client PDF return
             # with zero masking tokens and isError=false in the live P0
             # leak session — see MaskingIncompleteError's docstring.
+            fail(str(e))
+        except StructuredFormUnverifiedError as e:
+            # P0 #589-B — a structured form (liasse/CERFA) was detected but the
+            # Gemma second pass could not be trusted (daemon down/timeout/
+            # malformed, or empty spans on a substantial form). Fail-closed:
+            # no anonymized body, no raw text — see the class docstring.
             fail(str(e))
         except Exception as e:
             # fail-CLOSED: the exception message may embed the raw input (mail body,

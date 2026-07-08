@@ -30,6 +30,44 @@ def _parse_verdict(raw: str) -> str:
     return "NOM"
 
 
+# #589-B — Gemma PII-span extraction (2nd pass for degraded tax forms).
+_EXTRACT_PROMPT = (
+    "Liste toute donnée personnelle identifiante dans ce texte de formulaire fiscal "
+    "français. Une ligne par donnée, format « TYPE: valeur exacte ». Types autorisés: "
+    "NOM, PRENOM, SIRET, DATE_NAISSANCE, LIEU_NAISSANCE, ADRESSE, TELEPHONE, RAISON_SOCIALE. "
+    "N'invente rien ; recopie la valeur telle qu'elle apparaît. Si aucune donnée: réponds « (aucune) ».\n\n"
+    "TEXTE:\n{text}\n\nDONNÉES:"
+)
+_ALLOWED_TYPES = {"NOM", "PRENOM", "SIRET", "DATE_NAISSANCE", "LIEU_NAISSANCE",
+                  "ADRESSE", "TELEPHONE", "RAISON_SOCIALE"}
+
+
+_AUCUNE_STRIP_CHARS = " \t\r\n\"'«»«»"
+
+
+def _is_aucune_sentinel(v: str) -> bool:
+    """True when `v` is Gemma's "(aucune)" sentinel, possibly echoed back wrapped
+    in guillemets/straight quotes and/or extra whitespace, in any case. Robust
+    check per Task-2 review: a quoted echo (e.g. « (aucune) ») must be dropped,
+    not turned into a spurious span."""
+    v = v.strip(_AUCUNE_STRIP_CHARS).strip().lower()
+    return v in ("aucune", "(aucune)")
+
+
+def _parse_extract(raw):
+    """Parse Gemma's 'TYPE: value' lines into typed spans. Unknown/empty types dropped.
+    Fail-toward-nothing here (an empty parse is caught downstream as suspicious → fail-closed)."""
+    spans = []
+    for line in (raw or "").splitlines():
+        if ":" not in line:
+            continue
+        t, _, v = line.partition(":")
+        t = t.strip().upper(); v = v.strip()
+        if t in _ALLOWED_TYPES and v and not _is_aucune_sentinel(v):
+            spans.append({"type": t, "text": v})
+    return spans
+
+
 class GemmaClassifier:
     def __init__(self, model_id: str = MODEL_ID):
         self.model_id = model_id
@@ -54,3 +92,10 @@ class GemmaClassifier:
                 verdict = "NOM"  # fail-safe: keep masked
             out.append({"token": tok, "verdict": verdict})
         return out
+
+    def extract_pii(self, text):
+        from mlx_lm import generate
+        resp = generate(self._model, self._tok,
+                        prompt=_EXTRACT_PROMPT.format(text=text[:6000]),
+                        max_tokens=512, verbose=False)
+        return _parse_extract(resp)

@@ -8,6 +8,8 @@ Gemma model resident so per-call classification is fast. Binds 127.0.0.1 ONLY
   POST /classify {"tokens": ["Déclarant", "Dupont"]}
        -> {"results": [{"token": "Déclarant", "verdict": "MOT"},
                        {"token": "Dupont",    "verdict": "NOM"}]}
+  POST /extract_pii {"text": "..."}
+       -> {"ok": true, "spans": [{"type": "PRENOM", "text": "Jean"}, ...]}
   GET  /health -> {"ok": true, "warm": true, "model": "..."}
 
 Run with the gemma venv python (has mlx_lm):
@@ -54,6 +56,15 @@ def make_handler_class(classifier):
         def do_POST(self):
             global _last_activity
             _last_activity = time.time()
+            if self.path == "/extract_pii":
+                n = int(self.headers.get("Content-Length", 0))
+                try:
+                    req = json.loads(self.rfile.read(n) or b"{}")
+                    spans = classifier.extract_pii(req.get("text", ""))
+                    self._send({"ok": True, "spans": spans}, 200)
+                except Exception as e:
+                    self._send({"ok": False, "error": type(e).__name__}, 500)
+                return
             if self.path != "/classify":
                 self._send({"error": "not found"}, 404); return
             n = int(self.headers.get("Content-Length", 0))
