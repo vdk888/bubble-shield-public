@@ -1,5 +1,23 @@
 # Changelog — bubble-shield
 
+## 1.23.7 — 2026-07-12 — FIX: Gemma in setup status + doc/pipeline drift guard
+
+- **fix(setup status):** the setup tracker now includes **Gemma** (the largest
+  model, ~4.5 GB, installed by default). Previously `_model_states()` tracked only
+  GLiNER / OpenAI-PF / OCR, so the status reported "ready" while Gemma was still
+  downloading several GB. The per-model line names Gemma, the "ready" gate
+  requires it, and the size estimate is corrected (~5-6 GB total).
+- **docs:** cleared a class of pipeline/doc drift — every "bubble_shield_read
+  always returns anonymised" claim now states the honest hit=masked / miss=raw
+  contract; model lists include Gemma; the README enables the neural layers via
+  the accuracy pack (not the old Presidio/Ollama pip steps, which contradicted the
+  detection table); PRODUCT-REFERENCE marks the (built-but-disabled) mail feature
+  as reserved, not shipped.
+- **test:** a new drift guard (`test_doc_surfaces_match_pipeline.py`) fails if a
+  stale phrase reappears across the doc surfaces ("returns it anonymised", a model
+  list without Gemma, "~900MB", Presidio/Ollama install steps) — so this class
+  can't silently ship again.
+
 ## 1.23.6 — 2026-07-12 — FIX: onboarding demo + honest bubble_shield_read description
 
 - **fix(read tool):** `bubble_shield_read`'s description now states the real

@@ -9,9 +9,12 @@ effect for MCP tools). So the ambient "anonymise whatever the agent reads" tier
 can't work by rewriting a built-in Read in Cowork.
 
 The fix: make the agent read client data THROUGH this MCP tool instead. An MCP
-tool's OWN returned content is what lands in context — so if `bubble_shield_read`
-returns already-anonymised text, the agent only ever sees `⟦…⟧` tokens. No
-rewrite needed; we control the output at the source. The folder guard
+tool's OWN returned content is what lands in context. `bubble_shield_read` serves
+a pre-computed masked shadow when the file is already indexed (the agent sees
+only `⟦…⟧` tokens); on a brand-new / not-yet-indexed file it returns the RAW
+extracted text once (the background sweep masks it afterwards) — so a first read
+of a fresh document is NOT guaranteed masked, and `bubble_shield_anonymize_text`
+is the fail-closed always-mask path when a guarantee is needed. The folder guard
 (PreToolUse) still blocks the bare `Read` of protected files, which is what
 steers the agent to `bubble_shield_read`.
 
@@ -173,13 +176,16 @@ TOOLS = [
         "name": "bubble_shield_setup_ml",
         "description": (
             "Install or check ALL on-device models in ONE pass — GLiNER + OpenAI "
-            "Privacy Filter + OCR (docling). Runs on the user's own machine, "
-            "nothing leaves it. action='start' begins the one-time install in the "
-            "background (downloads ~900MB+ total — a few minutes) and returns "
-            "immediately; models already on disk are SKIPPED. action='status' "
-            "reports a PER-MODEL state, naming each model (GLiNER / OpenAI-PF / OCR) "
-            "with present / downloading / ready / error. After 'start', poll 'status' "
-            "every ~20s and tell the user in plain language when it's ready. No "
+            "Privacy Filter + OCR (docling) + Gemma (the de-pollution judge + "
+            "degraded-form masker, the largest model). Runs on the user's own "
+            "machine, nothing leaves it. action='start' begins the one-time install "
+            "in the background (downloads ~5-6 GB total, Gemma being the biggest — a "
+            "few minutes) and returns immediately; models already on disk are "
+            "SKIPPED. action='status' reports a PER-MODEL state, naming each model "
+            "(GLiNER / OpenAI-PF / OCR / Gemma) with present / downloading / ready / "
+            "error — and only reports 'ready' when EVERY model (Gemma included) is "
+            "done. After 'start', poll 'status' every ~20s and tell the user in "
+            "plain language when it's ready. No "
             "Terminal needed — this runs the full setup for them, so the client is "
             "never asked to install a model later."),
         "inputSchema": {
@@ -1844,24 +1850,59 @@ _OPENAI_ONNX = "onnx/model_q4.onnx"
 _OCR_SENTINEL = BUBBLE_SHIELD_HOME / "layout_model_cached.flag"
 
 
+_GEMMA_ENV = BUBBLE_SHIELD_HOME / "gemma-env"
+# Must match setup_ml.GEMMA_MODEL_ID and gemma_classifier.MODEL_ID.
+_GEMMA_MODEL_ID = "mlx-community/gemma-3n-E4B-it-lm-4bit"
+
+
+def _gemma_present() -> bool:
+    """True when the Gemma judge is fully installed: its venv exists AND its
+    model snapshot is staged in the HF hub cache (what warm_up() loads). Mirrors
+    setup_ml.install_gemma_env() + download_gemma_model()'s skip-if-present
+    check, so 'present' here means the same thing the installer means."""
+    if not (_GEMMA_ENV / "bin" / "python").exists():
+        return False
+    # snapshot_download stages under <hub>/models--<org>--<name>/snapshots/*
+    cache_dir_name = "models--" + _GEMMA_MODEL_ID.replace("/", "--")
+    hub_roots = [
+        Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))) / "hub",
+        Path.home() / ".cache" / "huggingface" / "hub",
+        _GEMMA_ENV / "hf-cache" / "hub",
+    ]
+    for hub in hub_roots:
+        snap = hub / cache_dir_name / "snapshots"
+        try:
+            if snap.is_dir() and any(snap.iterdir()):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _model_states() -> dict:
-    """Per-model present/absent map for GLiNER, OpenAI-PF, OCR (#387)."""
+    """Per-model present/absent map for GLiNER, OpenAI-PF, OCR, and Gemma.
+
+    Gemma (the de-pollution judge + degraded-form second-pass masker) is the
+    LARGEST model (~4.5 GB) and is installed by default in the same setup pass —
+    it MUST be tracked here, or the 'ready' signal fires while Gemma is still
+    downloading several GB in the background."""
     return {
         "gliner": "present" if (_MODELS_DIR / _GLINER_DIR / _GLINER_ONNX).is_file() else "absent",
         "openai": "present" if (_MODELS_DIR / _OPENAI_DIR / _OPENAI_ONNX).is_file() else "absent",
         "ocr": "present" if _OCR_SENTINEL.is_file() else "absent",
+        "gemma": "present" if _gemma_present() else "absent",
     }
 
 
 def _per_model_line(states: dict, downloading: bool = False) -> str:
     """Render the per-model status the onboarding shows the user (#387).
 
-    e.g. "GLiNER ✓ déjà présent · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement"
+    e.g. "GLiNER ✓ déjà présent · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement · Gemma ↓ téléchargement"
     A model already on disk shows "✓ déjà présent"; an absent one shows
     "↓ téléchargement" while installing or "✓ prêt"/"absent" otherwise."""
-    names = {"gliner": "GLiNER", "openai": "OpenAI-PF", "ocr": "OCR"}
+    names = {"gliner": "GLiNER", "openai": "OpenAI-PF", "ocr": "OCR", "gemma": "Gemma"}
     parts = []
-    for key in ("gliner", "openai", "ocr"):
+    for key in ("gliner", "openai", "ocr", "gemma"):
         st = states.get(key, "absent")
         if st == "present":
             tag = "✓ déjà présent"
@@ -1886,7 +1927,7 @@ def _setup_script() -> Path:
 def _setup_start() -> dict:
     """Spawn the ONE-PASS bootstrap DETACHED host-side and return immediately (#387).
 
-    Downloads ALL models — GLiNER + OpenAI Privacy Filter (ml setup) AND OCR
+    Downloads ALL models — GLiNER + OpenAI Privacy Filter + Gemma (ml setup) AND OCR
     (docling, ocr setup) — in a single pass so the client is never prompted to
     install a model later. Each model is skipped if already on disk. The reply
     names every model + its current state.
@@ -1931,16 +1972,20 @@ def _setup_start() -> dict:
             "models": states,
             "per_model": _per_model_line(states, downloading=True),
             "message": "Installation des modèles démarrée en une seule passe "
-                       "(GLiNER + OpenAI-PF + OCR ; ~900 Mo+, quelques minutes ; "
-                       "les modèles déjà présents sont ignorés). Rappelle "
+                       "(GLiNER + OpenAI-PF + OCR + Gemma ; ~5–6 Go au total, "
+                       "Gemma étant le plus gros ; quelques minutes ; les modèles "
+                       "déjà présents sont ignorés). Rappelle "
                        "bubble_shield_setup_ml(action='status') pour suivre."}
 
 
 def _setup_status() -> dict:
-    """Per-model status across the one-pass install (GLiNER + OpenAI-PF + OCR).
+    """Per-model status across the one-pass install (GLiNER + OpenAI-PF + OCR +
+    Gemma).
 
     Reports each model by name with its present/downloading/ready/error state,
-    so the onboarding can show the user exactly what is installed vs in flight."""
+    so the onboarding can show the user exactly what is installed vs in flight.
+    'ready' requires EVERY model — including Gemma (~4.5 GB, the largest) — so
+    the client is never told 'done' while a multi-GB model is still downloading."""
     states = _model_states()
     ml_marker = _SETUP_MARKER.read_text(encoding="utf-8").strip() if _SETUP_MARKER.is_file() else "absent"
     ocr_marker = _OCR_SETUP_MARKER.read_text(encoding="utf-8").strip() if _OCR_SETUP_MARKER.is_file() else "absent"
@@ -1948,7 +1993,7 @@ def _setup_status() -> dict:
 
     if all(v == "present" for v in states.values()):
         state = "ready"
-        message = "Tous les modèles sont prêts (GLiNER + OpenAI-PF + OCR)."
+        message = "Tous les modèles sont prêts (GLiNER + OpenAI-PF + OCR + Gemma)."
     elif installing:
         state = "installing"
         message = "Installation en cours (téléchargement des modèles)…"

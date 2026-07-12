@@ -61,12 +61,15 @@ Progress line first:
 > tout ce dont Bubble Shield a besoin, 100 % en local sur votre Mac :
 > • **GLiNER** — détection fine des noms/adresses/identifiants (NER multilingue) ;
 > • **OpenAI Privacy Filter** — détection PII renforcée ;
+> • **Gemma** — pseudonymisation intelligente (nettoie les fausses alertes) et
+>   lecture des formulaires scannés/dégradés, entièrement en local ;
 > • **OCR** — lecture des PDF scannés (Docling + RapidOCR).
-> ~900 Mo au total, une seule fois, rien n'est envoyé sur internet. Les
-> modèles déjà présents sont ignorés (pas de re-téléchargement). »
+> **~5 à 6 Go au total** (Gemma est le plus gros modèle), une seule fois,
+> rien n'est envoyé sur internet. Les modèles déjà présents sont ignorés
+> (pas de re-téléchargement). »
 
 Call **`bubble_shield_setup_ml`** with `action: "start"`. This single call
-pulls **GLiNER + OpenAI Privacy Filter + OCR** in one pass — there is no
+pulls **GLiNER + OpenAI Privacy Filter + OCR + Gemma** in one pass — there is no
 separate "voulez-vous aussi installer X ?" step afterwards.
 
 Then poll **`bubble_shield_setup_ml`** with `action: "status"` every ~20 s
@@ -74,17 +77,17 @@ until status is `ready` (or timeout after ~10 min → error message). The status
 returns a **per-model line** naming each model and its state — relay it to the
 user verbatim. Examples:
 
-> « 📦 GLiNER ↓ téléchargement · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement »
+> « 📦 GLiNER ↓ téléchargement · OpenAI-PF ↓ téléchargement · OCR ↓ téléchargement · Gemma ↓ téléchargement »
 
 then later:
 
-> « 📦 GLiNER ✓ déjà présent · OpenAI-PF ✓ prêt · OCR ✓ prêt »
+> « 📦 GLiNER ✓ déjà présent · OpenAI-PF ✓ prêt · OCR ✓ prêt · Gemma ✓ prêt »
 
 Keep company during the wait, naming what's downloading from the status line:
 > « J'installe les modèles… (ceux déjà présents sur votre Mac sont ignorés). »
 
 When `ready`:
-> « ✓ Tout est prêt : GLiNER + OpenAI Privacy Filter + OCR. La détection est à
+> « ✓ Tout est prêt : GLiNER + OpenAI Privacy Filter + OCR + Gemma. La détection est à
 > son maximum et les PDF scannés seront lus et anonymisés. Vous ne serez plus
 > jamais sollicité pour installer un modèle. »
 
@@ -376,7 +379,7 @@ même garantie que `bubble_shield_read`/`write` : le client voit, l'IA ne voit p
 ### Étape 6 — Clôture et suite
 
 > « La configuration est terminée. Voici ce qui est en place :
-> ✓ GLiNER + OpenAI Privacy Filter (détection avancée) installés
+> ✓ GLiNER + OpenAI Privacy Filter + Gemma (détection + pseudonymisation avancées) installés
 > ✓ OCR (PDF scannés) installé
 > ✓ Dossier protégé marqué
 > ✓ Démo complète — vraie tâche sur un vrai fichier : résultat anonymisé (vu par l'IA) vs vrai résultat (produit par votre Mac)
@@ -709,7 +712,7 @@ Troubleshooting + the full mechanics are in `references/accuracy-pack.md`.
 Four tools ship with the plugin. Reach for them instead of doing PII-handling by
 hand — they keep the real values out of your context and in the local vault:
 
-- **`bubble_shield_read`(path)** — read a client *file* anonymised (the default for any
+- **`bubble_shield_read`(path)** — read a client *file* — masked if already indexed, else raw once then swept (the default for any
   file that may hold PII; the guard blocks the raw Read).
 - **`bubble_shield_anonymize_text`(text)** — anonymise a *block of text that isn't a
   file*: a message, an API result, pasted content. ⚠️ For e-mail in Cowork this is a
@@ -792,7 +795,7 @@ pitch, the "is it really safe?" answer, the demo walk-through).
 ## When something looks wrong
 
 - "The assistant says it can't read my file" → that's the guard working. Read it
-  through the **`bubble_shield_read`** tool (returns it anonymised), or run
+  through the **`bubble_shield_read`** tool (masked if indexed; if unsure, anonymize_text it), or run
   `bubble-shield-anonymize` on the whole folder and work on the `clean/` copies.
 - "Nothing is being blocked" → the folder probably has no `.bubble-shield.json`
   marker (step 1), or the plugin was just installed and the session still needs a

@@ -42,11 +42,12 @@ Bubble Shield does not try to "scrub" data after the AI has seen it. It intercep
   tools and glob-expanded shell commands). Instead, the AI is told to call the MCP tool
   **`bubble_shield_read(path)`**, which returns the file **already tokenised** (`⟦NOM_0001⟧`,
   `⟦IBAN_0002⟧`…). The real values never enter the model's context.
-- **Email reads** *(shipped, v1.21.x).* **`bubble_shield_mail_read`** fetches email over IMAP
-  (host-side) and returns it already-tokenised, the same way — replacing the practice of
-  connecting a raw Gmail connector (which exposed raw email to the model). Each message block
-  starts with a `UID:` line (a mailbox integer, not PII) that the assistant hands to the apply
-  tool. See §9 for the full mail-triage feature.
+- **Email reads** *(disabled in V1 — kept in reserve).* An IMAP mail-triage path
+  (`bubble_shield_mail_read` / `bubble_shield_mail_apply`) exists in the codebase but is
+  **not enabled in the shipped product** — the tools are gated off (`_mail_enabled()` is
+  false unless `BUBBLE_SHIELD_ENABLE_MAIL=1`) and are not exposed to the assistant. It can
+  be re-enabled without a re-deploy. Documented in §9 for reference; it is not a live V1
+  feature.
 - **Restoring the answer.** When the AI produces a document containing tokens, **`bubble_shield_write`**
   de-tokenises it locally from the vault. The advisor gets the real, finished document; the AI
   never saw the real values.
@@ -224,7 +225,8 @@ the advisor's broader obligations.* That honesty is itself a selling point to a 
 
 ## 7. Roadmap / known gaps being closed [TECH]
 - **Email protection** (`bubble_shield_mail_read` + `bubble_shield_mail_apply`, IMAP) —
-  **shipped** (v1.21.x); replaces the raw Gmail connector. Full reference in §9.
+  **built but disabled in V1** (kept in reserve behind `_mail_enabled()`, not exposed to
+  the assistant). Reference in §9; re-enable without re-deploy when it becomes a V1 feature.
 - **Gazetteer de-pollution** (A+D→Gemma cascade, self-correcting) — **shipped** (v1.22.0). Full
   reference in §3.5.
 - **Detection tuning** — closing the two measured leak shapes (bare title-case names in prose;
@@ -285,10 +287,15 @@ masking boundary sits, driven by *where the client's session runs*.
 
 ---
 
-## 9. Mail triage — feature reference [TECH] / [COMMERCIAL-BASE]
+## 9. Mail triage — feature reference (DISABLED in V1, kept in reserve) [TECH] / [COMMERCIAL-BASE]
+
+> **Status: not enabled in the shipped product.** The mail tools are gated off
+> (`_mail_enabled()` returns false unless `BUBBLE_SHIELD_ENABLE_MAIL=1`) and the
+> `bubble-shield-mail-triage` skill lives in `reserve/`. This section describes the
+> reserved design; it is NOT a live V1 capability.
 
 Bubble Shield can triage a whole Gmail inbox (several times a day, or on a morning scheduled
-task) **without the model ever seeing real client PII.** Shipped in v1.21.x as the
+task) **without the model ever seeing real client PII.** Built as the
 `bubble-shield-mail-triage` skill plus two MCP tools. Each message is read *already
 pseudonymised*, classified into a 5-tier taxonomy (**Clients / Important / Newsletters /
 Structurés / CV / Transition**), labelled and archived; a reply/transfer *draft* can be

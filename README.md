@@ -225,32 +225,28 @@ engine.deanonymize(res.anonymized)   # round-trips back to the original
 # "Found nothing" is not "safe"; on free text it often means a name was MISSED.
 ```
 
-## Turning on the optional layers
+## Turning on the neural layers (the accuracy pack)
+
+The neural layers are the **accuracy pack** — GLiNER (ONNX name detection) and
+Gemma (MLX de-pollution judge + degraded-form masker), plus the OCR reader.
+They're installed with one command and run as on-device daemons (no network
+egress). Install/check them all in one pass:
 
 ```bash
-# Layer 2 — Presidio NER (names/locations):
-pip install presidio-analyzer spacy && python -m spacy download fr_core_news_lg
-```
-```python
-AnonymizationEngine(use_ner=True)
-```
-
-```bash
-# Layer 3 — local LLM via Ollama (run it on YOUR machine, never a server):
-#   install Ollama → https://ollama.com  then:  ollama pull llama3.1
-export BUBBLE_SHIELD_OLLAMA_URL=http://localhost:11434   # defaults shown
-export BUBBLE_SHIELD_OLLAMA_MODEL=llama3.1
-```
-```python
-AnonymizationEngine(use_llm=True)
+# From the plugin (or via the bubble_shield_setup_ml MCP tool during onboarding):
+python3 plugin/bubble-shield/scripts/bubble_shield_setup_ml.py
+# One-time ~5-6 GB download (Gemma is the largest). Models already on disk are
+# skipped. Everything stays local; nothing leaves the machine.
 ```
 
-Both default to **off** and add no dependency to the core. With Ollama
-unreachable (e.g. on a server), `use_llm=True` behaves exactly like the
-pure-regex build — it never breaks, it only ever *adds* recall where a local
-model is available.
+They **fail open to the regex core**: if a model or its daemon is absent, the
+regex layer still runs — the pack only ever *adds* recall, never removes the
+baseline.
 
-You can also plug in any custom detector:
+> Two older optional layers — a Presidio/spaCy NER path (`use_ner=True`) and an
+> Ollama LLM path (`use_llm=True`) — remain in the engine as dormant fallbacks,
+> but they are NOT the shipped detection stack (which is GLiNER + Gemma). You can
+> also plug in any custom detector:
 
 ```python
 AnonymizationEngine(extra_detectors=[my_gazetteer])   # any text -> list[Match]
