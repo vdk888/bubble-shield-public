@@ -1,5 +1,16 @@
 # Changelog — bubble-shield
 
+## 1.23.4 — 2026-07-12 — FEATURE: shadow-index coverage on the dashboard
+
+- **feat(dashboard):** an "Indexation du dossier protégé" panel shows how far the
+  background sweep has indexed each protected folder — a progress bar, `N/M
+  fichiers indexés`, and the count still pending. This surfaces the read-safety
+  state: an already-indexed file reads fast and masked, while a brand-new,
+  not-yet-indexed file may be served raw on its first read until the sweep
+  catches up. Wires the existing `coverage.py` (`{total, indexed, pct,
+  pending_files}`) into the UI; read-only, degrades to an empty state when no
+  folder is marked.
+
 ## 1.23.3 — 2026-07-11 — FEATURE: in-app uninstall button + complete daemon cleanup
 
 - **feat(uninstall):** the dashboard now has a "Désinstaller Bubble Shield" danger

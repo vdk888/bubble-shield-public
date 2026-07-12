@@ -609,6 +609,55 @@ def _gemma_state() -> dict:
     return {"mode": mode, "modes": list(_GEMMA_MODES), "config_path": str(_guard_config_path())}
 
 
+def _protected_roots() -> list[str]:
+    """The folders whose files the background sweep indexes. Read the guard
+    config's `protected_folders` list (best-effort; missing/bad config → [])."""
+    import json
+    try:
+        path = _guard_config_path()
+        if path.is_file():
+            cfg = json.loads(path.read_text(encoding="utf-8")) or {}
+            roots = cfg.get("protected_folders") or []
+            return [str(r) for r in roots if r]
+    except Exception:
+        pass
+    return []
+
+
+def _coverage_state() -> dict:
+    """Sweep-index coverage for the dashboard: for each protected folder, how
+    much has the background sweep already masked into the shadow store.
+
+    Returns {"configured": bool, "roots": [{"root", "total", "indexed", "pct",
+    "pending"}]}. Read-only; any error degrades to configured=False so the panel
+    just says 'no protected folder yet' rather than breaking the dashboard.
+    Why it matters: a not-yet-indexed file is served RAW on first read (the
+    shadow-index miss gap), so the user should see when their folder is fully
+    swept and safe to read fast + masked."""
+    roots = _protected_roots()
+    if not roots:
+        return {"configured": False, "roots": []}
+    out = []
+    try:
+        from bubble_shield import coverage as _cov
+    except Exception:
+        return {"configured": False, "roots": []}
+    for r in roots:
+        try:
+            c = _cov.coverage(r)
+            out.append({
+                "root": r,
+                "total": c.get("total", 0),
+                "indexed": c.get("indexed", 0),
+                "pct": round(c.get("pct", 0.0), 1),
+                "pending": len(c.get("pending_files", [])),
+            })
+        except Exception:
+            out.append({"root": r, "total": 0, "indexed": 0,
+                        "pct": 0.0, "pending": 0, "error": True})
+    return {"configured": True, "roots": out}
+
+
 def _save_gemma_mode(mode: str) -> bool:
     """Persist gemma_mode into the guard's bubble-shield.json.
 
@@ -729,6 +778,7 @@ def dashboard(request: Request):
             "field_error": None,
             "field_saved": False,
             "detector_saved": False,
+            "coverage": _coverage_state(),
         },
     )
 

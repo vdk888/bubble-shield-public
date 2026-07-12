@@ -635,3 +635,20 @@ td.num { text-align: right; font-family: var(--mono); color: var(--muted); }
   border: 1px solid var(--line, #e5e5e0); border-radius: 8px; padding: .9rem 1rem;
   margin-top: .8rem; overflow-x: auto;
 }
+
+/* Shadow-index coverage panel (dashboard) — background sweep progress. */
+.dash-coverage { margin-top: 1.6rem; }
+.cov-item { margin-top: 1rem; }
+.cov-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.cov-root { font-size: .85rem; color: var(--ink-soft, #555); word-break: break-all; }
+.cov-pct { font-family: var(--serif); font-weight: 500; font-size: 1.05rem; }
+.cov-bar {
+  margin-top: .4rem; height: 8px; border-radius: 5px;
+  background: #ecebe6; overflow: hidden;
+}
+.cov-fill {
+  height: 100%; border-radius: 5px;
+  background: var(--accent, #3a6b52); transition: width .3s ease;
+}
+.cov-meta { margin-top: .35rem; font-size: .82rem; color: var(--ink-soft, #666); }
+.cov-err { color: #9a2b23; }
