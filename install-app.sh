@@ -378,10 +378,9 @@ fi
 SWEEP_TPL="$APP_DIR/plugin/bubble-shield/launcher/com.bubbleinvest.bubble-shield-sweep.plist.tpl"
 SWEEP_LABEL="com.bubbleinvest.bubble-shield-sweep"
 SWEEP_PLIST="$HOME/Library/LaunchAgents/$SWEEP_LABEL.plist"
-# The folder the sweep indexes; overridable for testing. Default: the shared
-# document root the reviewer works from. The lock guards overlap; an unset/empty
-# root just means the sweep no-ops on nothing until configured.
-SWEEP_ROOT="${BUBBLE_SHIELD_SWEEP_ROOT:-$HOME/.bubble_shield/protected}"
+# The sweep no longer takes a fixed root: it reads the folders the user marked
+# from the guard config (protected_folders), so it always indexes exactly what
+# is protected and no-ops when nothing is marked yet. (No __ROOT__ substitution.)
 SWEEP_INTERVAL="${BUBBLE_SHIELD_SWEEP_INTERVAL:-1200}"   # seconds; default 20 min
 if [ -f "$SWEEP_TPL" ]; then
   say "Installation de la tâche d'indexation en arrière-plan (sweep)…"
@@ -389,7 +388,6 @@ if [ -f "$SWEEP_TPL" ]; then
   sed \
     -e "s|__PYTHON__|$APP_DIR/.venv/bin/python|g" \
     -e "s|__APP_DIR__|$APP_DIR|g" \
-    -e "s|__ROOT__|$SWEEP_ROOT|g" \
     -e "s|__HOME__|$HOME|g" \
     -e "s|__INTERVAL__|$SWEEP_INTERVAL|g" \
     "$SWEEP_TPL" > "$SWEEP_PLIST"

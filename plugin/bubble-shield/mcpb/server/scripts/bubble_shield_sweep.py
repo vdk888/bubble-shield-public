@@ -90,6 +90,38 @@ def _passphrase_configured() -> bool:
     return bool(os.environ.get(_PASSPHRASE_ENV))
 
 
+def _configured_protected_roots() -> list:
+    """The folders the user actually marked, from the guard config's
+    `protected_folders`. This is the SINGLE source of truth the sweep, the guard
+    and the dashboard coverage panel all read — so the sweep indexes exactly the
+    folder the user protected (not a fixed placeholder root). Best-effort: a
+    missing / unreadable config yields [] (a no-op sweep, not a crash).
+
+    Config path resolution mirrors the guard: BUBBLE_SHIELD_GUARD_CONFIG env
+    override, else ~/.config/bubble_shield/bubble-shield.json."""
+    import json
+    cfg_path = os.environ.get("BUBBLE_SHIELD_GUARD_CONFIG") or \
+        os.path.expanduser("~/.config/bubble_shield/bubble-shield.json")
+    roots = []
+    try:
+        p = Path(cfg_path)
+        if p.is_file():
+            cfg = json.loads(p.read_text(encoding="utf-8")) or {}
+            for raw in (cfg.get("protected_folders") or []):
+                if raw:
+                    roots.append(str(Path(os.path.expanduser(str(raw))).resolve()))
+    except Exception:
+        return []
+    # De-dup while preserving order.
+    seen = set()
+    out = []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
 def main(argv=None) -> int:
     """Run one background sweep. Returns a process exit code.
 
@@ -100,8 +132,12 @@ def main(argv=None) -> int:
         prog="bubble_shield_sweep",
         description="Bubble Shield background shadow-index sweep.")
     parser.add_argument(
-        "--root", required=True,
-        help="Root folder to sweep (walked recursively; new/changed files indexed).")
+        "--root", default=None,
+        help="Root folder to sweep. If omitted, the sweep reads the protected "
+             "folders the user actually marked from the guard config "
+             "(protected_folders) — that is the single source of truth so the "
+             "sweep, the guard and the coverage panel all agree on WHAT is "
+             "protected. --root is kept for a one-off manual sweep of a path.")
     args = parser.parse_args(argv)
 
     # GATE 1 — refuse-plaintext (Task 4 review, hard guard). BEFORE anything
@@ -119,10 +155,19 @@ def main(argv=None) -> int:
     from bubble_shield import shadow_index
     import bubble_shield_mcp
 
-    # Path normalization matches index_one / run_sweep exactly (shadow_store
-    # keys by exact string) — resolve here so the launchd-passed path is
+    # Resolve WHAT to sweep. Path normalization matches index_one / run_sweep
+    # exactly (shadow_store keys by exact string) — resolve here so the path is
     # consistent with what run_sweep/index_one store and clear.
-    root = str(Path(os.path.expanduser(args.root)).resolve())
+    if args.root:
+        roots = [str(Path(os.path.expanduser(args.root)).resolve())]
+    else:
+        roots = _configured_protected_roots()
+        if not roots:
+            # No folder marked yet — nothing to sweep. NOT an error: the user
+            # simply hasn't protected a folder. (This is the state that used to
+            # silently sweep a nonexistent placeholder root and index nothing.)
+            print("sweep no-op -- no protected folders configured")
+            return 0
 
     # GATE 2 — singleton lock. An overlapping launchd fire becomes a safe no-op
     # (MLX/Metal is not concurrency-safe; two sweeps at once crash).
@@ -130,18 +175,25 @@ def main(argv=None) -> int:
         print("sweep already running -- skip")
         return 0
     try:
-        # The REAL anonymize_fn: the plugin's full model pipeline (extract_file
-        # + GLiNER + Gemma) — the same anonymisation the old read path ran,
-        # now off the read path where latency doesn't matter.
-        result = shadow_index.run_sweep(
-            root, anonymize_fn=bubble_shield_mcp._anonymise_file)
+        totals = {"indexed": 0, "skipped": 0, "deferred": 0, "failed": 0}
+        for root in roots:
+            if not Path(root).is_dir():
+                print(f"sweep skip -- not a directory: {root}")
+                continue
+            # The REAL anonymize_fn: the plugin's full model pipeline
+            # (extract_file + GLiNER + Gemma) — the same anonymisation the old
+            # read path ran, now off the read path where latency doesn't matter.
+            result = shadow_index.run_sweep(
+                root, anonymize_fn=bubble_shield_mcp._anonymise_file)
+            for k in totals:
+                totals[k] += result.get(k, 0)
         # deferred = dataless/online-only (Dropbox not yet hydrated, retried next
         # sweep); failed = readable but un-certifiable (models down / scanned
         # image / unreachable second pass) — fail-closed, no shadow, retried next
         # sweep. Both are marked pending so a later sweep converges.
-        print("sweep done -- indexed {} skipped {} deferred {} failed {}".format(
-            result.get("indexed", 0), result.get("skipped", 0),
-            result.get("deferred", 0), result.get("failed", 0)))
+        print("sweep done -- roots {} indexed {} skipped {} deferred {} failed {}".format(
+            len(roots), totals["indexed"], totals["skipped"],
+            totals["deferred"], totals["failed"]))
         return 0
     finally:
         shadow_index.release_lock()

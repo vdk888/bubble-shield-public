@@ -1,5 +1,25 @@
 # Changelog — bubble-shield
 
+## 1.23.8 — 2026-07-12 — FIX: the sweep indexes the folder you actually marked
+
+- **fix(sweep) — the big one:** the background sweep no longer indexes a fixed
+  placeholder root. It reads the folders the user marked from the guard config
+  (`protected_folders`), so it indexes exactly what is protected. Previously the
+  sweep was pinned to a nonexistent `~/.bubble_shield/protected` placeholder while
+  the real marked folder was **never swept** — meaning its files read RAW on every
+  read and the dashboard showed 0 %. Now `protected_folders` is the single source
+  of truth shared by the guard, the sweep, and the coverage panel; marking a
+  folder registers it there, so protection actually runs on it. (Sweep plist drops
+  `--root`; a manual `--root` still works for a one-off sweep.)
+- **fix(onboarding):** the folder-marking step now (a) uses the native Cowork
+  folder picker (`request_cowork_directory`) instead of `osascript`, which does
+  not exist in the Cowork sandbox (it failed with "command not found"); and (b)
+  registers the marked folder in `protected_folders` so the sweep + dashboard see
+  it.
+- **test:** a new seam test (`test_protected_folder_wiring.py`) asserts the sweep
+  and the coverage panel agree on the same protected folder — the integration
+  seam that unit tests can't cover.
+
 ## 1.23.7 — 2026-07-12 — FIX: Gemma in setup status + doc/pipeline drift guard
 
 - **fix(setup status):** the setup tracker now includes **Gemma** (the largest

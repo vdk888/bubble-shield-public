@@ -114,30 +114,32 @@ Progress line:
 > dossier de démonstration maintenant. »
 
 Say:
-> « Cliquez et choisissez le dossier client à protéger — une fenêtre du
-> Finder va s'ouvrir. »
+> « Cliquez et choisissez le dossier client à protéger — une fenêtre va
+> s'ouvrir pour le sélectionner. »
 
-Then **open a native Finder folder picker** so the user CLICKS the folder
-instead of typing a path. Call Bash with:
+**DEFAULT — use the native Cowork folder picker.** Call
+**`request_cowork_directory`** FIRST — this pops the native "Choose folder"
+dialog on the user's screen (Deny / Choose folder). It is the interactive picker
+that works where clients actually run (the Cowork VM); the user clicks their
+folder and you receive the granted path. Use THIS, not a shell command.
 
-```bash
-osascript -e 'POSIX path of (choose folder with prompt "Choisissez le dossier client à protéger")'
-```
-
-- On success it prints the chosen folder's POSIX path (e.g.
-  `/Users/vous/Documents/Clients/DUPONT/`) — use that as the path.
-- If the user clicks Cancel, osascript exits non-zero with
-  `User canceled` on stderr → say « Pas de souci » and re-offer the picker
-  (or `[Annuler le guidage]`). Never crash.
-- **Fallback only if osascript is unavailable** (rare, e.g. headless): ask
-  for the path as free text, example `/Users/vous/Documents/Clients/DUPONT`.
+- The user picks their folder in the dialog → you get the granted directory
+  path. If they Deny/cancel → say « Pas de souci » and re-offer, or
+  `[Annuler le guidage]`. Never crash.
+- ⚠️ Do NOT open the picker with `osascript` (`choose folder`) as the default —
+  `osascript` does NOT exist in Cowork (it's a macOS-app-only command; a Bash
+  call fails with `command not found`, exit 127). `request_cowork_directory` is
+  the sandbox-native equivalent and is what you use here.
+- **Fallbacks, only if `request_cowork_directory` is unavailable:** (a) if you
+  ARE on a real Mac with a GUI (not Cowork), you may use
+  `osascript -e 'POSIX path of (choose folder with prompt "Choisissez le dossier client à protéger")'`;
+  (b) otherwise ask the user to type the path as free text, example
+  `/Users/vous/Documents/Clients/DUPONT`.
 
 If the user is following the demo exactly, they pick the DUPONT client folder.
 
-Once you have the path:
-1. Request directory access with `request_cowork_directory` (the client
-   folder, never `~/.config` or `~`).
-2. Write the marker file `<dossier>/.bubble-shield.json`:
+Once directory access is granted / you have the path (never `~/.config` or `~`):
+1. Write the marker file `<dossier>/.bubble-shield.json`:
    ```json
    {
      "allow_paths": ["clean"],
@@ -146,9 +148,22 @@ Once you have the path:
      "tripwire_enabled": true
    }
    ```
+2. **Register the folder as a protected root** so the background sweep indexes
+   it and the dashboard shows its coverage. Add the folder's ABSOLUTE path to
+   `protected_folders` in the guard config
+   `~/.config/bubble_shield/bubble-shield.json` (read-modify-write: load the
+   existing JSON, append the path to the `protected_folders` list if not already
+   there, keep every other key, write it back; create the file with
+   `{"protected_folders": ["<dossier>"]}` if it doesn't exist). This is the
+   single source of truth — the marker makes the guard block reads, and
+   `protected_folders` tells the sweep WHAT to index and the coverage panel WHAT
+   to report. Without this step the folder is guarded but never indexed (so its
+   files read raw until swept, and the dashboard shows 0 %).
 3. Confirm out loud:
-   > « ✓ Dossier marqué. Tout fichier à l'intérieur est maintenant dans
-   > le coffre — l'assistant ne peut plus l'ouvrir directement. »
+   > « ✓ Dossier marqué et enregistré. Tout fichier à l'intérieur est maintenant
+   > dans le coffre — l'assistant ne peut plus l'ouvrir directement, et Bubble
+   > Shield va l'indexer en arrière-plan (vous verrez la progression dans
+   > « Contrôle & réglages »). »
 
 **Elicit:**
 
