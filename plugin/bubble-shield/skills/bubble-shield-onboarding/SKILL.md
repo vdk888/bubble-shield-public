@@ -37,9 +37,10 @@ improves *detection quality* on what Bubble Shield already reads — nothing mor
 Say this welcome message verbatim (adapt language to theirs if needed):
 
 > « Bienvenue dans Bubble Shield. Je vais vous installer en 5 minutes.
-> À la fin, je vous montrerai en direct que l'IA peut analyser un vrai
-> dossier sans jamais voir le nom du client — et produire le document
-> final avec le vrai nom, sans que je l'aie vu. Prêt ? »
+> À la fin, on le fera ensemble sur un de VOS vrais fichiers : je ferai
+> une vraie tâche dessus sans jamais voir le nom du client — puis votre
+> Mac produira le document final avec le vrai nom, sans que je l'aie vu.
+> Prêt ? »
 
 Then **elicit** (renders as buttons):
 
@@ -178,14 +179,26 @@ de ce profil », « extrais les points clés de cet avis d'imposition ».
 
 #### Temps A — « L'IA fait la tâche en aveugle » (résultat ANONYMISÉ, montré en session)
 
-Call **`bubble_shield_read`** on `<FICHIER>`.
+**Get the file's content as GUARANTEED-masked tokens — two calls, in order:**
 
-The tool returns the document content with all PII replaced by tokens
+1. Call **`bubble_shield_read`** on `<FICHIER>` to get the file's text.
+   ⚠️ On a folder you JUST marked (Étape 4), the background sweep hasn't
+   indexed this file yet, so `bubble_shield_read` may return the **raw**
+   extracted text this first time (that is the shadow-index design — a
+   fresh file is masked by the sweep afterwards, not at read time). So do
+   **NOT** show or use whatever `bubble_shield_read` returns directly in
+   the demo — it could still contain the real name.
+2. Pass that returned text through **`bubble_shield_anonymize_text`**. THIS
+   is the call that guarantees masking: it runs the detector on-device and
+   **fails closed** (it returns tokens, or an error — never raw PII). Its
+   output is the tokenised version you will work on and show.
+
+The result of step 2 is the document content with all PII replaced by tokens
 (`⟦NOM_0001⟧`, `⟦ADRESSE_0001⟧`, `⟦IBAN_0001⟧`, `⟦DATE_NAISSANCE_0001⟧`…).
 
-**Work ONLY on what the tool returned.** Do NOT use the filename as a
-source of identity, do NOT paste or infer any real personal value. You
-see only tokens.
+**Work ONLY on the `bubble_shield_anonymize_text` output.** Do NOT use the
+`bubble_shield_read` raw output, do NOT use the filename as a source of
+identity, do NOT paste or infer any real personal value. You see only tokens.
 
 Now **actually perform `<TÂCHE>`** using only the tokenised version —
 a real result, not a canned one. Keep every PII in token form. Then
@@ -279,8 +292,13 @@ contexte à vous (l'assistant).
 
 ### Le circuit en 4 temps (à suivre dans cet ordre)
 
-1. **Lire en jetons** — `bubble_shield_read(path=<fichier client>)`. Vous ne
-   voyez que des étiquettes (`⟦NOM_0001⟧`, `⟦IBAN_0001⟧`…).
+1. **Lire en jetons** — `bubble_shield_read(path=<fichier client>)`. Sur un
+   fichier déjà indexé, vous ne voyez que des étiquettes (`⟦NOM_0001⟧`,
+   `⟦IBAN_0001⟧`…). ⚠️ Sur un fichier **tout neuf** que le balayage n'a pas
+   encore indexé, cette lecture peut renvoyer le texte **en clair** une
+   première fois — si vous n'êtes pas sûr que le fichier est déjà indexé,
+   repassez ce que vous avez lu par **`bubble_shield_anonymize_text`** (qui
+   masque toujours, ou échoue — jamais de clair) avant de vous en servir.
 2. **Rédiger EN JETONS** — écrivez le document final (HTML, lettre, note…) en
    n'utilisant QUE les étiquettes. Vous n'avez pas les vraies valeurs, et c'est
    le principe.

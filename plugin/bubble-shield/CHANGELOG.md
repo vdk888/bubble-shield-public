@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.23.6 — 2026-07-12 — FIX: onboarding demo + honest bubble_shield_read description
+
+- **fix(read tool):** `bubble_shield_read`'s description now states the real
+  shadow-index contract — an already-indexed file returns masked tokens, but a
+  brand-new / not-yet-indexed file returns the RAW extracted text once (queued
+  for the sweep). It tells the assistant not to assume a first read of a fresh
+  document is masked, and to pass it through `bubble_shield_anonymize_text`
+  (fail-closed) when a guarantee is needed. The old description claimed reads are
+  always anonymised — false on a cache miss.
+- **fix(onboarding):** the guided demo used `bubble_shield_read` on a
+  just-marked folder and assumed tokens — but that first read is a cache miss and
+  returns raw, so the demo could show the client's real name. Temps A now reads
+  then passes through `bubble_shield_anonymize_text` (guaranteed masked). The
+  welcome message and the everyday "read in tokens" step were corrected to match.
+
 ## 1.23.5 — 2026-07-12 — UX: dashboard is the landing page + nav + collapse
 
 - **ux(landing):** the app now opens on the risk-control dashboard (coverage,

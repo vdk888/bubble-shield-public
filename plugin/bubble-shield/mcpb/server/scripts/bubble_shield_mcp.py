@@ -81,13 +81,19 @@ TOOLS = [
     {
         "name": "bubble_shield_read",
         "description": (
-            "Read a client file and return it ANONYMISED — names, IBANs, emails and "
-            "other identifying data are replaced with reversible ⟦…⟧ tokens before "
-            "you see them. Use this INSTEAD of the plain Read tool for any file that "
-            "may contain client PII (the bubble_shield guard blocks the raw Read of protected "
-            "folders). Handles .pdf, .docx, .txt, .md, .csv, .json. The real values "
-            "never enter your context; they stay in a local vault and are restored "
-            "when the final answer is handed back to the user."),
+            "Read a client file the sanctioned way (the bubble_shield guard blocks the "
+            "plain Read of protected folders). Handles .pdf, .docx, .txt, .md, .csv, "
+            ".json. This is a FAST hash→serve read with no models at read time:\n"
+            "• Already-indexed file → returns it ANONYMISED (reversible ⟦…⟧ tokens); "
+            "the real values stay in a local vault and are restored only when the final "
+            "answer is handed back to the user.\n"
+            "• Brand-new / not-yet-indexed file → a background sweep hasn't masked it "
+            "yet, so this returns the RAW extracted text ONCE (and queues the file for "
+            "the sweep). So do NOT assume a first read of a fresh document is masked. "
+            "If you need a guarantee that PII is masked before you use the content "
+            "(e.g. a client demo, or a doc you know is new), pass what you got through "
+            "bubble_shield_anonymize_text — that runs the models and fails closed "
+            "(always masks or errors, never raw)."),
         "inputSchema": {
             "type": "object",
             "properties": {
