@@ -1,5 +1,23 @@
 # Changelog — bubble-shield
 
+## 1.23.2 — 2026-07-11 — FIX: app self-update survives a rewritten remote + README/RELEASING docs
+
+- **fix(installer):** `install-app.sh` now updates via `git fetch` + `git reset
+  --hard origin/<default-branch>` instead of `git pull --ff-only`. A fast-forward
+  pull cannot reconcile a remote whose history was rewritten (a maintainer
+  force-push) — it aborted with "Not possible to fast-forward" and left the app
+  permanently unable to update. Hard-reset to the remote is always the correct
+  update for the app checkout (all user data lives in `~/.bubble_shield`, never
+  in the app dir) and survives any remote rewrite. Resolves the default branch
+  dynamically.
+- **docs(README):** corrected the detection-layers table — the neural layers are
+  **GLiNER (ONNX)** and **Gemma (MLX)** on-device daemons (the accuracy pack,
+  opt-in, fail-open to the regex core), not the older Presidio/spaCy + Ollama
+  paths (which remain as dormant fallback code, not the shipped stack).
+- **docs(RELEASING):** never force-push the public repo — a rewrite breaks every
+  existing client's update (app + plugin marketplace cache); a hard scrub must
+  re-create the public repo fresh, not rewrite-and-force.
+
 ## 1.23.1 — 2026-07-11 — DOCS: skills + README match the v1.23.0 read model
 
 Documentation-only release aligning the operator-facing docs with how v1.23.0

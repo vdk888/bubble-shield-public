@@ -15,13 +15,27 @@ die() { printf '\n[Bubble Shield] ERREUR : %s\n' "$1" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || die "git introuvable. Installez les outils en ligne de commande Xcode (xcode-select --install)."
 
-# 1. Clone or pull (idempotent self-update). git clone handles both a git URL and
-# a local path. We do this BEFORE picking the interpreter, because the Python
+# 1. Clone or update (idempotent self-update). git clone handles both a git URL
+# and a local path. We do this BEFORE picking the interpreter, because the Python
 # choice depends on the wheel ABIs staged under vendor/wheels/ (only present
 # after the clone).
+#
+# Update = fetch + hard-reset to the remote's default branch, NOT `pull
+# --ff-only`. A plain fast-forward pull cannot reconcile a remote whose history
+# was rewritten (e.g. a maintainer force-push to scrub content) — it aborts with
+# "Not possible to fast-forward" and leaves the client permanently stuck. Since
+# the app dir is a pristine checkout (all user data lives in ~/.bubble_shield,
+# never here), discarding local commits to match the remote exactly is always
+# the correct update — and it survives any remote rewrite.
 if [ -d "$APP_DIR/.git" ]; then
   say "Mise à jour de l'application…"
-  git -C "$APP_DIR" pull --ff-only || die "échec de la mise à jour (git pull)."
+  git -C "$APP_DIR" fetch --prune origin || die "échec de la mise à jour (git fetch)."
+  # Resolve the remote's default branch (main/master/…) instead of hard-coding it.
+  BRANCH="$(git -C "$APP_DIR" remote show origin 2>/dev/null \
+             | sed -n 's/.*HEAD branch: //p' | head -1)"
+  [ -n "$BRANCH" ] || BRANCH="main"
+  git -C "$APP_DIR" reset --hard "origin/$BRANCH" \
+    || die "échec de la mise à jour (git reset)."
 else
   say "Installation de l'application…"
   git clone "$REPO_URL" "$APP_DIR" || die "échec du clonage depuis $REPO_URL."

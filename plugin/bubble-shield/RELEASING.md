@@ -108,6 +108,19 @@ download into a separate runtime venv.
     (exclude tests/__pycache__/.git and the real `deployment_allowlist.json` —
     only the `.example` ships), run the 5-point PII/secret scan, commit + push.
     Clients install with: `vdk888/bubble-shield-public`.
+
+    > **NEVER force-push the public repo.** Clients pull it two ways — the app
+    > (`install-app.sh` self-updates the checkout) and the Claude plugin
+    > marketplace (a cached clone). A rewritten/force-pushed history diverges
+    > from every existing client clone, so their next update **aborts and leaves
+    > them stuck** (the app on `git reset`, the plugin on a re-add). Always
+    > publish with normal forward commits. If content must be **hard-scrubbed
+    > from history** (e.g. a leaked value), do NOT rewrite-and-force this repo —
+    > instead **re-create the public repo fresh** from the clean tree (new repo
+    > or a clean orphan branch made default), so clients get a clean clone rather
+    > than a broken diff. The app installer now `fetch`+`reset --hard`s (so it
+    > survives a rewrite), but the plugin marketplace cache still would not —
+    > forward-only is the rule.
 5. **Verify a real client can get it:**
    - CLI: `/plugin marketplace update bubble-shield` then
      `claude plugin update bubble-shield@bubble-shield` → should report the NEW version (not "already at latest").

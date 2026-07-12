@@ -56,8 +56,19 @@ are FR-first) but the engine is generic and the entity list is easy to extend.
 | # | Layer | Backend | Default | Covers |
 |---|-------|---------|---------|--------|
 | 1 | Regex + checksums | pure stdlib | **on** | IBAN, ISIN, SIRET/SIREN, e-mail, NIR/sécu, n° fiscal, FR phone, amounts, dates, titled names |
-| 2 | NER | Microsoft Presidio + spaCy | off | person names, locations in prose |
-| 3 | Local LLM | Ollama (your machine) | off | names, orgs, places the regex misses |
+| 2 | Neural NER | GLiNER (ONNX), on-device daemon | opt-in (accuracy pack) | person names, orgs, locations the regex misses |
+| 3 | LLM judge | Gemma (MLX), on-device daemon | opt-in (accuracy pack) | de-pollution + a 2nd-pass masker for degraded/scanned forms |
+
+Layer 1 (regex + checksums) runs everywhere with zero dependencies. Layers 2–3
+are the **accuracy pack** — two small on-device models (GLiNER for neural name
+detection, Gemma for the de-pollution judge and the degraded-form second pass),
+installed with one command (`bubble_shield_setup_ml`) and run as local daemons
+on `127.0.0.1` (no network egress). They are **off until the pack is installed**,
+and always *fail open to the regex core*: if a model or its daemon is absent, the
+regex layer still runs — the accuracy pack only ever **adds** recall, never
+removes the baseline. (Two older optional layers — Presidio/spaCy NER and an
+Ollama LLM — remain in the codebase as dormant fallbacks but are not the shipped
+detection stack.)
 
 ## Gazetteer de-pollution
 
