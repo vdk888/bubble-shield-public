@@ -1,5 +1,16 @@
 # Changelog — bubble-shield
 
+## 1.23.5 — 2026-07-12 — UX: dashboard is the landing page + nav + collapse
+
+- **ux(landing):** the app now opens on the risk-control dashboard (coverage,
+  stats, settings) instead of the anonymise tool. The anonymise/try-it tool
+  moved to `/anonymize` and is in the nav.
+- **ux(nav):** reordered — Contrôle & réglages · Anonymiser · File de révision ·
+  Liste connue · Coffres · Comment ça marche (help moved to the end).
+- **ux(dashboard):** "Derniers passages" is now collapsed by default (a
+  click-to-expand section) with a one-line explanation of what the log shows —
+  it no longer takes space unexplained.
+
 ## 1.23.4 — 2026-07-12 — FEATURE: shadow-index coverage on the dashboard
 
 - **feat(dashboard):** an "Indexation du dossier protégé" panel shows how far the

@@ -104,30 +104,39 @@
     {% endfor %}
   </ul>
 
-  <h2 class="dash-h">Derniers passages</h2>
-  <table class="about-table dash-table">
-    <thead><tr><th>Quand</th><th>Source</th><th>Données</th><th>Verdict</th></tr></thead>
-    <tbody>
-      {% for e in stats.recent %}
-      <tr>
-        <td class="dt-time">{{ e.timestamp }}</td>
-        <td>{{ e.event }}{% if e.file_count %} · {{ e.file_count }} fichier(s){% endif %}</td>
-        <td>{{ e.total | default(0) }}</td>
-        <td>
-          {% if e.event == "error" %}
-            <span class="verdict verdict--err">erreur</span>
-          {% elif e.event == "vault_reveal" %}
-            <span class="verdict verdict--info">↩ restauration</span>
-          {% elif e.safe_to_send %}
-            <span class="verdict verdict--ok">✓ sûr</span>
-          {% else %}
-            <span class="verdict verdict--warn">⚠ à relire</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <details class="dash-recent">
+    <summary class="dash-h dash-recent-summary">Derniers passages
+      <span class="dash-recent-hint">— journal des dernières anonymisations (cliquez pour dérouler)</span>
+    </summary>
+    <p class="dash-help">
+      Chaque ligne = une anonymisation effectuée (par l'app ou l'assistant) :
+      quand, ce qui l'a déclenchée, combien de données ont été masquées, et si
+      le résultat est sûr à envoyer ou à relire. Utile pour vérifier après-coup.
+    </p>
+    <table class="about-table dash-table">
+      <thead><tr><th>Quand</th><th>Source</th><th>Données</th><th>Verdict</th></tr></thead>
+      <tbody>
+        {% for e in stats.recent %}
+        <tr>
+          <td class="dt-time">{{ e.timestamp }}</td>
+          <td>{{ e.event }}{% if e.file_count %} · {{ e.file_count }} fichier(s){% endif %}</td>
+          <td>{{ e.total | default(0) }}</td>
+          <td>
+            {% if e.event == "error" %}
+              <span class="verdict verdict--err">erreur</span>
+            {% elif e.event == "vault_reveal" %}
+              <span class="verdict verdict--info">↩ restauration</span>
+            {% elif e.safe_to_send %}
+              <span class="verdict verdict--ok">✓ sûr</span>
+            {% else %}
+              <span class="verdict verdict--warn">⚠ à relire</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
   {% endif %}
 </section>
 

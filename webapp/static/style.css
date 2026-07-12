@@ -652,3 +652,14 @@ td.num { text-align: right; font-family: var(--mono); color: var(--muted); }
 }
 .cov-meta { margin-top: .35rem; font-size: .82rem; color: var(--ink-soft, #666); }
 .cov-err { color: #9a2b23; }
+
+/* Collapsible "Derniers passages" — collapsed by default to save space. */
+.dash-recent { margin-top: 1.4rem; }
+.dash-recent-summary { cursor: pointer; list-style: none; }
+.dash-recent-summary::-webkit-details-marker { display: none; }
+.dash-recent-summary::before {
+  content: "▸ "; color: var(--ink-soft, #888); font-size: .9em;
+}
+.dash-recent[open] .dash-recent-summary::before { content: "▾ "; }
+.dash-recent-hint { font-family: var(--sans, inherit); font-weight: 400;
+  font-size: .82rem; color: var(--ink-soft, #888); }

@@ -196,6 +196,15 @@ SAMPLE = (
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    """Landing page = the risk-control dashboard (coverage, stats, settings).
+    The anonymise/try-it tool moved to /anonymize."""
+    return _render_dashboard(request)
+
+
+@app.get("/anonymize", response_class=HTMLResponse)
+def anonymize_page(request: Request):
+    """The anonymise/try-it tool (paste a document → cloaked copy). Was the old
+    landing page at /."""
     return templates.TemplateResponse(
         request, "index.html", {"sample": SAMPLE, "result": None})
 
@@ -749,13 +758,14 @@ def _save_custom_field(field_type: str, kind: str, value: str, label: str = "") 
         return {"ok": False, "reason": f"Erreur d'écriture : {exc}"}
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request):
-    """Post-send risk control: how the anonymiser has been used (webapp + the
+def _render_dashboard(request: Request):
+    """Shared dashboard render — used by both / (landing) and /dashboard.
+
+    Post-send risk control: how the anonymiser has been used (webapp + the
     Cowork skill both log here), how many runs were flagged unsafe, errors, and
-    which entity types showed up — so a human can audit the policy after the fact.
-    Plus the editable cloak/keep config table (including custom fields),
-    the custom-fields section, and the detector-mode selector."""
+    which entity types showed up. Plus the shadow-index coverage panel, the
+    editable cloak/keep config table (including custom fields), and the
+    detector-mode selector."""
     from bubble_shield.audit import read_audit
     from webapp.dashboard import summarize
     from bubble_shield.policy import load_policy, extended_policy_view
@@ -781,6 +791,11 @@ def dashboard(request: Request):
             "coverage": _coverage_state(),
         },
     )
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+    return _render_dashboard(request)
 
 
 @app.post("/dashboard/policy", response_class=HTMLResponse)
