@@ -57,8 +57,8 @@ cat > "$DEST/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>Bubble Shield</string>
   <key>CFBundleDisplayName</key><string>Bubble Shield</string>
   <key>CFBundleIdentifier</key><string>invest.bubble.shield.launcher</string>
-  <key>CFBundleVersion</key><string>1.23.2</string>
-  <key>CFBundleShortVersionString</key><string>1.23.2</string>
+  <key>CFBundleVersion</key><string>1.23.3</string>
+  <key>CFBundleShortVersionString</key><string>1.23.3</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>BubbleShield</string>
   <key>CFBundleIconFile</key><string>BubbleShield.icns</string>

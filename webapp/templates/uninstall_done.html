@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Désinstallation — Bubble Shield{% endblock %}
+{% block content %}
+
+<section class="intro">
+  {% if cancelled %}
+    <p class="kicker">Désinstallation · annulée</p>
+    <h1>Rien n'a été supprimé.</h1>
+    <p class="lede">
+      La confirmation n'a pas été validée. Bubble Shield est toujours installé.
+      <a href="/dashboard">Retour au tableau de bord</a>.
+    </p>
+  {% elif ok %}
+    <p class="kicker">Désinstallation · terminée</p>
+    <h1>Bubble Shield a été retiré de ce Mac.</h1>
+    <p class="lede">
+      Les hooks de protection, les scripts hôte et les services d'arrière-plan
+      ont été supprimés.
+      {% if purged %}
+        Vos coffres (<code>~/.bubble_shield</code>) ont <strong>aussi</strong>
+        été effacés — vous ne pouvez plus déchiffrer d'anciens documents.
+      {% else %}
+        Vos coffres (<code>~/.bubble_shield</code>) ont été conservés, au cas où
+        vous auriez besoin de déchiffrer d'anciens documents.
+      {% endif %}
+    </p>
+    <p class="lede">
+      <strong>Fermez cette fenêtre maintenant</strong> — l'application est
+      désinstallée. Vous pouvez supprimer l'icône « Bubble Shield » du Bureau.
+    </p>
+  {% else %}
+    <p class="kicker">Désinstallation · incomplète</p>
+    <h1>La désinstallation n'a pas pu se terminer.</h1>
+    <p class="lede">
+      Une partie du nettoyage a échoué. Vous pouvez réessayer, ou terminer depuis
+      le Terminal :
+      <code>curl -fsSL https://raw.githubusercontent.com/vdk888/bubble-shield-public/main/uninstall-app.sh | bash</code>
+    </p>
+  {% endif %}
+</section>
+
+{% if not cancelled and log %}
+<section class="about-block">
+  <h2 class="dash-h">Détail du nettoyage</h2>
+  <pre class="uninstall-log">{{ log }}</pre>
+</section>
+{% endif %}
+
+{% endblock %}

@@ -71,7 +71,23 @@ def _stable_dir() -> Path:
     return _home() / ".claude" / "bubble-shield"
 
 
-LAUNCH_LABEL = "com.bubbleinvest.bubble-shield-nerd"
+# All host LaunchAgents Bubble Shield installs. `nerd` is the original GLiNER
+# daemon; `gemmad` (the Gemma de-pollution/second-pass judge) and `sweep` (the
+# shadow-index background indexer) were added later — every one must be removed
+# on uninstall or its plist keeps launchd respawning a daemon after the plugin
+# is gone. Keep this list in sync with what the installers register.
+LAUNCH_LABELS = (
+    "com.bubbleinvest.bubble-shield-nerd",
+    "com.bubbleshield.gemmad",
+    "com.bubbleinvest.bubble-shield-sweep",
+)
+# Back-compat: some callers/tests reference the original single label.
+LAUNCH_LABEL = LAUNCH_LABELS[0]
+
+
+def _launch_plists() -> list[Path]:
+    la = _home() / "Library" / "LaunchAgents"
+    return [la / f"{label}.plist" for label in LAUNCH_LABELS]
 
 
 def _launch_plist() -> Path:
@@ -223,17 +239,20 @@ def _clean_settings(log: list[str]) -> None:
 
 # ── 2-3) LaunchAgent unload + remove ──────────────────────────────────────────
 def _remove_launchagent(log: list[str]) -> None:
-    plist = _launch_plist()
-    if not plist.exists():
-        log.append("  no LaunchAgent plist (no-op)")
-        return
-    # Best-effort unload BEFORE removing the file (so launchd forgets it now).
-    try:
-        subprocess.run(["launchctl", "unload", str(plist)],
-                       capture_output=True, timeout=15)
-    except Exception:
-        pass
-    _rm_file(plist, log)
+    any_found = False
+    for plist in _launch_plists():
+        if not plist.exists():
+            continue
+        any_found = True
+        # Best-effort unload BEFORE removing the file (so launchd forgets it now).
+        try:
+            subprocess.run(["launchctl", "unload", str(plist)],
+                           capture_output=True, timeout=15)
+        except Exception:
+            pass
+        _rm_file(plist, log)
+    if not any_found:
+        log.append("  no LaunchAgent plists (no-op)")
 
 
 def _check_shared_override(log: list[str]) -> list[str]:

@@ -1,5 +1,19 @@
 # Changelog — bubble-shield
 
+## 1.23.3 — 2026-07-11 — FEATURE: in-app uninstall button + complete daemon cleanup
+
+- **feat(uninstall):** the dashboard now has a "Désinstaller Bubble Shield" danger
+  zone — a client can fully remove the host footprint (guard hooks, host scripts,
+  daemons, caches) from the app UI, no terminal. A `/plugin uninstall` only drops
+  the marketplace entry and leaves the guard hooks firing on every tool call; this
+  button runs the real uninstaller. Confirm-word poka-yoke (`DESINSTALLER`) plus an
+  opt-in "also erase my vaults" checkbox (with a clear de-cloak-loss warning); the
+  result page shows the cleanup log.
+- **fix(uninstall):** the uninstaller now removes **all three** daemon LaunchAgents
+  (nerd, gemmad, sweep). It previously removed only the nerd daemon, so `gemmad`
+  (the Gemma de-pollution judge) and `sweep` (the shadow-index indexer) were left
+  behind and kept respawning after uninstall.
+
 ## 1.23.2 — 2026-07-11 — FIX: app self-update survives a rewritten remote + README/RELEASING docs
 
 - **fix(installer):** `install-app.sh` now updates via `git fetch` + `git reset

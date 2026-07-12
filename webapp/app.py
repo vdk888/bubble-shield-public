@@ -1287,3 +1287,51 @@ async def vault_forget_subject(request: Request, mission: str,
     except Exception:
         flash = "erreur"
     return RedirectResponse(url=f"/vault/{mission}?flash={flash}", status_code=303)
+
+
+@app.post("/dashboard/uninstall", response_class=HTMLResponse)
+async def uninstall_route(request: Request,
+                          confirm: str = Form(""),
+                          purge_data: str = Form("")):
+    """Fully remove Bubble Shield's host footprint from this Mac, from the app UI.
+
+    Runs the same uninstaller as `uninstall-app.sh` (uninstall_user_hooks.py):
+    the guard hooks in ~/.claude/settings.json, the host scripts in
+    ~/.claude/bubble-shield/, the daemon LaunchAgents (nerd/gemmad/sweep), caches.
+    A plugin uninstall CANNOT do this (it only drops the marketplace entry), so
+    this button is the sanctioned "remove everything" path for a non-technical
+    user — no terminal needed.
+
+    Poka-yoke: requires confirm=DESINSTALLER. `purge_data=on` additionally passes
+    --purge-data, which removes the LOCAL vault (~/.bubble_shield) — the user then
+    loses the ability to de-cloak past documents, so it is opt-in and warned.
+    Vaults are always local; --purge-data never touches a shared cabinet store.
+    """
+    import subprocess, sys
+    if confirm != "DESINSTALLER":
+        return templates.TemplateResponse(
+            request, "uninstall_done.html",
+            {"ok": False, "cancelled": True, "purged": False, "log": ""},
+        )
+
+    uninstaller = (BASE.parent / "plugin" / "bubble-shield" / "scripts"
+                   / "uninstall_user_hooks.py")
+    argv = [sys.executable, str(uninstaller)]
+    purged = (purge_data == "on")
+    if purged:
+        argv.append("--purge-data")
+
+    ok = True
+    log = ""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        log = (proc.stdout or "") + (proc.stderr or "")
+        ok = (proc.returncode == 0)
+    except Exception as e:
+        ok = False
+        log = f"Échec du lancement du désinstalleur : {type(e).__name__}"
+
+    return templates.TemplateResponse(
+        request, "uninstall_done.html",
+        {"ok": ok, "cancelled": False, "purged": purged, "log": log},
+    )

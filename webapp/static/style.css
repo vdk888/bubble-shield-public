@@ -608,3 +608,30 @@ td.num { text-align: right; font-family: var(--mono); color: var(--muted); }
 .rq-log-value { font-family: var(--mono); font-size: .85rem; }
 .rq-log-reason { font-size: .82rem; color: var(--muted); }
 .rq-log-row--confirmed td { background: #f8fbf9; }
+
+/* Uninstall danger zone (dashboard) — visually distinct, warm-red, opt-in. */
+.dash-danger {
+  margin-top: 2.2rem;
+  padding: 1.2rem 1.3rem;
+  border: 1px solid #d9b3b0;
+  border-radius: 10px;
+  background: #fdf4f3;
+}
+.dash-danger .dash-h { color: #9a2b23; }
+.danger-form { display: flex; flex-direction: column; gap: .8rem; margin-top: .9rem; }
+.danger-check, .danger-confirm { font-size: .9rem; line-height: 1.4; }
+.danger-confirm input[type="text"] {
+  display: block; margin-top: .3rem; padding: 7px 12px;
+  border: 1px solid #d9b3b0; border-radius: 8px; font-size: .9rem; max-width: 320px;
+}
+.btn-danger {
+  align-self: flex-start; padding: 9px 18px; border-radius: 8px;
+  background: #9a2b23; color: #fff; border: 1px solid #9a2b23;
+  font-weight: 500; cursor: pointer;
+}
+.btn-danger:hover { background: #7d221b; border-color: #7d221b; }
+.uninstall-log {
+  white-space: pre-wrap; font-size: .82rem; background: #f7f7f5;
+  border: 1px solid var(--line, #e5e5e0); border-radius: 8px; padding: .9rem 1rem;
+  margin-top: .8rem; overflow-x: auto;
+}

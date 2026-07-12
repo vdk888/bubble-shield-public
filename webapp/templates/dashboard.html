@@ -332,6 +332,29 @@
   </div>
 </section>
 
+<section class="dash-danger">
+  <h2 class="dash-h">Désinstaller Bubble Shield</h2>
+  <p class="dash-help">
+    Retire complètement Bubble Shield de ce Mac : les protections (hooks),
+    les scripts et les services d'arrière-plan. À faire depuis ici — une simple
+    désinstallation du plugin ne suffit pas à tout nettoyer.
+  </p>
+  <form method="post" action="/dashboard/uninstall" class="danger-form"
+        onsubmit="return confirm('Désinstaller Bubble Shield de ce Mac ?');">
+    <label class="danger-check">
+      <input type="checkbox" name="purge_data" value="on">
+      Supprimer aussi mes coffres (<code>~/.bubble_shield</code>) —
+      <strong>je perds la possibilité de déchiffrer d'anciens documents</strong>.
+      Sinon, mes coffres sont conservés.
+    </label>
+    <label class="danger-confirm">
+      Pour confirmer, tapez <code>DESINSTALLER</code> :
+      <input type="text" name="confirm" autocomplete="off" placeholder="DESINSTALLER">
+    </label>
+    <button type="submit" class="btn-danger">Désinstaller Bubble Shield</button>
+  </form>
+</section>
+
 <script>
 (function () {
   // Sync the "value" field name with the selected kind so the backend gets the
