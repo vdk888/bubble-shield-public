@@ -23,5 +23,8 @@
   "_tripwire_enabled_doc": "The tripwire is a SECOND guard (UserPromptSubmit hook) for the chat box: it watches the prompt text for raw client PII (IBAN, email, n° sécu, téléphone) pasted directly, or phrasing that implies an uploaded/attached document. Unlike the folder guard, it can't anonymise an upload's content (the platform injects it into context before any hook runs) — so it NUDGES Claude to redirect the user to the protected folder. Set false to disable.",
 
   "tripwire_block": false,
-  "_tripwire_block_doc": "When false (default), the tripwire only adds a soft instruction to Claude's context ('don't analyse raw pasted PII; tell the user to use the folder') — the user's prompt still goes through. When true, it HARD-BLOCKS the prompt (the message is erased and the user is told to use the folder). Hard-block is stricter but more disruptive and prone to false positives; enable only for strict-compliance setups."
+  "_tripwire_block_doc": "When false (default), the tripwire only adds a soft instruction to Claude's context ('don't analyse raw pasted PII; tell the user to use the folder') — the user's prompt still goes through. When true, it HARD-BLOCKS the prompt (the message is erased and the user is told to use the folder). Hard-block is stricter but more disruptive and prone to false positives; enable only for strict-compliance setups.",
+
+  "gemma_mode": "all",
+  "_gemma_mode_doc": "When does the background masker run the Gemma name-extraction pass. 'all' (default) = every document (highest recall; heavy, but it runs in the background sweep so no read-time latency cost). 'hard' = only structured/dense forms (liasse, CERFA — the fast pass misses names in columnar layouts). 'off' = never (GLiNER + regex + structured_ext only). Gemma always fails CLOSED: if it cannot verify a doc it refuses to certify, never returns a partially-masked body."
 }

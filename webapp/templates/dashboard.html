@@ -20,6 +20,9 @@
 {% if detector_saved %}
 <p class="notice notice--ok">✅ Mode détecteur enregistré.</p>
 {% endif %}
+{% if gemma_saved %}
+<p class="notice notice--ok">✅ Mode Gemma enregistré. Il s'applique aux prochaines anonymisations.</p>
+{% endif %}
 {% if field_saved %}
 <p class="notice notice--ok">✅ Champ personnalisé ajouté. Il sera actif à la prochaine anonymisation.</p>
 {% endif %}
@@ -174,6 +177,37 @@
     </div>
     <div class="actions">
       <button type="submit" class="btn btn--ghost">Enregistrer le mode</button>
+    </div>
+  </form>
+</section>
+
+<!-- ===== Pseudonymisation Gemma — all / hard / off ===== -->
+<section class="dash-detector">
+  <h2 class="dash-h">Pseudonymisation Gemma</h2>
+  <p class="about-note">
+    Gemma tourne en arrière-plan lors du balayage — aucun impact sur la vitesse de
+    lecture. «&nbsp;Désactivée&nbsp;» convient aux Mac moins puissants (les formulaires
+    non vérifiables sont alors refusés, jamais divulgués).
+  </p>
+
+  <form method="post" action="/dashboard/gemma" class="detector-form">
+    <div class="detector-options">
+      {% for gm in gemma.modes %}
+      <label class="detector-option{% if gemma.mode == gm %} detector-option--active{% endif %}">
+        <input type="radio" name="gemma_mode" value="{{ gm }}"
+               {% if gemma.mode == gm %}checked{% endif %}>
+        {% if gm == 'all' %}
+          <span class="det-name">Pseudonymisation Gemma sur tous les documents (recommandé)</span>
+        {% elif gm == 'hard' %}
+          <span class="det-name">Formulaires complexes uniquement</span>
+        {% else %}
+          <span class="det-name">Désactivée</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn btn--ghost">Enregistrer le mode Gemma</button>
     </div>
   </form>
 </section>

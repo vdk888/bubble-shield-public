@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.23.0 — FEATURE: shadow-index runtime redesign
+
+Reworks the read path from "anonymise-on-every-read" to a **shadow index**: a pre-computed store of already-anonymised document versions, so the hot path carries no ML cost and the heavy masking runs out-of-band.
+
+- **feat(runtime) — zero-model read path.** `bubble_shield_read` → `_read_with_shadow` is now ML-free: it computes the file's content hash, and on a shadow HIT serves the pre-anonymised shadow directly (no GLiNER, no Gemma, no daemon). On a MISS it serves the raw *extracted* text once and QUEUES the file (`shadow_store.mark_pending`) for the background sweep — the read never blocks on model inference. The masking guarantee moves off the read path onto the sweep.
+- **feat(runtime) — background sweep does the heavy masking.** A launchd-scheduled sweep (`bubble_shield_sweep.py` → `shadow_index.run_sweep`) walks each protected root, runs the FULL anonymisation pipeline (GLiNER + Gemma structured-form second pass, all layers ON — the same `_anonymise_file` path the old read used) on new/changed files, and writes the resulting shadow into the store. Singleton-locked and resumable (a `pending` table + content-hash keys make rename-free and edit-reindexed, so a stale shadow is impossible).
+- **feat(store) — one encrypted SQLite shadow store.** Shadows + the harvested gazetteer live in a single SQLite database, encrypted at rest with a machine-local passphrase (`shadow_store`). The store fails **closed** if the passphrase is unavailable (refuse-plaintext), never writing shadows in the clear. Store location is config-indirected via `BUBBLE_SHIELD_HOME` (v2-shared layout).
+- **feat(gazetteer) — read-time net.** Confirmed PII names harvested by the engine during the sweep populate the gazetteer, which a lightweight read-time pass consults so a name already known to the store is masked even on the zero-model read path.
+- **change(mail) — mail path disabled, kept in reserve.** The mail tools (`bubble_shield_mail_read` + its mutation counterpart) are no longer registered in the default tool surface; they are gated behind `BUBBLE_SHIELD_ENABLE_MAIL=1` and thus invisible/unreachable via `tools/list` in a shipped build. The code is retained in reserve, not deleted.
+- **fix(venv) — venvs standardised on Python 3.12.** The ML / Gemma / OCR runtime venvs are pinned to Python 3.12 (not the launching interpreter), fixing a wrong-ABI install failure on bare client Macs.
+- **fix(gemmad) — dedicated MLX worker thread.** The offline Gemma daemon now runs MLX inference on one dedicated worker thread (`InferenceWorker`), stopping an all-NOM degradation seen when MLX was driven concurrently under `ThreadingHTTPServer`.
+
+Fail-closed containment from 1.22.x is preserved end-to-end: on the read path a shadow MISS never fabricates a masked body, and the sweep's masking runs the same fail-closed envelope as before.
+
 ## 1.22.4 — SECURITY (P0 #589-B)
 
 Closes a leak class that survived 1.22.3: a degraded French tax form (liasse fiscale) masked ~114 entities (`verdict_state == "masked_ok"`) but still returned several clear entity classes (a SIRET written digit-by-digit, a forename left clear after a masked surname, an associate's date + place of birth, the accounting firm's name/address/phone, a siège postal code + city). The 1.22.3 text-quality gate only runs on `zero_detection`, never on `masked_ok`, so a degraded form that masks *some* entities bypassed it entirely — carrying everything the columnar extraction hid from the fast regex/GLiNER pass.

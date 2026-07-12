@@ -1,5 +1,45 @@
 # Changelog — bubble-shield
 
+## 1.23.0 — 2026-07-11 — FEATURE: shadow-index runtime + de-pollution redesign
+
+Reads no longer run heavy PII models on the hot path. A background sweep
+pre-indexes the protected folder into a content-hash-keyed shadow store; at read
+time `bubble_shield_read` serves the pre-computed masked shadow (zero models,
+fast), accepting that a brand-new/unindexed doc is served on a cache miss (the
+sweep masks it on the next pass). This is the speed redesign clients asked for.
+
+- **Gazetteer de-pollution — rebuilt judge.** The FP-cleaning pass that prunes
+  the always-mask gazetteer now uses an on-device identifying-value-vs-generic
+  judge instead of the old binary NOM/MOT single-token prompt (which could not
+  reason about multi-word phrases). It is scoped by an **entity-type allowlist**
+  — only names, job titles, and addresses are ever adjudicated; structured
+  identifiers (IBAN, SIRET, social-security, email, phone, tax IDs, dates,
+  company names) are **never judged and never un-masked** (a structural
+  guarantee over checksum-verified data). The judge keeps real names (including
+  bare single-token surnames that are also common words, e.g. *Petit*),
+  addresses, and companies masked, while un-masking job titles, form labels, and
+  boilerplate. Fail-toward-masking throughout: only a clean "generic" verdict
+  un-masks; any PII verdict, model error, timeout, or ambiguity keeps the entry
+  masked. Measured end-to-end on a real 742-entry gazetteer: ~78 false positives
+  cleaned per pass, **0** structured identifiers / **0** real names / **1** of
+  110 addresses un-masked (a truncated address caught in the review queue);
+  overall masking recall unchanged (98.9% overall, 97.1% on names).
+- **Daemon no longer wedges under a large background pass.** De-pollution requests
+  to the single on-device worker are chunked, so a big sweep can't monopolise the
+  worker and stall every other request (previously a ~370-entry pass ground the
+  worker for minutes while everything behind it timed out). Fail-toward-masking is
+  preserved per chunk: a failed chunk contributes no verdicts (its entries stay
+  masked).
+- **On-device models are lazy — no ~6.7 GB at login.** Both daemons (Gemma judge,
+  GLiNER NER) now start with `--no-warm`: they open their port without loading a
+  model and load it on the first inference request (a sweep or read), then free it
+  ~10 min after last use. A machine that never uses Shield holds ~0 GB of model
+  memory instead of ~6.7 GB resident from every boot.
+
+## 1.22.3 — SECURITY (P0 #589)
+
+- **fix(security) (#589, P0):** `bubble_shield_read` / `bubble_shield_anonymize_text` no longer return the RAW document when the engine finds ZERO detections on a SUBSTANTIAL document (`verdict_state == "zero_detection"`). Previously `_anonymise_text` failed closed only when the NER daemon was DOWN (`NERDownError`); when the daemon was UP and healthy but the engine simply found nothing to mask, it still returned `res.anonymized` — which on a zero-detection result IS THE RAW INPUT TEXT — decorated with a soft "please review" note. A note is not containment: the raw PII is already in the model's context. This leaked a real client's raw PDF (43KB, 4 raw phone numbers, zero tokens) in a live session. Now raises `ZeroDetectionError`, converted by the tools/call handler to `isError:true` with a FIXED French refusal message and NO body. Gated precisely on engine.py's `substantial_text` boundary (>=8 words AND >=40 chars) so a genuinely tiny/empty input (`nothing_to_do`) is never refused. The daemon-down fail-closed path, the leak/low_confidence review-note cases, and normal masking are unchanged. **BEHAVIOR CHANGE:** a genuinely-clean substantial document now also refuses pending human review — the intentional safe direction.
+
 ## 1.22.2
 
 - fix(installer): `install-app.sh` no longer blindly reuses an existing `.venv` on update. It now compares the existing venv's Python ABI (major.minor) against the freshly-selected interpreter and rebuilds the venv (`rm -rf .venv`, French log message) on mismatch — fixes a live bug where a client whose `.venv` was built against a wrong-ABI Python (e.g. Homebrew python3.12 shadowing stock python3.9 on PATH, the #396b case) hit `ResolutionImpossible / Cannot install pywebview==3.4` on every subsequent update, because the cp39-only offline wheels can't install into a 3.12 venv holding old unpinned deps. A matching-ABI venv is still reused untouched (fast path); only the app's own `.venv` is ever deleted, never the app dir or user data.

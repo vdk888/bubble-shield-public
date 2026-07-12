@@ -80,17 +80,24 @@ name.
 1. **Frequency + structure triage (no model, instant).** A lowercase, high
    -frequency common word is judged safe to drop with pure statistics — no
    inference needed.
-2. **On-device model adjudication (the ambiguous middle).** Capitalised
-   entries are genuinely ambiguous — many real French surnames are also
-   common words — so frequency alone cannot decide them safely. Those go to a
-   small **local, on-device language model** running as a background daemon
-   on `127.0.0.1` only (no network egress, nothing ever leaves the machine).
-   The model is asked one question per candidate — "is this a surname, or a
-   common word / form label?" — and only an *unambiguous* "common word"
-   answer is accepted. Anything unclear, any daemon error, or the daemon
-   simply being unavailable all resolve the same way: **the entry stays
-   masked.** This is a fail-toward-masking design end to end — de-pollution
-   can only ever make masking *more readable*, never less protective.
+2. **On-device model adjudication (the ambiguous middle).** The remaining
+   entries go to a small **local, on-device language model** running as a
+   background daemon on `127.0.0.1` only (no network egress, nothing ever
+   leaves the machine). Only three entity types are ever eligible — person
+   names, job titles, and addresses; every other type (IBAN, SIRET,
+   social-security number, email, phone, tax IDs, dates, company names, …) is
+   **never adjudicated and never un-masked**, a structural guarantee that
+   de-pollution cannot touch checksum-verified identifiers. For the eligible
+   entries the model is asked one question per candidate — "is this a real
+   identifying value (a person's name, a real address, a company) or a generic
+   label / job title / boilerplate phrase?" — and only an *unambiguous*
+   "generic" answer un-masks. A lone word that could be a surname (even one
+   that is also a common word, like *Petit*) is kept masked. Anything unclear,
+   any model error, a batch that times out, or the daemon simply being
+   unavailable all resolve the same way: **the entry stays masked.** This is a
+   fail-toward-masking design end to end — de-pollution can only ever make
+   masking *more readable*, never less protective. Requests to the daemon are
+   chunked so a large background pass never stalls the single on-device worker.
 
 **Self-correcting, with a human backstop.** An entry that's removed from the
 gazetteer isn't blocked from re-entering it — if the same value shows up
@@ -100,6 +107,17 @@ logged to a review queue for human audit, and a human can mark an entry
 **sticky** — a manual override that de-pollution will not touch, for the rare
 case where an automated decision needs to be pinned one way or the other by
 a person instead of the model.
+
+**Measured (real 742-entry gazetteer, on-device model, end-to-end through the
+daemon).** One background pass un-masked ~78 false positives — job titles
+("Consultant", "Cadre supérieur"), form labels ("déclarant 2", "Nom de
+naissance"), and boilerplate phrases ("cadre de notre activité de Conseil") —
+while un-masking **0** structured identifiers, **0** real person names (including
+bare single-token surnames that are also common words), and only **1** of 110
+real addresses (a truncated address with a form-label tail, caught in the review
+queue). Overall masking recall is unchanged (98.9% overall, 97.1% on names).
+De-pollution runs continuously, so the gazetteer converges toward clean over
+successive passes.
 
 **Net effect:** the gazetteer stays sensitive to real names (recall
 unchanged) while shedding the noise that made masked output harder to read.

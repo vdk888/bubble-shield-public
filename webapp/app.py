@@ -570,6 +570,74 @@ def _save_detector_mode(mode: str) -> bool:
         return False
 
 
+# ── gemma_mode: the background-masker toggle (Task 2, #589) ──────────────────
+#
+# gemma_mode lives in the GUARD's bubble-shield.json — the SAME file the guard's
+# _gemma_mode() reads — NOT custom_fields.json. We must resolve the exact same
+# path Task 1 resolves so the dashboard writes where the guard reads. Resolution
+# order (first existing wins for READS; env/default used for WRITES): the
+# BUBBLE_SHIELD_GUARD_CONFIG env override, else ~/.config/bubble_shield/bubble-shield.json.
+
+_GEMMA_MODES = ("all", "hard", "off")
+
+
+def _guard_config_path() -> Path:
+    """The bubble-shield.json the guard resolves for gemma_mode. Matches Task 1:
+    BUBBLE_SHIELD_GUARD_CONFIG env override, else the standard user config path."""
+    env = os.environ.get("BUBBLE_SHIELD_GUARD_CONFIG")
+    if env:
+        return Path(env)
+    return Path(os.path.expanduser("~/.config/bubble_shield/bubble-shield.json"))
+
+
+def _gemma_state() -> dict:
+    """Current gemma_mode for the dashboard control.
+
+    Reads the guard config; any missing file / bad JSON / invalid value falls
+    back to "all" (the fail-toward-more-masking default, consistent with the
+    guard's own _gemma_mode())."""
+    import json
+    mode = "all"
+    try:
+        path = _guard_config_path()
+        if path.is_file():
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            candidate = cfg.get("gemma_mode", "all")
+            mode = candidate if candidate in _GEMMA_MODES else "all"
+    except Exception:
+        mode = "all"
+    return {"mode": mode, "modes": list(_GEMMA_MODES), "config_path": str(_guard_config_path())}
+
+
+def _save_gemma_mode(mode: str) -> bool:
+    """Persist gemma_mode into the guard's bubble-shield.json.
+
+    Read-MODIFY-write: load the existing config, set only gemma_mode, write the
+    whole object back so every other key is preserved. An invalid mode is
+    rejected (config untouched). Returns True on success."""
+    import json
+    if mode not in _GEMMA_MODES:
+        return False
+    path = _guard_config_path()
+    cfg = {}
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+    except Exception:
+        # Malformed existing config: rather than clobber a file we can't parse,
+        # refuse the write so we never silently drop unknown keys.
+        return False
+    cfg["gemma_mode"] = mode
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def _save_custom_field(field_type: str, kind: str, value: str, label: str = "") -> dict:
     """Validate via pii_guard and then persist a new custom field to the config.
 
@@ -647,6 +715,7 @@ def dashboard(request: Request):
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
+    gemma = _gemma_state()
     return templates.TemplateResponse(
         request, "dashboard.html",
         {
@@ -655,6 +724,8 @@ def dashboard(request: Request):
             "saved": False,
             "custom": custom,
             "detector": detector,
+            "gemma": gemma,
+            "gemma_saved": False,
             "field_error": None,
             "field_saved": False,
             "detector_saved": False,
@@ -696,6 +767,7 @@ async def save_policy_route(request: Request):
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
+    gemma = _gemma_state()
     return templates.TemplateResponse(
         request, "dashboard.html",
         {
@@ -704,6 +776,8 @@ async def save_policy_route(request: Request):
             "saved": True,
             "custom": custom,
             "detector": detector,
+            "gemma": gemma,
+            "gemma_saved": False,
             "field_error": None,
             "field_saved": False,
             "detector_saved": False,
@@ -726,6 +800,7 @@ async def save_detector_route(request: Request):
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
+    gemma = _gemma_state()
     return templates.TemplateResponse(
         request, "dashboard.html",
         {
@@ -734,9 +809,46 @@ async def save_detector_route(request: Request):
             "saved": False,
             "custom": custom,
             "detector": detector,
+            "gemma": gemma,
+            "gemma_saved": False,
             "field_error": None,
             "field_saved": False,
             "detector_saved": True,
+        },
+    )
+
+
+@app.post("/dashboard/gemma", response_class=HTMLResponse)
+async def save_gemma_route(request: Request):
+    """Persist gemma_mode (all | hard | off) into the guard's bubble-shield.json.
+
+    Read-modify-write so every other config key is preserved (Task 2, #589)."""
+    from bubble_shield.audit import read_audit
+    from webapp.dashboard import summarize
+    from bubble_shield.policy import load_policy, extended_policy_view
+
+    form = await request.form()
+    mode = str(form.get("gemma_mode", "all"))
+    saved_ok = _save_gemma_mode(mode)
+
+    stats = summarize(read_audit(AUDIT_LOG))
+    rows = extended_policy_view(load_policy())
+    custom = _custom_fields_view()
+    detector = _detector_state()
+    gemma = _gemma_state()
+    return templates.TemplateResponse(
+        request, "dashboard.html",
+        {
+            "stats": stats,
+            "policy_rows": rows,
+            "saved": False,
+            "custom": custom,
+            "detector": detector,
+            "gemma": gemma,
+            "gemma_saved": saved_ok,
+            "field_error": None,
+            "field_saved": False,
+            "detector_saved": False,
         },
     )
 
@@ -762,6 +874,7 @@ async def add_custom_field_route(request: Request):
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
+    gemma = _gemma_state()
     return templates.TemplateResponse(
         request, "dashboard.html",
         {
@@ -770,6 +883,8 @@ async def add_custom_field_route(request: Request):
             "saved": False,
             "custom": custom,
             "detector": detector,
+            "gemma": gemma,
+            "gemma_saved": False,
             "field_error": None if result["ok"] else result.get("reason", "Erreur inconnue."),
             "field_saved": result["ok"],
             "detector_saved": False,

@@ -30,6 +30,57 @@ def _parse_verdict(raw: str) -> str:
     return "NOM"
 
 
+# Task 2 (#589) / wedge-fix bundle → hardened to candidate "C2" (bare-surname,
+# validated live 2026-07-11). C1 replaced B2 ("is this a NAME?" → un-masked real
+# addresses, 102/110 leaks) by reframing to "is this a real identifying VALUE
+# (person name / real postal address / company raison sociale) → PII/keep, or a
+# generic label / job title / form field / boilerplate → GENERIQUE/un-mask? On
+# doubt → PII." C1's exemplars were all FULL names, so BARE single-token real
+# surnames that are also common words ("Petit", "Smith") or rarer patronyms
+# leaned GENERIQUE and got un-masked — a real name leak. C2 adds an explicit
+# bare-token rule (a lone word that could be a NOM DE FAMILLE → PII) plus 4
+# bare-token few-shot exemplars (Petit→PII, Duchemin→PII, FISCAL→GENERIQUE,
+# Cadre supérieur→GENERIQUE). Parse/logic unchanged (max_tokens=8, single-shot).
+# Live result: the 4 leaked surnames stay masked, 0 bare-surname leaks across the
+# 202-NOM/110-ADRESSE/60-POSTE sweep, no regression on boilerplate/address clean.
+# The VERBATIM C2 text (French accents + guillemets «» + all 12 exemplars exact).
+_JUDGE_PROMPT = (
+    "Tu filtres les fausses alertes d'un outil d'anonymisation.\n"
+    "On te donne une courte chaîne extraite d'un document. Réponds PII si c'est une VRAIE donnée identifiante — le nom/prénom d'une personne réelle, une adresse postale réelle, ou la raison sociale d'une entreprise (SARL, SAS, SELARL, SA, SCI...). Réponds GENERIQUE si c'est un mot commun, un intitulé de poste (consultant, cadre supérieur...), une étiquette de formulaire (déclarant 1, nom de naissance...), ou une phrase administrative générique.\n"
+    "ATTENTION aux mots seuls: si un mot isolé pourrait être le NOM DE FAMILLE d'une personne (même si c'est aussi un mot courant, ex: Petit, Smith), réponds PII. Ne réponds GENERIQUE pour un mot seul que si c'est clairement un terme administratif/fiscal ou un nom commun qui n'est pas un patronyme.\n"
+    "En cas de doute, réponds PII.\n"
+    "Réponds par UN SEUL mot: PII ou GENERIQUE.\n"
+    "\n"
+    "Chaîne: «directeur général»\n"
+    "Réponse: GENERIQUE\n"
+    "Chaîne: «Jean-Marc DUPONTEL»\n"
+    "Réponse: PII\n"
+    "Chaîne: «12 rue des Acacias, 69003 Lyon»\n"
+    "Réponse: PII\n"
+    "Chaîne: «adresse du souscripteur»\n"
+    "Réponse: GENERIQUE\n"
+    "Chaîne: «Madame Sophie LEGRAND»\n"
+    "Réponse: PII\n"
+    "Chaîne: «SARL Lumière Patrimoine»\n"
+    "Réponse: PII\n"
+    "Chaîne: «cadre de la mission»\n"
+    "Réponse: GENERIQUE\n"
+    "Chaîne: «8 boulevard Haussmann 75009 Paris»\n"
+    "Réponse: PII\n"
+    "Chaîne: «Petit»\n"
+    "Réponse: PII\n"
+    "Chaîne: «Duchemin»\n"
+    "Réponse: PII\n"
+    "Chaîne: «FISCAL»\n"
+    "Réponse: GENERIQUE\n"
+    "Chaîne: «Cadre supérieur»\n"
+    "Réponse: GENERIQUE\n"
+    "\n"
+    "Chaîne: «{tok}»\n"
+    "Réponse:"
+)
+
+
 # #589-B — Gemma PII-span extraction (2nd pass for degraded tax forms).
 _EXTRACT_PROMPT = (
     "Liste toute donnée personnelle identifiante dans ce texte de formulaire fiscal "
@@ -99,3 +150,50 @@ class GemmaClassifier:
                         prompt=_EXTRACT_PROMPT.format(text=text[:6000]),
                         max_tokens=512, verbose=False)
         return _parse_extract(resp)
+
+    def classify_via_extract(self, tokens, should_abort=None):
+        """Task 2 (#589) — value-focused de-pollution judge (candidate C1).
+
+        REPLACES the Task-1 extract_pii-based body (which hallucinated template
+        PII on short fragments and was ~15× too slow). For each ENTRY, run one
+        fast single-shot judge (`_JUDGE_PROMPT`, max_tokens=8) and parse:
+
+          - "GENERIQUE" present AND "PII" absent (case-insensitive) → "MOT"
+            (un-mask): a clean, unambiguous common-word / label / job-title.
+          - anything else — "PII", both present, empty, garbage → "NOM"
+            (keep masked). In doubt, keep masking.
+          - generate() RAISES → "NOM" (keep masked): fail-toward-masking. An
+            inference error must NEVER un-mask (that would leak real client PII).
+
+        The MOT case is reached ONLY on a clean GENERIQUE from a SUCCESSFUL
+        generate; an errored call is caught first and forced to "NOM".
+
+        `should_abort` (OPTIONAL, wedge fix): a zero-arg callable checked at the
+        TOP of each token iteration. When it returns True the loop stops early
+        and returns the results computed SO FAR — the remaining tokens are
+        simply absent (→ depollute keeps them masked). The daemon's worker wires
+        this to the job's `abandoned` flag so an abandoned multi-token batch
+        stops grinding the single MLX worker early. When None (direct calls /
+        tests), behavior is UNCHANGED — every token is processed.
+
+        (extract_pii / _EXTRACT_PROMPT are unchanged — still used for the
+        #589-B second pass elsewhere; only this method's judging path changes.)
+        """
+        from mlx_lm import generate
+        out = []
+        for tok in tokens:
+            # Wedge fix: bail out early if the caller (worker) has abandoned this
+            # job. Remaining tokens stay absent → treated as stay-masked. Checked
+            # BEFORE inference so an abandoned job stops grinding immediately.
+            if should_abort is not None and should_abort():
+                break
+            try:
+                resp = generate(self._model, self._tok,
+                                prompt=_JUDGE_PROMPT.format(tok=tok),
+                                max_tokens=8, verbose=False)
+                up = (resp or "").upper()
+                verdict = "MOT" if ("GENERIQUE" in up and "PII" not in up) else "NOM"
+            except Exception:
+                verdict = "NOM"  # fail-safe: keep masked
+            out.append({"token": tok, "verdict": verdict})
+        return out

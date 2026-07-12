@@ -14,47 +14,92 @@ behavioural test that runs against the plugin copy.
 
 This test fails loudly the instant any mirror pair drifts. If it fails, re-sync
 per RELEASING.md (``rsync … scripts/ mcpb/server/scripts/`` etc.) and re-pack.
+
+COVERAGE: rather than a hand-maintained file list (which itself drifts as new
+files are added), this test DERIVES its coverage by globbing every ``*.py``
+file actually shipped under ``mcpb/server/scripts/`` and
+``mcpb/server/vendor/bubble_shield/`` and asserting each has a byte-identical
+``plugin/bubble-shield/{scripts,vendor/bubble_shield}/<name>`` counterpart.
+Any new file added to either mirrored tree is automatically covered with zero
+maintenance here.
 """
 
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN = REPO / "plugin" / "bubble-shield"
+MCPB_SERVER = PLUGIN / "mcpb" / "server"
 
-# (label, plugin-copy, mcpb-bundle-copy) — every file duplicated into the bundle.
-MIRROR_PAIRS = [
+# Mirrored directory pairs: (label, plugin-side dir, mcpb-bundle-side dir).
+# Per RELEASING.md, the bundle is an rsync copy of these two source trees
+# (excluding test files, __pycache__/.pyc, and deployment_allowlist.json —
+# none of which live in the mcpb/server copy, so no exclusion list is needed
+# here: we simply glob what the bundle actually ships and require a match).
+MIRRORED_DIRS = [
+    ("scripts", PLUGIN / "scripts", MCPB_SERVER / "scripts"),
     (
-        "guard.py",
-        PLUGIN / "scripts" / "guard.py",
-        PLUGIN / "mcpb" / "server" / "scripts" / "guard.py",
-    ),
-    (
-        "bubble_shield_mcp.py",
-        PLUGIN / "scripts" / "bubble_shield_mcp.py",
-        PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_mcp.py",
-    ),
-    (
-        "bubble_shield_mail.py",
-        PLUGIN / "scripts" / "bubble_shield_mail.py",
-        PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_mail.py",
-    ),
-    (
-        "bubble_shield_setup_ml.py",
-        PLUGIN / "scripts" / "bubble_shield_setup_ml.py",
-        PLUGIN / "mcpb" / "server" / "scripts" / "bubble_shield_setup_ml.py",
-    ),
-    (
-        "vendor/bubble_shield/known_pii_store.py",
-        PLUGIN / "vendor" / "bubble_shield" / "known_pii_store.py",
-        PLUGIN / "mcpb" / "server" / "vendor" / "bubble_shield" / "known_pii_store.py",
+        "vendor/bubble_shield",
+        PLUGIN / "vendor" / "bubble_shield",
+        MCPB_SERVER / "vendor" / "bubble_shield",
     ),
 ]
+
+# Files that intentionally exist ONLY in the mcpb/server copy (mcpb-only
+# shims with no plugin-side counterpart) and must NOT be required to match
+# anything. Empty today — document any future addition here with a reason.
+MCPB_ONLY_EXCLUDES: set[str] = set()
+
+
+def _discover_mirror_pairs():
+    """Glob every *.py the bundle ships and pair it with its plugin source.
+
+    Returns (pairs, missing) where:
+      - pairs: list of (label, plugin_copy_path, bundle_copy_path) for files
+        that exist on both sides and should be byte-identical.
+      - missing: labels of bundle-side files with NO plugin-side counterpart
+        (a real structural problem, not a drift — reported separately).
+    """
+    pairs = []
+    missing = []
+    for dir_label, plugin_dir, bundle_dir in MIRRORED_DIRS:
+        assert bundle_dir.is_dir(), f"missing mcpb bundle dir: {bundle_dir}"
+        for bundle_file in sorted(bundle_dir.glob("*.py")):
+            name = bundle_file.name
+            label = f"{dir_label}/{name}"
+            if name in MCPB_ONLY_EXCLUDES:
+                continue
+            plugin_file = plugin_dir / name
+            if not plugin_file.is_file():
+                missing.append(label)
+                continue
+            pairs.append((label, plugin_file, bundle_file))
+    return pairs, missing
+
+
+def test_mirror_coverage_matches_bundle_contents():
+    """Sanity check: every file the .mcpb ships maps to a plugin source file.
+
+    This guards the discovery mechanism itself — if it ever finds zero pairs
+    (e.g. a path renamed) or a bundle file with no plugin counterpart, that is
+    a structural break the derived glob must surface, not silently ignore.
+    """
+    pairs, missing = _discover_mirror_pairs()
+    assert not missing, (
+        "mcpb/server ships file(s) with NO plugin/bubble-shield counterpart — "
+        f"either add the missing plugin source or add to MCPB_ONLY_EXCLUDES "
+        f"with a documented reason: {missing}"
+    )
+    assert len(pairs) >= 38, (
+        f"expected to discover at least 38 mirrored files (12 scripts + 26 "
+        f"vendor/bubble_shield), found {len(pairs)} — the glob may be broken"
+    )
 
 
 def test_plugin_and_mcpb_mirror_copies_are_byte_identical():
     """Each shipped file must be byte-for-byte identical to its bundle copy."""
+    pairs, _missing = _discover_mirror_pairs()
     drifted = []
-    for label, plugin_copy, bundle_copy in MIRROR_PAIRS:
+    for label, plugin_copy, bundle_copy in pairs:
         assert plugin_copy.is_file(), f"missing plugin copy: {plugin_copy}"
         assert bundle_copy.is_file(), f"missing bundle copy: {bundle_copy}"
         if plugin_copy.read_bytes() != bundle_copy.read_bytes():

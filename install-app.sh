@@ -27,6 +27,149 @@ else
   git clone "$REPO_URL" "$APP_DIR" || die "échec du clonage depuis $REPO_URL."
 fi
 
+# =============================================================================
+# #604 zero-prereq / #venv-py312 — BARE-CLIENT-MAC PYTHON 3.12 PROVISIONING
+# -----------------------------------------------------------------------------
+# The ML accuracy pack (GLiNER ml-env, Gemma gemma-env, OCR ocr-env — created by
+# plugin/bubble-shield/scripts/bubble_shield_setup_ml.py + bubble_shield_setup_ocr.py)
+# PINS its venvs to Python 3.12 (find_python312(): searches `python3.12` on PATH
+# generically; raises a clear error if absent). This is deliberate: stock macOS
+# ships only Python 3.9.6, which (a) caused LibreSSL warnings + env flakiness and
+# (b) BLOCKED the Gemma vision path (mlx_vlm needs 3.10+).
+#
+# PROBLEM ON A BARE CLIENT MAC: a fresh client Mac has ONLY /usr/bin/python3
+# (3.9), NO Homebrew, NO python3.12. So bubble_shield_setup_ml.py would (correctly)
+# fail-loud with "Python 3.12 required but no python3.12 on PATH". We PROVISION a
+# 3.12 runtime WITHOUT requiring the client to install Homebrew (this build
+# machine's 3.12 lives at /opt/homebrew — a client won't have that, and we must
+# NOT hardcode it).
+#
+# APPROACH (Option A — python-build-standalone):
+#   Download a RELOCATABLE prebuilt CPython 3.12 tarball from
+#   astral-sh/python-build-standalone (apple-darwin, install_only), verify its
+#   pinned SHA256, extract into ~/.bubble_shield/py312/, and expose its
+#   bin/python3.12 on PATH so the generic `shutil.which("python3.12")` lookup in
+#   the ML setup scripts finds it. No system install, no admin, no Homebrew.
+#   ~15MB download. If a real `python3.12` is already on PATH (dev Mac with
+#   Homebrew, or a previously-provisioned standalone), we reuse it and skip the
+#   download entirely.
+#
+# PINNED RELEASE (do NOT bump to "latest" — unpinned == unreproducible + a
+# supply-chain risk). Both the release tag AND the SHA256 are hardcoded.
+#   Release tag : 20250723  (github.com/astral-sh/python-build-standalone/releases/tag/20250723)
+#   CPython     : 3.12.11
+#   SHA256SUMS  : .../releases/download/20250723/SHA256SUMS  (source of the hashes below)
+#
+# The LAUNCHER-app venv below is a SEPARATE concern (cp39 wheels) and is
+# intentionally NOT moved to 3.12 here.
+# -----------------------------------------------------------------------------
+PBS_TAG="20250723"
+PBS_CPYTHON="3.12.11"
+PY312_ROOT="$HOME/.bubble_shield/py312"        # extraction target
+PY312_BIN_DIR="$PY312_ROOT/python/bin"          # where install_only lands python3.12
+PY312_BIN="$PY312_BIN_DIR/python3.12"
+
+# Return the download URL + expected SHA256 for the current arch on stdout as
+# "<url>\t<sha256>". Dies on an unsupported arch (we only ship darwin arm64/x86_64).
+py312_asset() {
+  local arch triple url sha
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64|aarch64)
+      triple="aarch64-apple-darwin"
+      sha="141272e6c6ae945b61fcf4073b7419451f8227187b3667b01ea9ec8993e0d7e9"
+      ;;
+    x86_64)
+      triple="x86_64-apple-darwin"
+      sha="1f152ee0dcc6ac5db93e39d74f0c50e319863d65fea0aab04e2e1b3f49b87f5f"
+      ;;
+    *)
+      die "architecture non supportée pour la provision de Python 3.12 : '$arch' (attendu arm64 ou x86_64)."
+      ;;
+  esac
+  url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/cpython-${PBS_CPYTHON}+${PBS_TAG}-${triple}-install_only.tar.gz"
+  printf '%s\t%s\n' "$url" "$sha"
+}
+
+# Provision a Python 3.12 interpreter and make it discoverable to the ML/OCR
+# setup steps (which resolve `python3.12` via shutil.which() on PATH).
+#   1. If a real python3.12 is already on PATH (dev Mac / Homebrew / previously
+#      provisioned) → reuse it, skip the download.
+#   2. Else if we already extracted one at $PY312_BIN in a prior run → reuse it.
+#   3. Else download the pinned python-build-standalone tarball for this arch,
+#      verify its SHA256, extract into $PY312_ROOT, and prepend its bin/ to PATH.
+# FAILS LOUD on missing network / checksum mismatch — never silently proceeds to
+# a broken 3.9 ML setup.
+provision_python312() {
+  # (1) Already on PATH? Verify it really reports 3.12 before trusting it.
+  if command -v python3.12 >/dev/null 2>&1; then
+    local onpath ver
+    onpath="$(command -v python3.12)"
+    ver="$("$onpath" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+    if [ "$ver" = "3.12" ]; then
+      say "Python 3.12 déjà disponible ($onpath) — provision ignorée."
+      return 0
+    fi
+  fi
+
+  # (2) Previously provisioned standalone still present and valid?
+  if [ -x "$PY312_BIN" ] && [ "$("$PY312_BIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)" = "3.12" ]; then
+    say "Python 3.12 autonome déjà installé ($PY312_BIN) — réutilisation."
+    export PATH="$PY312_BIN_DIR:$PATH"
+    return 0
+  fi
+
+  # (3) Download + verify + extract the pinned relocatable CPython 3.12.
+  command -v curl >/dev/null 2>&1 || die "curl introuvable ; impossible de télécharger Python 3.12."
+  local asset url sha tmpd tarball actual
+  asset="$(py312_asset)"            # "<url>\t<sha256>" (or dies on bad arch)
+  url="${asset%$'\t'*}"
+  sha="${asset#*$'\t'}"
+
+  say "Provision de Python 3.12 (${PBS_CPYTHON}, autonome, sans Homebrew ni admin)…"
+  tmpd="$(mktemp -d "${TMPDIR:-/tmp}/bubble-shield-py312.XXXXXX")" || die "échec de la création d'un répertoire temporaire."
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpd'" RETURN
+  tarball="$tmpd/py312.tar.gz"
+
+  if ! curl -fsSL --max-time 300 -o "$tarball" "$url"; then
+    die "échec du téléchargement de Python 3.12 depuis $url — vérifiez votre connexion internet (le pack de précision ML nécessite Python 3.12)."
+  fi
+
+  # Verify the pinned SHA256 (shasum is stock on macOS). Refuse to proceed on any
+  # mismatch — a wrong hash means a corrupt download or a tampered artifact.
+  actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+  if [ "$actual" != "$sha" ]; then
+    die "somme de contrôle SHA256 invalide pour Python 3.12 (attendu $sha, obtenu $actual) — téléchargement corrompu ou altéré ; installation interrompue."
+  fi
+  say "Somme de contrôle Python 3.12 vérifiée."
+
+  # Extract into $PY312_ROOT. The install_only tarball unpacks a single top-level
+  # `python/` dir, so $PY312_ROOT/python/bin/python3.12 is the interpreter. Clear
+  # any stale/partial prior extraction first so we never mix versions.
+  rm -rf "$PY312_ROOT"
+  mkdir -p "$PY312_ROOT" || die "impossible de créer $PY312_ROOT."
+  tar -xzf "$tarball" -C "$PY312_ROOT" || die "échec de l'extraction de Python 3.12."
+
+  [ -x "$PY312_BIN" ] || die "Python 3.12 extrait mais introuvable à $PY312_BIN (disposition de l'archive inattendue)."
+  local got
+  got="$("$PY312_BIN" -c 'import sys;print("%d.%d.%d"%sys.version_info[:3])' 2>/dev/null || true)"
+  case "$got" in
+    3.12.*) : ;;
+    *) die "l'interpréteur Python 3.12 provisionné ne démarre pas correctement (version rapportée : '${got:-aucune}')." ;;
+  esac
+
+  # Prepend to PATH so the ML/OCR setup steps' shutil.which("python3.12") find it.
+  export PATH="$PY312_BIN_DIR:$PATH"
+  say "Python 3.12 autonome installé dans $PY312_ROOT (python $got)."
+}
+
+# Provision 3.12 NOW, before any ML/OCR setup step that needs it. This only puts
+# python3.12 on PATH for the remainder of THIS install run; the launcher-app venv
+# built below deliberately uses the cp39-ABI interpreter selected further down,
+# NOT this 3.12 (the two runtimes are independent by design).
+provision_python312
+#
 # --- Python interpreter selection -------------------------------------------
 # We install dependencies OFFLINE from prebuilt wheels in vendor/wheels/. The
 # COMPILED wheels there (pyobjc, pydantic-core, markupsafe) are ABI-locked: each
@@ -204,6 +347,45 @@ else
   sed "s|{{APP_DIR}}|$APP_DIR|g" "$TEMPLATE" > "$DESKTOP/Bubble Shield.command"
   chmod +x "$DESKTOP/Bubble Shield.command"
   say "Terminé. Double-cliquez « Bubble Shield » sur votre Bureau pour lancer l'application."
+fi
+
+# 3b. Install + load the background-sweep LaunchAgent.
+# The sweep (bubble_shield_sweep.py) re-indexes the protected document root into
+# the shadow store on a schedule so the read path stays zero-model. We ship a
+# .plist TEMPLATE and substitute the app python, the protected root, $HOME and
+# the interval here — mirroring the nerd LaunchAgent's write-then-(unload/load)
+# pattern from bubble_shield_setup_ml.py. NON-FATAL: a launchctl failure must not
+# break the already-installed app (the sweep is a background optimisation).
+#
+# __INTERVAL__ is emitted into the template as a BARE <integer> — a plist
+# StartInterval must be an integer, never a quoted string. The singleton lock in
+# the sweep makes an overlapping StartInterval fire a safe no-op, so no
+# concurrency handling is needed here.
+SWEEP_TPL="$APP_DIR/plugin/bubble-shield/launcher/com.bubbleinvest.bubble-shield-sweep.plist.tpl"
+SWEEP_LABEL="com.bubbleinvest.bubble-shield-sweep"
+SWEEP_PLIST="$HOME/Library/LaunchAgents/$SWEEP_LABEL.plist"
+# The folder the sweep indexes; overridable for testing. Default: the shared
+# document root the reviewer works from. The lock guards overlap; an unset/empty
+# root just means the sweep no-ops on nothing until configured.
+SWEEP_ROOT="${BUBBLE_SHIELD_SWEEP_ROOT:-$HOME/.bubble_shield/protected}"
+SWEEP_INTERVAL="${BUBBLE_SHIELD_SWEEP_INTERVAL:-1200}"   # seconds; default 20 min
+if [ -f "$SWEEP_TPL" ]; then
+  say "Installation de la tâche d'indexation en arrière-plan (sweep)…"
+  mkdir -p "$HOME/.bubble_shield" "$HOME/Library/LaunchAgents"
+  sed \
+    -e "s|__PYTHON__|$APP_DIR/.venv/bin/python|g" \
+    -e "s|__APP_DIR__|$APP_DIR|g" \
+    -e "s|__ROOT__|$SWEEP_ROOT|g" \
+    -e "s|__HOME__|$HOME|g" \
+    -e "s|__INTERVAL__|$SWEEP_INTERVAL|g" \
+    "$SWEEP_TPL" > "$SWEEP_PLIST"
+  # reload (unload-then-load) so a re-run picks up changes; ignore unload errors.
+  launchctl unload "$SWEEP_PLIST" >/dev/null 2>&1 || true
+  if launchctl load "$SWEEP_PLIST" >/dev/null 2>&1; then
+    say "Tâche d'indexation en arrière-plan installée ($SWEEP_LABEL, toutes les $SWEEP_INTERVAL s)."
+  else
+    say "Note : la tâche d'indexation en arrière-plan a été écrite mais n'a pas pu être chargée ; l'application fonctionne normalement."
+  fi
 fi
 
 # 4. Install Claude Code CLI (support/audit tool).

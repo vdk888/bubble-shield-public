@@ -42,10 +42,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
-import venv
 from pathlib import Path
 
 BUBBLE_SHIELD_HOME = Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield"))
@@ -86,16 +86,82 @@ def _venv_python(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
+# Bubble Shield PINS its ML venvs to Python 3.12 (NOT "whatever python launched
+# this script"). On a stock Mac the launcher is /usr/bin/python3 == 3.9.6, which
+# was pinning the venvs to 3.9 BY ACCIDENT. We keep all three venvs (ml-env,
+# gemma-env, ocr-env) on the SAME pinned 3.12 so a fresh client install is
+# consistent. We search for 3.12 GENERICALLY on PATH — NO hardcoded
+# /opt/homebrew (that's specific to the build machine; a client won't have it) —
+# and raise a clear, actionable error if none is found. This mirrors
+# find_python312() in bubble_shield_setup_ml.py (kept in sync).
+PY312_ERROR = (
+    "Python 3.12 is required to provision Bubble Shield's OCR venv but no "
+    "`python3.12` was found on PATH.\n"
+    "  • This Mac's system python3 is likely 3.9 (stock macOS), which is too "
+    "old and pins the venv to 3.9 by accident (LibreSSL warnings + env "
+    "flakiness).\n"
+    "  • Install a Python 3.12 runtime and re-run. On a machine with Homebrew: "
+    "`brew install python@3.12`. For a bare client Mac WITHOUT Homebrew, the "
+    "installer is expected to provision a relocatable 3.12 (see the provisioning "
+    "TODO in install-app.sh / zero-prereq card #604)."
+)
+
+
+# #604 — the stable path install-app.sh's bare-Mac provisioner extracts a
+# relocatable Python 3.12 into, when no Homebrew/PATH 3.12 is available. The
+# install_only python-build-standalone tarball unpacks a single top-level
+# `python/` dir, so the interpreter lands at
+# ~/.bubble_shield/py312/python/bin/python3.12 (see install-app.sh's
+# PY312_ROOT/PY312_BIN_DIR + provision_python312()). This setup script runs in
+# a SEPARATE process from install-app.sh and does NOT inherit its PATH
+# mutation, so find_python312() must ALSO probe this stable path directly —
+# it's resolved via the home dir (Path.home()), not a machine-specific
+# assumption like /opt/homebrew.
+STABLE_PY312 = str(Path.home() / ".bubble_shield" / "py312" / "python" / "bin" / "python3.12")
+
+
+def find_python312() -> str:
+    """Return the path to a Python 3.12 interpreter, searched GENERICALLY on PATH.
+
+    Prefers `python3.12` on PATH, then the stable ~/.bubble_shield/py312 path
+    install-app.sh's bare-Mac provisioner extracts a relocatable 3.12 into (see
+    STABLE_PY312 — needed because this script runs in a separate process that
+    doesn't inherit install-app.sh's PATH), then verifies any current/`python3`
+    candidate self-reports 3.12. Deliberately does NOT hardcode /opt/homebrew
+    (build-machine only). Raises RuntimeError(PY312_ERROR) if no 3.12 is
+    present — setup fails loudly rather than silently pinning the accidental
+    system 3.9. Mirrors bubble_shield_setup_ml.py:find_python312()."""
+    candidates = [shutil.which("python3.12"), STABLE_PY312, sys.executable, shutil.which("python3")]
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            out = subprocess.run(
+                [cand, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True, text=True, timeout=15)
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip() == "3.12":
+            return cand
+    raise RuntimeError(PY312_ERROR)
+
+
 def ensure_venv() -> Path:
-    """Create the persistent OCR venv if missing. Returns its python path."""
+    """Create the persistent OCR venv if missing. Returns its python path.
+
+    Pins the venv to Python 3.12 (see find_python312) — NOT the interpreter that
+    launched this script (which on a stock Mac is 3.9)."""
     py = _venv_python(OCR_ENV)
     if py.exists():
         log(f"✓ venv already present: {OCR_ENV}")
         return py
-    log(f"• creating venv at {OCR_ENV} …")
+    py312 = find_python312()
+    log(f"• creating venv at {OCR_ENV} (Python 3.12: {py312}) …")
     OCR_ENV.parent.mkdir(parents=True, exist_ok=True)
-    venv.EnvBuilder(with_pip=True).create(str(OCR_ENV))
-    log("✓ venv created")
+    subprocess.run([py312, "-m", "venv", "--clear", str(OCR_ENV)], check=True)
+    log("✓ venv created (Python 3.12)")
     return py
 
 

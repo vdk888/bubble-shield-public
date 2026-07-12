@@ -46,6 +46,13 @@ VAULT_DIR = BUBBLE_SHIELD_HOME / "vaults"
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "bubble_shield", "version": "1.0.0"}
 
+
+def _mail_enabled() -> bool:
+    """Mail path (IMAP/Gmail triage) is DISABLED in the shipped product — V1 is
+    docs-only. The code is KEPT IN RESERVE (option A: gate, don't delete) behind
+    this off-by-default env flag so it can be re-enabled without a re-deploy."""
+    return os.environ.get("BUBBLE_SHIELD_ENABLE_MAIL") == "1"
+
 # Prefix added by the OCR extractor to signal OCR-sourced text to callers.
 _OCR_TAG = "[OCR]"
 _OCR_QUALITY_NOTE = (
@@ -135,38 +142,6 @@ TOOLS = [
         },
     },
     {
-        "name": "bubble_shield_mail_read",
-        "description": (
-            "Read e-mail ANONYMISED. Bubble Shield fetches the messages ITSELF over "
-            "IMAP (host-side) and returns each one with names, IBANs, e-mails and "
-            "other identifying data already replaced by reversible ⟦…⟧ tokens — the "
-            "raw e-mail NEVER enters your context. Use this INSTEAD of a Gmail/mail "
-            "connector for any mailbox that may contain client PII: the connector is "
-            "removed from the trust path entirely. Same fail-CLOSED guarantee as "
-            "bubble_shield_read — if the NER daemon is down, this REFUSES rather than "
-            "return raw e-mail. Uses the same local vault as files, so a client masked "
-            "in a PDF gets the SAME token in their e-mail (cross-source consistency). "
-            "Each message block STARTS with a 'UID: <n>' line — a stable mailbox-local "
-            "identifier (not PII). Pass that exact UID as the 'uid' of a decision to "
-            "bubble_shield_mail_apply to label/archive/reply that SAME message; never "
-            "invent a UID. "
-            "Credentials live host-side (~/.bubble_shield/mail.json) and are never "
-            "shown to you."),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string",
-                          "description": "IMAP search criterion: UNSEEN, ALL, SEEN, "
-                                         "'FROM \"x@y.fr\"', etc. Default ALL."},
-                "max": {"type": "integer",
-                        "description": "Max messages to fetch (most-recent first, capped at 50). Default 10."},
-                "since": {"type": "string",
-                          "description": "Optional IMAP date filter 'dd-Mon-yyyy' e.g. '01-Jul-2026'."}
-            },
-            "required": [],
-        },
-    },
-    {
         "name": "bubble_shield_write",
         "description": (
             "Write a document to disk, restoring the REAL client values from the "
@@ -186,64 +161,6 @@ TOOLS = [
                             "description": "Your draft, containing ⟦…⟧ tokens to be restored to real values."}
             },
             "required": ["path", "content"],
-        },
-    },
-    {
-        "name": "bubble_shield_mail_apply",
-        "description": (
-            "Apply triage DECISIONS to e-mail host-side over IMAP — add Gmail labels, "
-            "archive (remove \\Inbox), and/or create a reply DRAFT — WITHOUT the raw "
-            "e-mail or the client's real values ever entering your context. This is the "
-            "symmetric mutation counterpart to bubble_shield_mail_read. Pass a list of "
-            "decisions, each keyed by message UID (from mail_read). For a draft, write "
-            "the body USING ⟦…⟧ tokens (body_tokens): Bubble Shield restores the real "
-            "values from the local vault in-memory and puts them into the Gmail draft — "
-            "the restored text is NEVER shown to you. It returns ONLY a per-decision "
-            "success/fail count, never any body. STRUCTURAL guarantees: it can NEVER "
-            "send (draft-only, no SMTP), NEVER delete (archive is the only removal), and "
-            "refuses more than 60 mutations in one call. Every action is journalled "
-            "host-side (uid + labels only, no PII). Credentials live host-side and are "
-            "never shown to you."),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "decisions": {
-                    "type": "array",
-                    "description": "List of per-message triage decisions to apply.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "uid": {"type": "string",
-                                    "description": "Message UID (from bubble_shield_mail_read)."},
-                            "add_labels": {"type": "array", "items": {"type": "string"},
-                                           "description": "Gmail labels to ADD (e.g. ['🔴 Clients'])."},
-                            "remove_labels": {"type": "array", "items": {"type": "string"},
-                                              "description": "Gmail labels to REMOVE from this message — use to CORRECT a mistagged mail or CHANGE a category (remove the wrong label, add the right one in the same decision). Removing a label only un-tags; it never deletes the message. Do NOT put '\\Inbox' here — use 'unarchive' for that."},
-                            "archive": {"type": "boolean",
-                                        "description": "If true, remove \\Inbox (archive the message). This is the only removal allowed."},
-                            "unarchive": {"type": "boolean",
-                                          "description": "If true, ADD \\Inbox back (bring an archived message back INTO the inbox) — the inverse of archive, e.g. if a mail was archived by mistake."},
-                            "draft": {
-                                "type": "object",
-                                "description": "Optional reply draft to create for this message.",
-                                "properties": {
-                                    "to": {"type": "string",
-                                           "description": "Recipient (may itself be a ⟦…⟧ token to restore)."},
-                                    "in_reply_to": {"type": "string",
-                                                    "description": "Message-Id to thread the reply to (In-Reply-To/References)."},
-                                    "subject": {"type": "string",
-                                                "description": "Draft subject (may contain ⟦…⟧ tokens)."},
-                                    "body_tokens": {"type": "string",
-                                                    "description": "Draft body written WITH ⟦…⟧ tokens — restored to real values in-memory, never shown to you."}
-                                },
-                                "required": ["body_tokens"],
-                            }
-                        },
-                        "required": ["uid"],
-                    }
-                }
-            },
-            "required": ["decisions"],
         },
     },
     {
@@ -370,6 +287,107 @@ TOOLS = [
         }
     },
 ]
+
+# Mail path (IMAP/Gmail triage) — DISABLED from the shipped product (V1 is
+# docs-only: "shield the documents in a protected folder", nothing else) but
+# KEPT IN RESERVE (option A: gate, don't delete). These tool defs are only
+# appended to TOOLS when BUBBLE_SHIELD_ENABLE_MAIL=1, so they're invisible/
+# unreachable via tools/list in a shipped build. See _mail_enabled().
+_MAIL_TOOLS = [
+    {
+        "name": "bubble_shield_mail_read",
+        "description": (
+            "Read e-mail ANONYMISED. Bubble Shield fetches the messages ITSELF over "
+            "IMAP (host-side) and returns each one with names, IBANs, e-mails and "
+            "other identifying data already replaced by reversible ⟦…⟧ tokens — the "
+            "raw e-mail NEVER enters your context. Use this INSTEAD of a Gmail/mail "
+            "connector for any mailbox that may contain client PII: the connector is "
+            "removed from the trust path entirely. Same fail-CLOSED guarantee as "
+            "bubble_shield_read — if the NER daemon is down, this REFUSES rather than "
+            "return raw e-mail. Uses the same local vault as files, so a client masked "
+            "in a PDF gets the SAME token in their e-mail (cross-source consistency). "
+            "Each message block STARTS with a 'UID: <n>' line — a stable mailbox-local "
+            "identifier (not PII). Pass that exact UID as the 'uid' of a decision to "
+            "bubble_shield_mail_apply to label/archive/reply that SAME message; never "
+            "invent a UID. "
+            "Credentials live host-side (~/.bubble_shield/mail.json) and are never "
+            "shown to you."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "IMAP search criterion: UNSEEN, ALL, SEEN, "
+                                         "'FROM \"x@y.fr\"', etc. Default ALL."},
+                "max": {"type": "integer",
+                        "description": "Max messages to fetch (most-recent first, capped at 50). Default 10."},
+                "since": {"type": "string",
+                          "description": "Optional IMAP date filter 'dd-Mon-yyyy' e.g. '01-Jul-2026'."}
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "bubble_shield_mail_apply",
+        "description": (
+            "Apply triage DECISIONS to e-mail host-side over IMAP — add Gmail labels, "
+            "archive (remove \\Inbox), and/or create a reply DRAFT — WITHOUT the raw "
+            "e-mail or the client's real values ever entering your context. This is the "
+            "symmetric mutation counterpart to bubble_shield_mail_read. Pass a list of "
+            "decisions, each keyed by message UID (from mail_read). For a draft, write "
+            "the body USING ⟦…⟧ tokens (body_tokens): Bubble Shield restores the real "
+            "values from the local vault in-memory and puts them into the Gmail draft — "
+            "the restored text is NEVER shown to you. It returns ONLY a per-decision "
+            "success/fail count, never any body. STRUCTURAL guarantees: it can NEVER "
+            "send (draft-only, no SMTP), NEVER delete (archive is the only removal), and "
+            "refuses more than 60 mutations in one call. Every action is journalled "
+            "host-side (uid + labels only, no PII). Credentials live host-side and are "
+            "never shown to you."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "array",
+                    "description": "List of per-message triage decisions to apply.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "uid": {"type": "string",
+                                    "description": "Message UID (from bubble_shield_mail_read)."},
+                            "add_labels": {"type": "array", "items": {"type": "string"},
+                                           "description": "Gmail labels to ADD (e.g. ['🔴 Clients'])."},
+                            "remove_labels": {"type": "array", "items": {"type": "string"},
+                                              "description": "Gmail labels to REMOVE from this message — use to CORRECT a mistagged mail or CHANGE a category (remove the wrong label, add the right one in the same decision). Removing a label only un-tags; it never deletes the message. Do NOT put '\\Inbox' here — use 'unarchive' for that."},
+                            "archive": {"type": "boolean",
+                                        "description": "If true, remove \\Inbox (archive the message). This is the only removal allowed."},
+                            "unarchive": {"type": "boolean",
+                                          "description": "If true, ADD \\Inbox back (bring an archived message back INTO the inbox) — the inverse of archive, e.g. if a mail was archived by mistake."},
+                            "draft": {
+                                "type": "object",
+                                "description": "Optional reply draft to create for this message.",
+                                "properties": {
+                                    "to": {"type": "string",
+                                           "description": "Recipient (may itself be a ⟦…⟧ token to restore)."},
+                                    "in_reply_to": {"type": "string",
+                                                    "description": "Message-Id to thread the reply to (In-Reply-To/References)."},
+                                    "subject": {"type": "string",
+                                                "description": "Draft subject (may contain ⟦…⟧ tokens)."},
+                                    "body_tokens": {"type": "string",
+                                                    "description": "Draft body written WITH ⟦…⟧ tokens — restored to real values in-memory, never shown to you."}
+                                },
+                                "required": ["body_tokens"],
+                            }
+                        },
+                        "required": ["uid"],
+                    }
+                }
+            },
+            "required": ["decisions"],
+        },
+    },
+]
+
+if _mail_enabled():
+    TOOLS = TOOLS + _MAIL_TOOLS
 
 
 def _vendor():
@@ -925,6 +943,111 @@ def _gemma_second_pass(res, engine) -> str:
     return out
 
 
+def _gemma_additive_pass(res, engine) -> str:
+    """PROSE, all-mode — Gemma is ADDITIVE, never a refusal.
+
+    REFINEMENT (2026-07-11): unlike _gemma_second_pass (structured forms, fail-CLOSED),
+    prose in all-mode uses Gemma only to ADD masking on top of the GLiNER+regex floor.
+    The GLiNER+regex-masked body (`res.anonymized`) is the FLOOR that is ALWAYS returned:
+
+      - Gemma reachable + finds extra spans that textually match → those extra values are
+        ALSO masked into the SAME vault (higher recall on prose).
+      - Gemma UNREACHABLE (any transport/HTTP/parse error) → FAIL-OPEN: return the
+        GLiNER+regex floor. A Gemma outage must NEVER refuse a well-masked normal letter
+        (the #589 over-refusal bug this function fixes).
+      - Gemma reachable but applies ZERO extra spans → FAIL-OPEN: return the floor. On
+        prose, "Gemma added nothing" is a perfectly valid outcome, not a failure.
+
+    Contrast #589-B forms: there, "Gemma unreachable / zero spans" is a REFUSAL because a
+    columnar form cannot be certified without verification. On prose there is nothing to
+    verify — GLiNER+regex already ran; Gemma can only add. So every failure mode here is
+    fail-OPEN. The whole point: never refuse prose for lack of Gemma.
+    """
+    out = res.anonymized
+    try:
+        spans = _gemma_extract_call(res.anonymized)
+        for sp in spans:
+            val, typ = sp.get("text", ""), sp.get("type", "MOT")
+            if val and val in out:
+                token = engine.vault.token_for(val, typ)
+                out = out.replace(val, token)
+    except Exception:
+        # FAIL-OPEN: Gemma unreachable/malformed on prose -> return the GLiNER+regex
+        # floor (res.anonymized), never refuse. This is the whole point of the additive
+        # pass — a Gemma failure on prose must not refuse a well-masked doc.
+        out = res.anonymized
+    return _finalise_anonymised(res, out)
+
+
+_GEMMA_MODES = frozenset({"all", "hard", "off"})
+
+
+def _gemma_mode() -> str:
+    """Return the background-masker Gemma mode: "all" | "hard" | "off".
+
+    Reads `gemma_mode` from the SAME bubble-shield.json the guard resolves (same
+    search order as _is_protected_folder / the guard: BUBBLE_SHIELD_GUARD_CONFIG,
+    then CLAUDE_PROJECT_DIR/.bubble-shield.json, ~/.config/bubble_shield/bubble-shield.json,
+    ~/.bubble-shield.json). First config found wins.
+
+    Fail toward MORE masking: missing file, malformed JSON, missing/invalid key, or
+    any error -> "all" (the fail-closed-consistent default). Never raises.
+    """
+    try:
+        for loc in (
+            os.environ.get("BUBBLE_SHIELD_GUARD_CONFIG"),
+            os.path.join(os.environ.get("CLAUDE_PROJECT_DIR", ""), ".bubble-shield.json"),
+            os.path.expanduser("~/.config/bubble_shield/bubble-shield.json"),
+            os.path.expanduser("~/.bubble-shield.json"),
+        ):
+            if not loc or not Path(loc).is_file():
+                continue
+            try:
+                cfg = json.loads(Path(loc).read_text(encoding="utf-8"))
+            except Exception:
+                # unreadable/malformed config -> fail toward more masking
+                return "all"
+            mode = cfg.get("gemma_mode", "all")
+            return mode if mode in _GEMMA_MODES else "all"
+    except Exception:
+        return "all"
+    return "all"
+
+
+def _gemma_gate_decision(mode: str, is_form: bool) -> str:
+    """PURE decision for the Gemma-pass gate. Returns one of FOUR values:
+      "run_failclosed" — form + (all|hard): run _gemma_second_pass. Gemma VERIFIES
+                         the form or FAILS CLOSED (raises, never returns a body).
+                         This is the #589-B guarantee — unchanged.
+      "run_additive"   — prose + all: run _gemma_additive_pass. Gemma ADDS masking
+                         on top of the GLiNER+regex floor; a Gemma failure/empty
+                         result is fail-OPEN (returns the GLiNER+regex-masked body),
+                         NEVER a refusal. Prose is never refused for lack of Gemma.
+      "fail_closed"    — off + form: REFUSE (raise StructuredFormUnverifiedError),
+                         never return an unverified form body.
+      "skip"           — prose + hard, prose + off: no Gemma; the GLiNER+regex result
+                         falls through to the non-Gemma return path.
+
+    SECURITY INVARIANTS:
+      - off + form => "fail_closed" (never "skip"): skipping would return an
+        unverified form body = re-open the #589-B liasse/CERFA PII leak.
+      - form + (all|hard) => "run_failclosed" (never additive): a structured form
+        is never certified without Gemma verification, in EVERY mode where Gemma runs.
+      Prose is ADDITIVE only — Gemma can add masking on prose but a Gemma failure on
+      prose must never refuse a doc the GLiNER+regex floor already masked.
+    """
+    if mode == "off":
+        return "fail_closed" if is_form else "skip"
+    if is_form:
+        # form + (all|hard) -> verify or fail closed
+        return "run_failclosed"
+    if mode == "all":
+        # prose + all -> additive (fail-open floor)
+        return "run_additive"
+    # prose + hard -> no Gemma
+    return "skip"
+
+
 # #568 — async on-seed de-pollution trigger.
 #
 # After seed_vault_into_gazetteer() feeds newly-confirmed PII into the deny-list
@@ -953,6 +1076,60 @@ def _fire_depollute_async():
     t = threading.Thread(target=_run_depollute_pass, daemon=True)
     t.start()
     return t
+
+
+def _finalise_anonymised(res, body: str) -> str:
+    """Attach the honest verdict note + #334 KEEP-warning to a masked body and return it.
+
+    Extracted from _anonymise_text so BOTH the non-Gemma return path AND the prose
+    additive Gemma path (_gemma_additive_pass) produce byte-identical framing for the
+    same verdict_state — the only difference between them is `body` (additive may carry
+    extra Gemma masking). `res` supplies the canonical verdict_state; `body` is the final
+    masked text to frame.
+    """
+    _state = getattr(res, "verdict_state", None)
+    # Verdict note — keyed off the engine's canonical verdict_state so each state
+    # gets the HONEST message. Critically, the zero-detection state (a substantial
+    # doc where NOTHING was found) must NOT be presented as safe: "found nothing"
+    # is not "safe", it's "nothing found", which on free text often means a
+    # name/address was MISSED. (Product-integrity fix 2026-07-02.) A zero_detection
+    # verdict only reaches here when _text_quality_gate confirmed the text was
+    # clean enough for that "found nothing" to be a trustworthy verdict — the
+    # garbled split already raised in _anonymise_text and never gets here.
+    if _state == "zero_detection":
+        note = _ZERO_DETECTION_CLEAN_NOTE
+    elif _state == "low_confidence":
+        note = (
+            "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
+            "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
+    elif _state == "leak":
+        note = (
+            "\n\n[⚠️ Bubble Shield : une donnée identifiante est restée en clair — "
+            "NE PAS envoyer sans correction.]")
+    else:
+        note = ""
+
+    # #334 — LOUD WARNING when an identifying type is set to KEEP in the policy.
+    # The client keeps full autonomy (no hard floor), but the kept types are named
+    # loudly so the leak is never silent. This is ADDITIVE — it never changes what
+    # gets masked. Separate from the NER-down error above (both can fire).
+    try:
+        sys.path.insert(0, str(_vendor()))
+        from bubble_shield.policy import kept_identifying_types, load_policy as _load_pol
+        _kept = kept_identifying_types(_load_pol())
+        if _kept:
+            _types_str = ", ".join(_kept)
+            kept_warning = (
+                f"⚠️ Bubble Shield — MASQUAGE DÉSACTIVÉ pour : {_types_str} "
+                f"(selon votre configuration). Ces données identifiantes restent "
+                f"EN CLAIR dans le résultat. Vérifiez votre politique de "
+                f"confidentialité (policy.json) si ce n'est pas voulu.\n\n"
+            )
+            return kept_warning + body + note
+    except Exception:
+        pass  # fail-open: warning failure must never break anonymization
+
+    return body + note
 
 
 def _anonymise_text(text: str, filename_basename: str = "") -> str:
@@ -1056,55 +1233,29 @@ def _anonymise_text(text: str, filename_basename: str = "") -> str:
 
     # P0 #589-B — a COMPLETED masked_ok/low_confidence result on a STRUCTURED FORM cannot be
     # trusted (degraded columnar extraction hides entities from the fast pass; the doc still
-    # reads as clean prose so the quality gate never fires). Escalate to a Gemma second pass,
-    # or fail closed. Runs only for positively-identified forms — all other docs are unchanged.
-    # Note-honesty fix: _gemma_second_pass appends _structured_form_note() itself, and ONLY
-    # when it actually applied at least one span — do not append it again here.
-    if _is_structured_form(res.original):
+    # reads as clean prose so the quality gate never fires). Escalate to a Gemma pass, or fail
+    # closed. Prose docs (all-mode) get an ADDITIVE Gemma pass (fail-OPEN floor); forms are
+    # verified or fail closed. Note-honesty fix: _gemma_second_pass / _gemma_additive_pass
+    # append their own note, and ONLY when they actually applied a span.
+    #
+    # Mode-aware gate (gemma_mode: "all" | "hard" | "off", default "all"). The pure
+    # _gemma_gate_decision helper holds the safety logic (unit-tested, full 8-case matrix).
+    #   "run_failclosed" → form + (all|hard): Gemma verifies or FAILS CLOSED (#589-B).
+    #   "run_additive"   → prose + all: Gemma ADDS masking; failure/empty is fail-OPEN
+    #                      (returns the GLiNER+regex floor), never a refusal.
+    #   "fail_closed"    → off + form: REFUSE (raise), never return an unverified body —
+    #                      preserves the #589-B guarantee on weak Macs.
+    #   "skip"           → prose + (hard|off): fall through to the non-Gemma path below.
+    _decision = _gemma_gate_decision(_gemma_mode(), _is_structured_form(res.original))
+    if _decision == "fail_closed":
+        raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR)
+    if _decision == "run_failclosed":
         return _gemma_second_pass(res, engine)
+    if _decision == "run_additive":
+        return _gemma_additive_pass(res, engine)
+    # _decision == "skip" → fall through to the non-Gemma return path
 
-    # Verdict note — keyed off the engine's canonical verdict_state so each state
-    # gets the HONEST message. Critically, the zero-detection state (a substantial
-    # doc where NOTHING was found) must NOT be presented as safe: "found nothing"
-    # is not "safe", it's "nothing found", which on free text often means a
-    # name/address was MISSED. (Product-integrity fix 2026-07-02.) A zero_detection
-    # verdict only reaches this line when _text_quality_gate confirmed the text was
-    # clean enough for that "found nothing" to be a trustworthy verdict (see gate
-    # above) — the garbled split already raised and never gets here.
-    if _state == "zero_detection":
-        note = _ZERO_DETECTION_CLEAN_NOTE
-    elif _state == "low_confidence":
-        note = (
-            "\n\n[⚠️ Bubble Shield : une relecture humaine est conseillée — "
-            "une donnée potentiellement sensible est restée sous le seuil de confiance.]")
-    elif _state == "leak":
-        note = (
-            "\n\n[⚠️ Bubble Shield : une donnée identifiante est restée en clair — "
-            "NE PAS envoyer sans correction.]")
-    else:
-        note = ""
-
-    # #334 — LOUD WARNING when an identifying type is set to KEEP in the policy.
-    # The client keeps full autonomy (no hard floor), but the kept types are named
-    # loudly so the leak is never silent. This is ADDITIVE — it never changes what
-    # gets masked. Separate from the NER-down error above (both can fire).
-    try:
-        sys.path.insert(0, str(_vendor()))
-        from bubble_shield.policy import kept_identifying_types, load_policy as _load_pol
-        _kept = kept_identifying_types(_load_pol())
-        if _kept:
-            _types_str = ", ".join(_kept)
-            kept_warning = (
-                f"⚠️ Bubble Shield — MASQUAGE DÉSACTIVÉ pour : {_types_str} "
-                f"(selon votre configuration). Ces données identifiantes restent "
-                f"EN CLAIR dans le résultat. Vérifiez votre politique de "
-                f"confidentialité (policy.json) si ce n'est pas voulu.\n\n"
-            )
-            return kept_warning + res.anonymized + note
-    except Exception:
-        pass  # fail-open: warning failure must never break anonymization
-
-    return res.anonymized + note
+    return _finalise_anonymised(res, res.anonymized)
 
 
 def _anonymise_file(path: str) -> str:
@@ -1132,6 +1283,64 @@ def _anonymise_file(path: str) -> str:
         raise FileNotFoundError(f"no such file: {p}")
     text = extract_file(p)                            # fail-closed on scanned PDFs
     return _anonymise_text(text, filename_basename=p.name)
+
+
+def _read_with_shadow(path: str) -> str:
+    """Fast read path for bubble_shield_read — hash → serve, ZERO models.
+
+    Shadow-index redesign (Phase 2). The client-facing speed win: a cache HIT
+    returns pre-anonymised text with no GLiNER / Gemma / OCR at read time.
+
+      HIT  → return the cached clean shadow immediately (zero models).
+      MISS → B1 ACCEPTED GAP (client-agreed, documented in the plan): serve the
+             RAW extracted text (`extract_file`, text-extraction only — no NER,
+             no Gemma), NOT `_anonymise_file`. Full anonymisation happens later,
+             off the read path, in the background sweep (Phase 3). We queue the
+             miss via `shadow_store.mark_pending` so the sweep picks it up.
+
+    This is the ONE place Bubble Shield deliberately does NOT fail-closed: on a
+    miss we serve raw for speed, by explicit product decision. Do NOT "improve"
+    this by running models here — the whole point is zero models at read time.
+    Must NEVER call `_anonymise_file` (that runs models).
+    """
+    sys.path.insert(0, str(_vendor()))
+    from bubble_shield import shadow_store
+    p = Path(os.path.expanduser(path)).resolve()
+    if not p.is_file():
+        raise FileNotFoundError(f"no such file: {p}")
+    h = shadow_store.content_hash(p)
+    cached = shadow_store.get_shadow(h)
+    if cached is not None:
+        # HIT — zero models. Belt-and-suspenders: a cheap EXACT-STRING safety net
+        # over the served shadow. For every confirmed name in the gazetteer, if it
+        # sits IN CLEAR in this cached shadow, mask it before serving. This catches
+        # a name that a gazetteer-confirmed entry (confirmed elsewhere) SHOULD have
+        # masked but that leaked into this particular shadow. Pure str.replace —
+        # NO NER, NO Gemma, NO regex — stays cheap so the fast read path stays fast.
+        try:
+            from bubble_shield import known_pii_store
+            for name in known_pii_store.load_gazetteer().values():
+                # Over-masking guard: skip empty / very-short values (< 3 chars).
+                # A 1–2 char gazetteer entry replacing every occurrence of that
+                # substring everywhere would destroy the doc. Fail-toward-masking
+                # still holds for real names (>= 3 chars): a leaked name is worse
+                # than a slight over-mask.
+                if not name or len(name) < 3:
+                    continue
+                cached = cached.replace(name, "⟦NOM_∎⟧")
+        except Exception:
+            pass  # net is additive; a gazetteer failure must never break the read
+        return cached
+    # MISS — B1 accepted gap: serve RAW extracted text, no models at read time.
+    sys.path.insert(0, str(_scripts_dir()))
+    from bubble_shield_extract import extract_file
+    try:
+        # Queue the miss for the background sweep. `mark_pending` lands in Task 6;
+        # best-effort by design so a missing/failing mark never breaks a read.
+        shadow_store.mark_pending(str(p))
+    except Exception:
+        pass
+    return extract_file(p)
 
 
 # ---- folder listing (bubble_shield_list) -----------------------------------
@@ -1892,7 +2101,10 @@ def _handle(req: dict) -> None:
                 )
                 ok(summary)
             elif name == "bubble_shield_read":
-                anon = _anonymise_file(args.get("path", ""))
+                # Shadow-index fast path: hash → serve cached shadow (HIT, zero
+                # models) or raw extracted text (MISS, B1). Never runs models at
+                # read time; anonymisation of misses happens in the sweep.
+                anon = _read_with_shadow(args.get("path", ""))
                 # Surface OCR quality note when the text was extracted via OCR pack
                 if _OCR_TAG in anon[:30]:
                     anon = _OCR_QUALITY_NOTE + anon
@@ -1900,6 +2112,13 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_list":
                 ok(_list_folder(args.get("folder", "")))
             elif name == "bubble_shield_mail_read":
+                # Mail path disabled from the shipped product (V1 is docs-only);
+                # kept in reserve behind BUBBLE_SHIELD_ENABLE_MAIL. Not exposed via
+                # tools/list either, but guard the dispatch too in case a caller
+                # invokes it directly without listing tools first.
+                if not _mail_enabled():
+                    fail("Bubble Shield — le module e-mail est désactivé dans cette version.")
+                    return
                 anon = _anonymise_mail(
                     query=args.get("query", "ALL"),
                     maxn=args.get("max", 10),
@@ -1911,6 +2130,9 @@ def _handle(req: dict) -> None:
                 # and returns ONLY per-decision counts — NEVER any body/PII. Any
                 # exception is caught below and converted to a FIXED fail message
                 # (no str(e) → no draft body / restored PII can leak).
+                if not _mail_enabled():
+                    fail("Bubble Shield — le module e-mail est désactivé dans cette version.")
+                    return
                 ok(_apply_mail(args.get("decisions", [])))
             elif name == "bubble_shield_anonymize_text":
                 ok(_anonymise_text(args.get("text", "")))

@@ -262,7 +262,7 @@ def _is_garbled_extraction(text: str) -> bool:
 
     This heuristic detects the class of glue artifacts produced by pypdf on the
     liasse fiscale: words are merged without spaces ("gerantETESTONI",
-    "AMELSignature", "FAKENAMESignature").  When triggered, the caller
+    "NOAMSignature", "FAKENAMESignature").  When triggered, the caller
     re-extracts via OCR (clean, layout-aware text) to eliminate the whole artifact
     class at once -- rather than patching individual glue boundaries one by one.
 
@@ -315,7 +315,7 @@ def _is_garbled_extraction(text: str) -> bool:
         return False
 
     # Signal 3: CamelCase-glue transitions
-    # [a-z][A-Z] (e.g. "tETESTONI", "tSignature") or [A-Z]{2,}[a-z] (e.g. "AMELs")
+    # [a-z][A-Z] (e.g. "tETESTONI", "tSignature") or [A-Z]{2,}[a-z] (e.g. "NOAMs")
     camel_glue_count = len(re.findall(r"[a-z][A-Z]|[A-Z]{2,}[a-z]", text))
     if camel_glue_count < 3:
         return False

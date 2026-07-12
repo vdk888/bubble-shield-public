@@ -57,7 +57,6 @@ import os
 import shutil
 import subprocess
 import sys
-import venv
 from pathlib import Path
 
 BUBBLE_SHIELD_HOME = Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield"))
@@ -74,6 +73,20 @@ GEMMA_ENV = BUBBLE_SHIELD_HOME / "gemma-env"
 # is the exact HF repo install_gemma_env() pre-downloads so warm_up() never
 # hits the network at first login (#568 final-review must-fix).
 GEMMA_MODEL_ID = "mlx-community/gemma-3n-E4B-it-lm-4bit"
+
+# gemma-env pip deps — VERSION-PINNED (learned rebuilding on Python 3.12).
+# On 3.12 an UNPINNED `pip install mlx-lm` resolves to mlx-lm 0.31.3, which
+# hard-requires transformers>=5.0.0 — but transformers 5.x broke mlx_lm's
+# tokenizer registration for this Gemma model:
+#   AttributeError: 'str' object has no attribute '__module__'
+#     (transformers/models/auto/auto_factory.py register(), 5.x API change)
+# so `mlx_lm.load(GEMMA_MODEL_ID)` crashes. The validated combo (identical to
+# the working 3.9 baseline) is mlx-lm 0.29.x on transformers 4.x. We pin both:
+# mlx-lm<0.31 keeps the transformers>=5 requirement out, and transformers<5
+# belt-and-suspenders forces the 4.x line even if a future mlx-lm patch loosens
+# its floor. wordfreq is unpinned (stable, no conflict). If you bump mlx-lm,
+# RE-TEST mlx_lm.load(GEMMA_MODEL_ID) end-to-end before shipping.
+GEMMA_PIP_DEPS = ["mlx-lm>=0.29,<0.31", "transformers>=4.40,<5", "wordfreq"]
 
 # Stable, non-ephemeral home for the daemon SCRIPT + its vendored deps. The
 # plugin's own scripts/ dir is an EPHEMERAL per-session Cowork plugin cache
@@ -157,16 +170,102 @@ def _venv_python(env_dir: Path) -> Path:
     return env_dir / "bin" / "python"
 
 
+# Bubble Shield PINS its ML venvs to Python 3.12 (NOT "whatever python launched
+# this script"). On a stock Mac the launcher is /usr/bin/python3 == 3.9.6, which
+# was pinning the venvs to 3.9 BY ACCIDENT — nobody chose it. That accidental
+# 3.9 causes LibreSSL warnings + env flakiness AND blocks mlx_vlm (the Gemma
+# vision judge needs Python 3.10+). We deliberately choose 3.12 for all three
+# venvs (ml-env, gemma-env, ocr-env) so a fresh client install is consistent and
+# vision-capable. 3.12 (not 3.13) is the pin because the ML dep trees
+# (onnxruntime/gliner, mlx, docling) are validated there.
+#
+# We search for a 3.12 interpreter GENERICALLY on PATH — NO hardcoded
+# /opt/homebrew (that's a Homebrew path specific to the build machine; a client
+# Mac won't have it). If none is found we raise a clear, actionable error rather
+# than silently falling back to the accidental 3.9.
+PY312_ERROR = (
+    "Python 3.12 is required to provision Bubble Shield's ML venvs but no "
+    "`python3.12` was found on PATH.\n"
+    "  • This Mac's system python3 is likely 3.9 (stock macOS), which is too "
+    "old: it triggers LibreSSL warnings and cannot run the Gemma vision model "
+    "(mlx_vlm needs Python 3.10+).\n"
+    "  • Install a Python 3.12 runtime and re-run. On a machine with Homebrew: "
+    "`brew install python@3.12`. For a bare client Mac WITHOUT Homebrew, the "
+    "installer is expected to provision a relocatable 3.12 (see the provisioning "
+    "TODO in install-app.sh / zero-prereq card #604)."
+)
+
+# #604 — the stable path install-app.sh's bare-Mac provisioner extracts a
+# relocatable Python 3.12 into, when no Homebrew/PATH 3.12 is available. The
+# install_only python-build-standalone tarball unpacks a single top-level
+# `python/` dir, so the interpreter lands at
+# ~/.bubble_shield/py312/python/bin/python3.12 (see install-app.sh's
+# PY312_ROOT/PY312_BIN_DIR + provision_python312()). This setup script runs in
+# a SEPARATE process from install-app.sh and does NOT inherit its PATH
+# mutation, so find_python312() must ALSO probe this stable path directly —
+# it's resolved via the home dir (Path.home()), not a machine-specific
+# assumption like /opt/homebrew.
+STABLE_PY312 = str(Path.home() / ".bubble_shield" / "py312" / "python" / "bin" / "python3.12")
+
+
+def find_python312() -> str:
+    """Return the path to a Python 3.12 interpreter, searched GENERICALLY on PATH.
+
+    Order: `python3.12` on PATH first (the canonical name a 3.12 install
+    exposes), then the stable ~/.bubble_shield/py312 path install-app.sh's
+    bare-Mac provisioner extracts a relocatable 3.12 into (see STABLE_PY312 —
+    needed because this script runs in a separate process that doesn't inherit
+    install-app.sh's PATH), then any `python3.x`/`python3`/`sys.executable`
+    that self-reports as 3.12 — so a provisioned-but-oddly-named 3.12 is still
+    found. Deliberately does NOT hardcode /opt/homebrew: that path only exists
+    on Homebrew machines (this build box), never on a bare client Mac. Raises
+    RuntimeError(PY312_ERROR) if no 3.12 is present, so setup fails LOUDLY
+    with an actionable message instead of silently pinning the accidental
+    system 3.9."""
+    candidates = [shutil.which("python3.12"), STABLE_PY312]
+    # Also consider the current interpreter + generic python3 in case a 3.12 is
+    # installed under a non-standard name; we still VERIFY the version is 3.12.
+    candidates += [sys.executable, shutil.which("python3")]
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            out = subprocess.run(
+                [cand, "-c",
+                 "import sys;print('%d.%d' % sys.version_info[:2])"],
+                capture_output=True, text=True, timeout=15)
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip() == "3.12":
+            return cand
+    raise RuntimeError(PY312_ERROR)
+
+
+def _create_venv_py312(env_dir: Path) -> None:
+    """Create a venv at `env_dir` using a Python 3.12 interpreter (pinned, not
+    "whatever ran this script"). Locates 3.12 via find_python312() and shells out
+    to `<py312> -m venv --clear` so the resulting venv's interpreter is 3.12
+    regardless of what Python is running this setup script."""
+    py312 = find_python312()
+    log(f"• using Python 3.12 interpreter: {py312}")
+    env_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([py312, "-m", "venv", "--clear", str(env_dir)], check=True)
+
+
 def ensure_venv() -> Path:
-    """Create the persistent venv if missing. Returns its python path."""
+    """Create the persistent venv if missing. Returns its python path.
+
+    Pins the venv to Python 3.12 (see find_python312 / _create_venv_py312) —
+    NOT the interpreter that launched this script (which on a stock Mac is 3.9)."""
     py = _venv_python(ML_ENV)
     if py.exists():
         log(f"✓ venv already present: {ML_ENV}")
         return py
-    log(f"• creating venv at {ML_ENV} …")
-    ML_ENV.parent.mkdir(parents=True, exist_ok=True)
-    venv.EnvBuilder(with_pip=True).create(str(ML_ENV))
-    log("✓ venv created")
+    log(f"• creating venv at {ML_ENV} (Python 3.12) …")
+    _create_venv_py312(ML_ENV)
+    log("✓ venv created (Python 3.12)")
     return py
 
 
@@ -249,15 +348,18 @@ def install_gemma_env() -> Path:
     Returns the venv dir (not the python path) per the brief's interface.
     """
     if not (GEMMA_ENV / "bin" / "python").exists():
-        log(f"• creating gemma-env venv at {GEMMA_ENV} …")
-        GEMMA_ENV.parent.mkdir(parents=True, exist_ok=True)
-        venv.create(GEMMA_ENV, with_pip=True)
-        log("✓ gemma-env venv created")
+        log(f"• creating gemma-env venv at {GEMMA_ENV} (Python 3.12) …")
+        # Pin 3.12 (NOT the launching interpreter). The Gemma judge's optional
+        # vision model (mlx_vlm) needs Python 3.10+, and the accidental stock
+        # 3.9 pin is exactly what blocked the earlier vision swap — so gemma-env
+        # in particular must be 3.12.
+        _create_venv_py312(GEMMA_ENV)
+        log("✓ gemma-env venv created (Python 3.12)")
     else:
         log(f"✓ gemma-env venv already present: {GEMMA_ENV}")
     py = GEMMA_ENV / "bin" / "python"
-    subprocess.run([str(py), "-m", "pip", "install", "-q", "mlx-lm", "wordfreq"], check=True)
-    log("✓ gemma-env deps installed (mlx-lm, wordfreq)")
+    subprocess.run([str(py), "-m", "pip", "install", "-q", *GEMMA_PIP_DEPS], check=True)
+    log(f"✓ gemma-env deps installed ({', '.join(GEMMA_PIP_DEPS)})")
     download_gemma_model(py)
     return GEMMA_ENV
 
@@ -632,6 +734,7 @@ def install_launchagent(py: Path) -> None:
   <array>
     <string>{py}</string>
     <string>{nerd}</string>
+    <string>--no-warm</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>BUBBLE_SHIELD_HOME</key><string>{BUBBLE_SHIELD_HOME}</string></dict>
@@ -726,6 +829,7 @@ def install_gemma_launchagent(py: Path) -> None:
   <array>
     <string>{py}</string>
     <string>{gemmad}</string>
+    <string>--no-warm</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

@@ -51,7 +51,7 @@ DEFAULT_PORT = int(os.environ.get("BUBBLE_SHIELD_NERD_PORT", "8723"))
 # (fail-closed) until a cold ~20-37s re-spawn. A 4h timeout keeps it warm across a
 # normal working session while still freeing RAM overnight. Set
 # BUBBLE_SHIELD_NERD_IDLE=0 (or high) for an "always-warm" client. (#561)
-IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "14400"))
+IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "600"))
 
 _last_activity = time.time()
 _lock = threading.Lock()

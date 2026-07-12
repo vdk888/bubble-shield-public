@@ -1564,7 +1564,7 @@ def doc_level_person_repetition_matches(
         #      (CLAIRE→clairement, ANDREA→ANDREAssistant, JULIEN→julienne).
         #   2. Uppercase-next-char guard: only emit when the FOLLOWING char is
         #      UPPERCASE (CamelCase glue = real PDF artifact: "FAKENAMESignature",
-        #      "AMELSignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
+        #      "NOAMSignature"). A lowercase continuation ("CLAIREment", "ANTOINEtte",
         #      "TESTONImania") is a legitimate French inflected word — never mask.
         right_glued_pattern = None
         if (seed in raison_sociale_lone_seeds
@@ -1611,7 +1611,7 @@ def doc_level_person_repetition_matches(
         # fix #275 -- right-glued-token pass (mirror of #273): scan with the
         # loose-right pattern and emit only occurrences where the FOLLOWING char IS
         # an UPPERCASE letter — confirming a genuine CamelCase PDF-glue artifact
-        # (e.g. "FAKENAMESignature", "AMELSignature" — capital S).
+        # (e.g. "FAKENAMESignature", "NOAMSignature" — capital S).
         # A lowercase continuation ("CLAIREment", "ANTOINEtte", "TESTONImania")
         # signals a real inflected French word — never mask those.
         # (Ship-blocker fix #275 v2: uppercase-next-char guard.)

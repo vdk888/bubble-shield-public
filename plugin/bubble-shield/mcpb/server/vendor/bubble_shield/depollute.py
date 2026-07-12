@@ -13,6 +13,26 @@ from __future__ import annotations
 
 ZIPF_JUNK_MIN: float = 4.0   # >= this AND lowercase → high-confidence common word
 
+# Wedge fix (2026-07-11) — daemon_classify chunk size. The Gemma daemon has ONE
+# serial MLX worker (MLX is not thread-safe). A single /classify_extract request
+# carrying the whole uncertain batch (~372 tokens) makes the worker grind for
+# minutes in one job; the HTTP timeout fires; the worker keeps grinding the
+# abandoned batch and every later request stacks behind it → daemon wedge.
+# daemon_classify therefore splits the batch into ≤ DEPOLLUTE_CHUNK_SIZE-token
+# requests so no single request can monopolise the worker, and a per-chunk
+# failure only masks that chunk's tokens (fail-toward-masking, aggregated).
+DEPOLLUTE_CHUNK_SIZE: int = 8
+
+# Task 2 (#589) — entity-type allowlist. De-pollution may ONLY reach the judge
+# (or the auto-unmask junk lane) for these entity types. Every other type
+# (IBAN, SIRET, SECU, EMAIL, TEL, NUM_*, LIEU_NAISSANCE, DATE_NAISSANCE,
+# RAISON_SOCIALE, URL, PIECE_IDENTITE, ...) is left MASKED, untouched — never
+# passed to classify_fn, never auto-unmasked. The judge is name-focused, so a
+# masked IBAN handed to it would be wrongly un-masked as "not a name"; this
+# allowlist makes that structurally impossible. RAISON_SOCIALE is deliberately
+# EXCLUDED (raison sociale = PII, keep masked).
+DEPOLLUTE_ALLOWLIST: frozenset[str] = frozenset({"NOM", "POSTE", "ADRESSE"})
+
 
 def _max_zipf(value: str) -> float:
     try:
@@ -70,6 +90,15 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
     junk: list[str] = []
     uncertain: list[str] = []
     for e in gaz.entries:
+        # Task 2 allowlist gate (applied to the WHOLE entry loop, BEFORE triage):
+        # only NOM/POSTE/ADRESSE entries may be de-polluted. Every other type is
+        # skipped entirely — it stays masked, is never triaged, never handed to
+        # classify_fn (name-focused judge), and never auto-unmasked by the junk
+        # lane. This is the P0 structural guarantee: no IBAN/SIRET/SECU/EMAIL/
+        # TEL/NUM_*/LIEU_NAISSANCE/DATE_NAISSANCE/RAISON_SOCIALE/URL/
+        # PIECE_IDENTITE entry can EVER be un-masked here.
+        if gaz.entity_type_of(e.value) not in DEPOLLUTE_ALLOWLIST:
+            continue
         t = triage(e.value)
         if t == "junk":
             junk.append(e.value)
@@ -109,20 +138,18 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
     return {"unmasked": unmasked, "kept": kept, "logged": logged}
 
 
-def daemon_classify(tokens, *, port: int = 8724, timeout: int = 30):
-    """Prod classify_fn: POST tokens to the local Gemma daemon.
+def _classify_chunk(chunk, *, port: int, timeout: int):
+    """POST ONE ≤DEPOLLUTE_CHUNK_SIZE-token chunk to the daemon.
 
-    Fail-toward-masking: ANY error (daemon down, timeout, non-200) → [] so the
-    pipeline leaves the uncertain entries masked.
+    Fail-toward-masking: ANY error (daemon down, timeout, non-200) → [] so this
+    chunk contributes NO verdicts and its tokens stay masked. Never raises.
     """
     import json, urllib.request
 
-    if not tokens:
-        return []
     try:
         req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/classify",
-            data=json.dumps({"tokens": list(tokens)}).encode(),
+            f"http://127.0.0.1:{port}/classify_extract",
+            data=json.dumps({"tokens": list(chunk)}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -131,3 +158,27 @@ def daemon_classify(tokens, *, port: int = 8724, timeout: int = 30):
             return json.loads(r.read()).get("results", [])
     except Exception:
         return []
+
+
+def daemon_classify(tokens, *, port: int = 8724, timeout: int = 30):
+    """Prod classify_fn: POST tokens to the local Gemma daemon, CHUNKED.
+
+    The batch is split into chunks of at most DEPOLLUTE_CHUNK_SIZE tokens; each
+    chunk is an independent /classify_extract request (`timeout` is now
+    per-chunk). The chunks' `results` lists are concatenated in input order.
+
+    Fail-toward-masking is preserved PER CHUNK: if one chunk's request errors /
+    times out / returns non-200, that chunk simply contributes NO verdicts (its
+    tokens are absent from the result → depollute keeps them masked) and the
+    remaining chunks still run. A partial failure NEVER un-masks a token it did
+    not get a clean GENERIQUE→MOT verdict for; it only ever removes tokens from
+    the MOT set. The whole pass is never aborted by one bad chunk.
+    """
+    if not tokens:
+        return []
+    toks = list(tokens)
+    results: list = []
+    for i in range(0, len(toks), DEPOLLUTE_CHUNK_SIZE):
+        chunk = toks[i : i + DEPOLLUTE_CHUNK_SIZE]
+        results.extend(_classify_chunk(chunk, port=port, timeout=timeout))
+    return results
