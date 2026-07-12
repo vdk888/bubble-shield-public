@@ -1,5 +1,24 @@
 # Changelog — bubble-shield
 
+## 1.23.1 — 2026-07-11 — DOCS: skills + README match the v1.23.0 read model
+
+Documentation-only release aligning the operator-facing docs with how v1.23.0
+actually reads. No engine change.
+
+- **Skills corrected.** `bubble-shield-anonymize` and `bubble-shield-onboarding`
+  previously told the assistant that `bubble_shield_read` "always returns
+  anonymised content / fails closed, never raw." Since v1.23.0 the read serves a
+  pre-computed masked **shadow** (zero models at read time): a hit returns the
+  masked copy, but a **miss** (a brand-new / never-indexed file) serves the raw
+  extracted text once and queues the file for the background sweep. The skills
+  now describe this honestly — including "do not assume a first read of a
+  brand-new document is masked; run the sweep or the batch flow first" — so the
+  assistant operates the tool with a correct mental model.
+- **README.** Added a "Shadow-index runtime" section explaining the background
+  sweep → shadow store → hash-serve read (and the accepted first-read-miss gap),
+  and removed the stale mail-triage section for a feature that is no longer part
+  of the product.
+
 ## 1.23.0 — 2026-07-11 — FEATURE: shadow-index runtime + de-pollution redesign
 
 Reads no longer run heavy PII models on the hot path. A background sweep

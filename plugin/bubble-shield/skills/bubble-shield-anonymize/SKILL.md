@@ -17,22 +17,44 @@ If a tool call was denied with a `🔒 Bubble Shield` message, do NOT try to byp
 
 The plugin ships an MCP tool **`bubble_shield_read`** (namespaced, e.g.
 `mcp__plugin_bubble-shield_bubble_shield__bubble_shield_read`, or just call it `bubble_shield_read`).
-Give it the blocked file's path and it returns the file's contents **already
-anonymised** (`⟦NOM_0001⟧`-style tokens) — the real names/IBANs/e-mails never
-enter your context. This is the preferred way to read a single protected file,
-**especially in Cowork**, where it's the mechanism that actually works (a normal
-Read of a protected file is blocked by design; `bubble_shield_read` is the sanctioned
-read).
+Give it the blocked file's path and it returns the file's contents with client
+PII replaced by `⟦NOM_0001⟧`-style tokens. This is the preferred way to read a
+single protected file, **especially in Cowork**, where it's the mechanism that
+actually works (a normal Read of a protected file is blocked by design;
+`bubble_shield_read` is the sanctioned read).
 
 ```
 bubble_shield_read(path="~/Dossiers-clients/dossier-dupont/contrat.pdf")
 → returns the cloaked text; work on THAT.
 ```
 
-It handles .pdf/.docx/.txt/.md/.csv/.json, uses the same vault as the rest of
-Bubble Shield (so tokens are consistent and reversible), and **fails closed** (returns
-an error, never raw text, if it can't anonymise). When your answer still carries
-`⟦…⟧` tokens, de-anonymise it locally (see "De-anonymise the answer" below).
+It handles .pdf/.docx/.txt/.md/.csv/.json, and uses the same vault as the rest of
+Bubble Shield (so tokens are consistent and reversible).
+
+### How `bubble_shield_read` works in this version — READ THIS
+
+Since v1.23.0 the read path is **fast by design (zero AI models at read time)**.
+It serves a **pre-computed masked copy** ("shadow") that a background **sweep**
+produces for every file in the protected folder. Two cases, and the difference
+matters for what protection is actually in effect:
+
+- **Already-indexed file (the normal case)** → served **fully masked** from its
+  shadow, instantly. This is what you get for any folder the sweep has processed.
+- **Brand-new / just-changed / never-indexed file** → **cache MISS**: the read
+  serves the **raw extracted text this one time** (no models run on the read
+  path — that is the deliberate speed trade-off), and queues the file so the
+  next sweep masks it. So the **first** read of a fresh document can contain PII
+  in clear until the sweep catches up.
+
+Practical consequence: **do not assume a first read of a brand-new document is
+masked.** For reliable masking on a new dossier, let the sweep index it first (or
+use the whole-folder batch flow below, which masks up front). A cheap safety net
+still runs on served shadows — any name already confirmed in the gazetteer is
+masked by exact-string replacement even on a hit — but that only covers
+already-known names, not first-time detections on an unindexed file.
+
+When your answer still carries `⟦…⟧` tokens, de-anonymise it locally (see
+"De-anonymise the answer" below).
 
 ### Whole-folder path — anonymise a batch into `clean/`
 
@@ -190,7 +212,14 @@ sample (the engine has none baked in; make up a plausible "Jean Dupont" record).
 
 - **Never bypass the guard.** No reading the raw file via an alternate tool.
 - **One vault per dossier** so the same client gets the same token across all files.
-- **Fail-closed:** if `safe_to_send` is false, flag it — do not treat the doc as safe.
+- **A first read of a brand-new file can be raw.** `bubble_shield_read` serves a
+  pre-computed masked shadow on a hit but the raw text on a miss (see "How
+  `bubble_shield_read` works" above). For a never-indexed dossier, run the sweep
+  or the whole-folder batch flow first if you need masking guaranteed on the
+  first pass — don't assume the first read is cloaked.
+- **Fail-closed (batch flow):** the whole-folder anonymisation below still runs
+  the full engine and fails closed. If `safe_to_send` is false, flag it — do not
+  treat the doc as safe.
 - **"Found nothing" ≠ "safe".** A substantial document with ZERO detections
   (`verdict_state == "zero_detection"`) is a CAUTION state, not a clean bill of
   health — the same recognizers that would flag a leak are the ones that found

@@ -461,11 +461,16 @@ into it. To **stop** protecting a folder: delete its marker.
 When the user wants the assistant to work on a real client file:
 
 - **One file (the quick path):** read it through the **`bubble_shield_read`** tool —
-  it returns the file's contents already anonymised (`⟦…⟧` tokens), so the real
-  data never reaches the model. This is the default way to open a single
-  protected file, and the path that works in Cowork (a plain read of a protected
-  file is blocked by design). Then work on what it returns; de-anonymise the
-  final answer locally.
+  it returns the file's contents with client data replaced by `⟦…⟧` tokens. This
+  is the default way to open a single protected file, and the path that works in
+  Cowork (a plain read of a protected file is blocked by design). Then work on
+  what it returns; de-anonymise the final answer locally.
+  - **One caveat (v1.23.0):** the read is fast because it serves a masked copy
+    prepared in the background for files the tool has already seen. A **brand-new
+    file** the tool hasn't processed yet can come back **not yet masked** on its
+    first read (it gets queued and masked right after). So for a new dossier,
+    prefer the whole-dossier batch below the first time — it masks everything up
+    front — rather than relying on the very first single-file read.
 - **A whole dossier (batch):** use the companion skill **`bubble-shield-anonymize`** —
   it handles PDFs and Word docs automatically and writes anonymised copies into a
   `clean/` sub-folder. Invoke that skill and work on the cloaked copies.
