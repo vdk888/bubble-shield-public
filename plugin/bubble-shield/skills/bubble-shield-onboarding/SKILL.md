@@ -148,19 +148,17 @@ Once directory access is granted / you have the path (never `~/.config` or `~`):
      "tripwire_enabled": true
    }
    ```
-2. **Register the folder as a protected root** so the background sweep indexes
-   it and the dashboard shows its coverage. Add the folder's ABSOLUTE path to
-   `protected_folders` in the guard config
-   `~/.config/bubble_shield/bubble-shield.json` (read-modify-write: load the
-   existing JSON, append the path to the `protected_folders` list if not already
-   there, keep every other key, write it back; create the file with
-   `{"protected_folders": ["<dossier>"]}` if it doesn't exist). This is the
-   single source of truth — the marker makes the guard block reads, and
-   `protected_folders` tells the sweep WHAT to index and the coverage panel WHAT
-   to report. Without this step the folder is guarded but never indexed (so its
-   files read raw until swept, and the dashboard shows 0 %).
-3. Confirm out loud:
-   > « ✓ Dossier marqué et enregistré. Tout fichier à l'intérieur est maintenant
+   **That single marker is all it takes.** It IS the source of truth: the guard
+   blocks reads by it, AND the background sweep + the dashboard coverage panel
+   **discover** the folder by scanning your usual roots (Documents, Desktop,
+   Dropbox, home…) for `.bubble-shield.json` markers. So a folder marked from
+   Cowork — where the sandbox can write the in-folder marker but CANNOT reach the
+   host `~/.config` — is still indexed and shown. Do **not** try to write to
+   `~/.config` from Cowork (it's refused, and it's unnecessary since v1.23.9).
+   You can mark **as many folders as you like**, each with its own marker; the
+   sweep indexes them all.
+2. Confirm out loud:
+   > « ✓ Dossier marqué. Tout fichier à l'intérieur est maintenant
    > dans le coffre — l'assistant ne peut plus l'ouvrir directement, et Bubble
    > Shield va l'indexer en arrière-plan (vous verrez la progression dans
    > « Contrôle & réglages »). »

@@ -43,38 +43,69 @@
   </section>
 
   <section class="about-block">
-    <h2>Comment il trouve les données sensibles — 4 couches</h2>
+    <h2>Comment il trouve les données sensibles — des couches qui se complètent</h2>
     <p>
       Le vrai défi n'est pas «&nbsp;trouver des noms&nbsp;» — c'est
       <strong>distinguer VOS clients du reste</strong> (votre cabinet, l'AMF, les
       sociétés de gestion sont partout dans un dossier, et ça, il ne faut
-      <em>pas</em> l'anonymiser). Quatre couches travaillent ensemble&nbsp;:
+      <em>pas</em> l'anonymiser). Chaque couche rattrape ce que la précédente rate&nbsp;:
     </p>
     <table class="about-table">
       <thead><tr><th>Couche</th><th>Ce qu'elle attrape</th><th>Comment</th></tr></thead>
       <tbody>
         <tr>
-          <td><strong>Motifs + clés de contrôle</strong></td>
-          <td>IBAN, n° fiscal, e-mail, n° de sécu, dates</td>
-          <td>Règles précises + vérification mathématique (un IBAN a une clé de contrôle — on la recalcule). <em>Certitude.</em></td>
+          <td><strong>Motifs + clés de contrôle</strong> <span class="tag">toujours active</span></td>
+          <td>IBAN, SIREN/SIRET, e-mail, n° de sécu, n° fiscal, téléphone, montants, dates</td>
+          <td>Règles précises + vérification mathématique (un IBAN a une clé de contrôle, on la recalcule&nbsp;; SIREN par la clé de Luhn). <em>Certitude, sans aucun modèle.</em></td>
         </tr>
         <tr>
-          <td><strong>IA locale</strong> <span class="tag">le cerveau</span></td>
-          <td>Noms, adresses, noms de famille, <strong>enfants</strong> — ce que les règles ne voient pas</td>
-          <td>Un petit modèle d'IA qui tourne <strong>sur votre Mac, hors ligne</strong>. Il comprend le contexte («&nbsp;ceci est une personne&nbsp;»).</td>
+          <td><strong>GLiNER</strong> <span class="tag">détection fine</span></td>
+          <td>Noms, prénoms, adresses, sociétés dans la prose — ce que les règles ne voient pas</td>
+          <td>Un petit modèle d'IA qui tourne <strong>sur votre Mac, hors ligne</strong>&nbsp;: il comprend le contexte («&nbsp;ceci est une personne&nbsp;») là où il n'y a pas de motif fixe.</td>
         </tr>
         <tr>
-          <td><strong>Lecture de formulaire</strong></td>
-          <td>Lieux de naissance, noms dans la mise en page des fiches KYC</td>
-          <td>Règles adaptées à la forme de vos documents métier</td>
+          <td><strong>Gemma</strong> <span class="tag">nettoyage + formulaires</span></td>
+          <td>Nettoie les fausses alertes&nbsp;; relit les fiches scannées / dégradées</td>
+          <td>Un second modèle local qui écarte le sur-masquage (pour ne pas masquer un mot courant pris pour un nom) et déchiffre les formulaires KYC mal reconnus.</td>
         </tr>
         <tr>
           <td><strong>Liste blanche cabinet</strong></td>
-          <td><em>Retire</em> REDACTEDFIRM, vos conseillers, l'AMF, les fonds…</td>
-          <td>Ce qui appartient au cabinet ou aux régulateurs n'est jamais anonymisé</td>
+          <td><em>Retire</em> le nom de votre cabinet, vos conseillers, l'AMF, les sociétés de gestion…</td>
+          <td>Ce qui appartient au cabinet ou aux régulateurs n'est jamais anonymisé.</td>
         </tr>
       </tbody>
     </table>
+    <p class="about-note">
+      GLiNER et Gemma forment le «&nbsp;pack précision&nbsp;» (installé une fois,
+      100&nbsp;% local). Sans lui, la couche «&nbsp;motifs&nbsp;» tourne quand même —
+      le pack ne fait qu'<em>ajouter</em> de la détection, jamais en retirer.
+    </p>
+  </section>
+
+  <section class="about-block">
+    <h2>Un dossier marqué — et l'indexation en arrière-plan</h2>
+    <p>
+      La protection s'active sur les <strong>dossiers que vous marquez</strong>
+      (vous pouvez en marquer <strong>autant que vous voulez</strong>&nbsp;; tout ce
+      qui est à l'intérieur, sous-dossiers compris, est protégé). Un dossier marqué
+      contient un petit fichier repère&nbsp;: l'assistant ne peut plus ouvrir ces
+      fichiers directement — il doit passer par l'anonymisation.
+    </p>
+    <p>
+      Pour rester <strong>rapide</strong>, Bubble Shield fait le gros du travail
+      <strong>en arrière-plan</strong>&nbsp;: un balayage régulier lit chaque fichier
+      du dossier protégé, l'anonymise une fois, et range la copie masquée dans un
+      index local. Ensuite, quand l'assistant lit un fichier, il reçoit
+      instantanément cette copie déjà masquée — sans relancer les modèles.
+    </p>
+    <p class="about-note">
+      Une précision honnête&nbsp;: un fichier <strong>tout neuf</strong>, que le
+      balayage n'a pas encore indexé, peut être lu en clair à sa
+      <strong>toute première lecture</strong>, le temps que l'index le rattrape.
+      Pour un nouveau dossier, laissez le balayage l'indexer d'abord (vous suivez
+      la progression dans «&nbsp;Contrôle &amp; réglages&nbsp;»), ou passez-le par
+      l'anonymisation groupée qui masque tout d'emblée.
+    </p>
   </section>
 
   <section class="about-block">
@@ -92,7 +123,7 @@
         <p class="ac-h">Auto-apprentissage dans le dossier</p>
         <p>
           Une fois «&nbsp;le client = Mme X&nbsp;» identifié, on réutilise cette
-          connaissance sur les 8 documents du dossier — y compris là où son nom
+          connaissance sur tous les documents du dossier — y compris là où son nom
           n'apparaît qu'en pied de page. Découvrir une fois, anonymiser partout,
           de façon <strong>cohérente</strong> (le même client, toujours le même jeton).
         </p>
@@ -137,7 +168,7 @@
     <ul class="about-list">
       <li><strong>100&nbsp;% local</strong> — pas d'appel réseau, pas de cloud, rien ne sort de la machine.</li>
       <li><strong>Réversible sans base parallèle</strong> — pas de second fichier clients à sécuriser.</li>
-      <li>Le coffre (noms ↔ jetons) <strong>ne quitte jamais votre poste</strong>, et il est <strong>chiffré au repos</strong>.</li>
+      <li>Le coffre (noms ↔ jetons) <strong>ne quitte jamais votre poste</strong> et reste en <strong>accès restreint à votre session</strong> (permissions fichier verrouillées).</li>
       <li>Même si votre prestataire IA était piraté demain, <strong>il n'aurait jamais vu de vrais noms</strong>.</li>
       <li><strong>Effacement &amp; expiration</strong>&nbsp;: on peut purger un client, et le coffre expire automatiquement.</li>
     </ul>
