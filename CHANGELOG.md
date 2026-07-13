@@ -1,5 +1,22 @@
 # Changelog — bubble-shield
 
+## 1.23.12 — 2026-07-13 — FIX: kill stale app workers on launch + explain a blocked scan
+
+- **fix(launcher) — the real cause of "the app shows old state after reinstall":**
+  ⌘Q closed the pywebview window but the uvicorn subprocess was reparented to
+  launchd (PPID 1) and kept serving PRE-UPDATE code on its old port; each reopen
+  spawned a new worker while the window reconnected to a zombie. `start()` now
+  reaps any stray `uvicorn webapp.app:app` worker before spawning, so every launch
+  self-heals. The reaper is narrow (matches our exact worker argv, never a bare
+  `uvicorn`) and never raises.
+- **fix(coverage panel) — "je ne peux pas lire vos dossiers" ≠ "aucun dossier
+  marqué":** the marker scan now reports a macOS Full-Disk-Access / TCC
+  PermissionError (e.g. on `Library/CloudStorage` where Dropbox lives) instead of
+  swallowing it. When the scan is blocked, the dashboard shows an actionable
+  prompt — grant Full Disk Access, quit & reopen — with a one-click
+  `/open-fda-settings` button, rather than the misleading empty state that a
+  Dropbox/iCloud user would otherwise hit.
+
 ## 1.23.11 — 2026-07-13 — FIX: the desktop app's coverage panel now discovers marked folders
 
 - **fix(app) — the missing half of v1.23.9:** the desktop app's coverage panel

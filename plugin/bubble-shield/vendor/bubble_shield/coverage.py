@@ -52,10 +52,16 @@ def _likely_scan_bases() -> list:
     return out
 
 
-def _scan_markers(base: Path, max_depth: int = 4, cap: int = 4000) -> list:
+def _scan_markers(base: Path, max_depth: int = 4, cap: int = 4000,
+                  access_errors: Optional[list] = None) -> list:
     """Bounded shallow scan under `base` for folders carrying a marker. Depth-
     and entry-capped so a huge tree can never stall this. Mirrors the guard's
-    _discover_marker_roots descent."""
+    _discover_marker_roots descent.
+
+    If `access_errors` is passed, PermissionError on a scandir is appended to it
+    (as the offending path str) so the caller can tell "blocked by macOS
+    Full-Disk-Access / TCC" apart from "scanned fine, found nothing". Other
+    OSErrors (a transient / non-dir entry) are still swallowed silently."""
     found = []
     try:
         stack = [(base, 0)]
@@ -66,6 +72,10 @@ def _scan_markers(base: Path, max_depth: int = 4, cap: int = 4000) -> list:
                 continue
             try:
                 entries = list(os.scandir(d))
+            except PermissionError:
+                if access_errors is not None:
+                    access_errors.append(str(d))
+                continue
             except OSError:
                 continue
             for e in entries:
@@ -89,16 +99,37 @@ def discover_protected_roots() -> list:
     from Cowork (which can write the in-folder marker but not host ~/.config) is
     still found. Config catches folders in unusual locations the bounded scan
     misses. Returns resolved paths, de-duplicated, order-stable."""
+    roots, _blocked = discover_protected_roots_detailed()
+    return roots
+
+
+def discover_protected_roots_detailed() -> "tuple[list, list]":
+    """Same discovery as discover_protected_roots(), but ALSO reports which
+    likely-roots the scan couldn't read because of a PermissionError.
+
+    Returns (roots, blocked_paths). `blocked_paths` is non-empty when macOS
+    Full-Disk-Access / TCC denied the app access to a client-dossier root (e.g.
+    ~/Library/CloudStorage where Dropbox lives). This lets the dashboard say
+    "je n'ai pas pu accéder à vos dossiers — autorisez l'Accès complet au
+    disque" instead of the misleading "aucun dossier marqué" — the two look
+    identical to the user otherwise."""
     roots = list(_config_protected_roots())
+    blocked: list = []
     for base in _likely_scan_bases():
-        roots.extend(_scan_markers(base))
+        roots.extend(_scan_markers(base, access_errors=blocked))
     seen, out = set(), []
     for r in roots:
         rs = str(r)
         if rs not in seen:
             seen.add(rs)
             out.append(rs)
-    return out
+    # De-dup blocked paths, order-stable.
+    bseen, bout = set(), []
+    for b in blocked:
+        if b not in bseen:
+            bseen.add(b)
+            bout.append(b)
+    return out, bout
 
 
 def coverage(root: str) -> dict:

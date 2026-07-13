@@ -44,6 +44,60 @@ def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False)) or hasattr(sys, "_MEIPASS")
 
 
+# ── orphan reaper ─────────────────────────────────────────────────────────────
+
+# The exact uvicorn target we spawn (see _build_cmd). We only ever kill a process
+# whose argv contains THIS string — never a bare "uvicorn" the user runs for
+# something else. Narrow on purpose: a false kill of an unrelated server is worse
+# than leaving a stray we didn't spawn.
+_WORKER_ARGV_MARKER = "uvicorn webapp.app:app"
+
+
+def _reap_orphan_workers() -> int:
+    """Kill any stray `uvicorn webapp.app:app` workers left by a prior unclean
+    exit (GUI force-quit → subprocess reparented to launchd, keeps serving stale
+    code). Returns the count signalled. Best-effort, never raises: a failure here
+    must not block a normal start.
+
+    macOS/Linux only (pgrep/kill). On Windows the dev subprocess path isn't used
+    for the shipped app, so this is a no-op there.
+    """
+    if sys.platform == "win32":
+        return 0
+    try:
+        # -f matches against full argv; the marker is specific to our worker.
+        out = subprocess.run(
+            ["pgrep", "-f", _WORKER_ARGV_MARKER],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return 0
+    pids = [int(p) for p in out.stdout.split() if p.strip().isdigit()]
+    # Never target our own process or the launcher itself.
+    pids = [p for p in pids if p != os.getpid()]
+    if not pids:
+        return 0
+    killed = 0
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    # Give them a moment, then SIGKILL any that ignored SIGTERM.
+    if killed:
+        time.sleep(0.6)
+        for pid in pids:
+            try:
+                os.kill(pid, 0)          # still alive?
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass                      # already gone — good
+    return killed
+
+
 # ── port helpers ──────────────────────────────────────────────────────────────
 
 _DEFAULT_PORT = 8765
@@ -180,6 +234,14 @@ class BubbleShieldServer:
         """
         if self._proc is not None or self._inproc is not None:
             raise RuntimeError("Server already running")
+
+        # Reap orphaned workers from a prior UNCLEAN exit BEFORE spawning a new
+        # one. If the GUI was force-quit (or ⌘Q didn't route through stop()), the
+        # uvicorn subprocess is reparented to launchd (PPID 1) and keeps serving
+        # STALE code on its old port. The window then reconnects to that zombie
+        # and shows pre-update state (e.g. an old coverage panel) even after a
+        # reinstall. Killing strays here makes every launch self-heal.
+        _reap_orphan_workers()
 
         self._port = find_free_port(self._preferred_port)
 

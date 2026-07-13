@@ -636,20 +636,36 @@ def _coverage_state() -> dict:
     """Sweep-index coverage for the dashboard: for each protected folder, how
     much has the background sweep already masked into the shadow store.
 
-    Returns {"configured": bool, "roots": [{"root", "total", "indexed", "pct",
-    "pending"}]}. Read-only; any error degrades to configured=False so the panel
-    just says 'no protected folder yet' rather than breaking the dashboard.
-    Why it matters: a not-yet-indexed file is served RAW on first read (the
+    Returns {"configured": bool, "access_blocked": bool, "blocked_paths": [...],
+    "roots": [{"root", "total", "indexed", "pct", "pending"}]}. Read-only; any
+    error degrades to configured=False so the panel just says 'no protected
+    folder yet' rather than breaking the dashboard.
+
+    `access_blocked` is True when the marker scan hit a macOS Full-Disk-Access /
+    TCC PermissionError on a likely client-dossier root (e.g. CloudStorage where
+    Dropbox lives) — so the panel can tell the user to grant access instead of
+    the misleading 'aucun dossier marqué'. Otherwise a Dropbox/iCloud user with
+    folders marked would see an empty panel and no reason why.
+
+    Why coverage matters: a not-yet-indexed file is served RAW on first read (the
     shadow-index miss gap), so the user should see when their folder is fully
     swept and safe to read fast + masked."""
-    roots = _protected_roots()
-    if not roots:
-        return {"configured": False, "roots": []}
-    out = []
     try:
         from bubble_shield import coverage as _cov
     except Exception:
-        return {"configured": False, "roots": []}
+        return {"configured": False, "access_blocked": False,
+                "blocked_paths": [], "roots": []}
+    try:
+        roots, blocked = _cov.discover_protected_roots_detailed()
+    except Exception:
+        return {"configured": False, "access_blocked": False,
+                "blocked_paths": [], "roots": []}
+    if not roots:
+        # No folders found. Distinguish "can't read your folders" (TCC) from
+        # "nothing marked" so the empty state is actionable, not a dead end.
+        return {"configured": False, "access_blocked": bool(blocked),
+                "blocked_paths": blocked, "roots": []}
+    out = []
     for r in roots:
         try:
             c = _cov.coverage(r)
@@ -663,7 +679,8 @@ def _coverage_state() -> dict:
         except Exception:
             out.append({"root": r, "total": 0, "indexed": 0,
                         "pct": 0.0, "pending": 0, "error": True})
-    return {"configured": True, "roots": out}
+    return {"configured": True, "access_blocked": bool(blocked),
+            "blocked_paths": blocked, "roots": out}
 
 
 def _save_gemma_mode(mode: str) -> bool:
@@ -795,6 +812,28 @@ def _render_dashboard(request: Request):
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     return _render_dashboard(request)
+
+
+@app.get("/open-fda-settings")
+def open_fda_settings(request: Request):
+    """Open macOS System Settings straight to the Full-Disk-Access pane, then
+    return the user to the dashboard. Shown when the coverage scan is TCC-blocked
+    (can't read CloudStorage/Dropbox) so the user can grant access in one click
+    instead of hunting through Settings. Best-effort + macOS-only; on any other
+    platform or failure we just bounce back to /dashboard."""
+    from fastapi.responses import RedirectResponse
+    import sys as _sys
+    import subprocess as _sp
+    if _sys.platform == "darwin":
+        try:
+            _sp.Popen([
+                "open",
+                "x-apple.systempreferences:com.apple.preference.security"
+                "?Privacy_AllFiles",
+            ])
+        except Exception:
+            pass
+    return RedirectResponse(url="/dashboard", status_code=303)
 
 
 @app.post("/dashboard/policy", response_class=HTMLResponse)
