@@ -135,10 +135,28 @@ def discover_protected_roots_detailed() -> "tuple[list, list]":
 def coverage(root: str) -> dict:
     root_p = Path(os.path.expanduser(root)).resolve()
     indexed = shadow_store.list_indexed()
-    files = [p for p in root_p.rglob("*") if p.is_file()]
+    # Count only real DOCUMENTS in `total` — exclude OS junk (.DS_Store), our own
+    # marker, and non-text media/binaries. Otherwise a folder with 30 real docs +
+    # 3 .DS_Store + 1 image reads as "30/34 · stuck" when it's actually complete.
+    # Uses the SAME ignore predicate the sweep uses, so panel + sweep agree on
+    # what counts as indexable.
+    try:
+        from bubble_shield.shadow_index import _is_ignorable
+    except Exception:
+        def _is_ignorable(_p):  # pragma: no cover - defensive fallback
+            return False
+    files = [p for p in root_p.rglob("*")
+             if p.is_file() and not _is_ignorable(p)]
     done, pending = 0, []
     for p in files:
-        if shadow_store.content_hash(p) in indexed:
+        try:
+            h = shadow_store.content_hash(p)
+        except OSError:
+            # Dataless/online-only placeholder — not yet counted as done, but not
+            # a hard failure either; list as pending so the panel shows it.
+            pending.append(str(p))
+            continue
+        if h in indexed:
             done += 1
         else:
             pending.append(str(p))

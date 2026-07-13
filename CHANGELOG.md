@@ -1,5 +1,23 @@
 # Changelog — bubble-shield
 
+## 1.23.15 — 2026-07-13 — FIX: stop counting OS junk as failures + reflect unmark fast
+
+- **fix(coverage "30/34 stuck") — OS junk was counted as failures:** a folder of
+  30 real docs + 3 `.DS_Store` + 1 scanned PDF read as "30/34 · en attente"
+  because `.DS_Store` (macOS folder metadata) has no extractable text, so the
+  sweep fail-closed it and coverage() counted it in the total. Now the sweep AND
+  coverage skip OS junk (`.DS_Store`, `Thumbs.db`, `desktop.ini`), our own marker,
+  and non-document media/binaries (images, archives, media) — so `total` is real
+  documents only and a complete folder reads ~100%. Stale pending rows from a
+  pre-fix sweep are cleared on the next pass (self-healing). A genuinely scanned
+  PDF still fails closed (correct — it needs manual handling rather than shipping
+  an unmasked scan).
+- **fix(panel reflects unmark quickly):** the panel reads the sweep snapshot,
+  which only rewrites every ~20 min — so UNmarking a folder left a stale row for
+  up to 20 min. The panel now drops snapshot roots whose `.bubble-shield.json`
+  marker no longer exists (a cheap stat, works without Full Disk Access),
+  reflecting an unmark on the next page load. Ambiguous (stat raises) → root kept.
+
 ## 1.23.14 — 2026-07-13 — FIX: coverage panel reads a sweep snapshot (no FDA) + daemon stampede
 
 - **fix(coverage panel) — no more Full-Disk-Access dead-end:** the desktop app

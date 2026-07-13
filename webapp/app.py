@@ -632,6 +632,33 @@ def _protected_roots() -> list[str]:
         return []
 
 
+def _reconcile_snapshot_roots(roots: list) -> list:
+    """Drop snapshot roots whose `.bubble-shield.json` marker no longer exists, so
+    UNmarking a folder reflects on the NEXT page load instead of waiting up to
+    20 min for the sweep to rewrite the snapshot.
+
+    Marker check is a single os.path.exists (a stat), NOT a directory scan — it
+    typically succeeds even where the app can't ENUMERATE the folder (the TCC
+    case). Conservative on ambiguity: if the stat itself raises (can't prove the
+    marker is gone), the root is KEPT — we only remove a root we can positively
+    confirm is unmarked. A root registered via config (no in-folder marker) is
+    also kept (we can't disprove it here)."""
+    from bubble_shield.coverage import MARKER_NAME
+    out = []
+    for r in roots:
+        root = r.get("root") if isinstance(r, dict) else None
+        if not root:
+            continue
+        marker = os.path.join(root, MARKER_NAME)
+        try:
+            gone = not os.path.exists(marker)
+        except OSError:
+            gone = False  # can't prove it's gone → keep it
+        if not gone:
+            out.append(r)
+    return out
+
+
 def _coverage_state() -> dict:
     """Sweep-index coverage for the dashboard: for each protected folder, how
     much has the background sweep already masked into the shadow store.
@@ -666,9 +693,13 @@ def _coverage_state() -> dict:
     except Exception:
         snap = None
     if snap is not None and snap.get("roots"):
-        return {"configured": True, "access_blocked": False,
-                "blocked_paths": [], "roots": snap["roots"],
-                "source": "sweep-snapshot"}
+        roots = _reconcile_snapshot_roots(snap["roots"])
+        if roots:
+            return {"configured": True, "access_blocked": False,
+                    "blocked_paths": [], "roots": roots,
+                    "source": "sweep-snapshot"}
+        # Every snapshot root has since been UNmarked → fall through to the live
+        # path, which will report "nothing marked" (configured=False).
 
     # 2) Fall back to a live scan (dev/CLI with disk access, or no sweep yet).
     try:

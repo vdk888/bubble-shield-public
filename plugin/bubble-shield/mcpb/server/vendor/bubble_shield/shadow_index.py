@@ -156,6 +156,42 @@ def _index_one_resilient(path: str, *, anonymize_fn) -> str:
             pass
         return "failed"
 
+# Files that are NOT documents and must never be treated as index candidates:
+# OS/tooling junk + Bubble Shield's own control files. Before this, a `.DS_Store`
+# (macOS folder-metadata junk) had no extractable text, so the sweep fail-closed
+# it and counted it as `failed` — inflating the "pending/failed" count and making
+# a folder look stuck (30/34) when the 4 "failures" were 3 `.DS_Store` + 1 real
+# scan. Skipping them is correct: they carry no client PII and can never index.
+_IGNORE_BASENAMES = frozenset({
+    ".DS_Store",          # macOS folder metadata
+    ".bubble-shield.json",  # our own protection marker
+    ".localized",         # macOS localized-folder marker
+    "Thumbs.db",          # Windows thumbnail cache
+    "desktop.ini",        # Windows folder config
+})
+# Extensions that are never text documents (images/media/archives/binaries) —
+# nothing to anonymise, so skip rather than fail-closed. OCR of scanned PDFs is
+# handled in the extract path; bare image files here are not client documents.
+_IGNORE_SUFFIXES = frozenset({
+    ".ds_store", ".log", ".tmp", ".lock", ".part", ".crdownload",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".heic", ".webp",
+    ".mp3", ".mp4", ".mov", ".wav", ".avi", ".mkv",
+    ".zip", ".gz", ".tar", ".7z", ".rar", ".dmg", ".pkg",
+    ".app", ".exe", ".dll", ".so", ".dylib",
+})
+
+
+def _is_ignorable(p: Path) -> bool:
+    """True for OS/tooling junk + non-document media/binaries that carry no
+    client text — these must be skipped (not fail-closed) so they don't inflate
+    the failed/pending count and make a folder look stuck."""
+    if p.name in _IGNORE_BASENAMES:
+        return True
+    if p.suffix.lower() in _IGNORE_SUFFIXES:
+        return True
+    return False
+
+
 def run_sweep(root: str, *, anonymize_fn, exts=None) -> dict:
     """Resumable folder walk: index new/changed files, skip already-indexed ones.
 
@@ -191,6 +227,16 @@ def run_sweep(root: str, *, anonymize_fn, exts=None) -> dict:
     for p in sorted(root_p.rglob("*")):
         try:
             if not p.is_file():
+                continue
+            if _is_ignorable(p):
+                # OS junk / media / our own marker — not a document. Skip WITHOUT
+                # counting as failed AND clear any stale pending row from a
+                # pre-fix sweep that fail-closed it, so the count self-heals.
+                try:
+                    shadow_store.clear_pending(str(
+                        Path(os.path.expanduser(str(p))).resolve()))
+                except Exception:
+                    pass
                 continue
             if exts and p.suffix.lower() not in exts:
                 continue
