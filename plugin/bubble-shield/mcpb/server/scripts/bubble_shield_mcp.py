@@ -2444,6 +2444,19 @@ def _handle(req: dict) -> None:
             elif name == "bubble_shield_mail_apply":
                 fail("⛔ Bubble Shield n'a pas pu appliquer les décisions e-mail. "
                      "Le contenu (brouillon / valeurs réelles) n'est PAS renvoyé (sécurité).")
+            elif name == "bubble_shield_list":
+                # bubble_shield_list does NO anonymisation — it just enumerates a
+                # folder's entries (names in clear). Labelling its failures
+                # "Échec de l'anonymisation" sent debugging down the wrong path
+                # (daemon? indexing?) when the real cause is a plain filesystem
+                # error (folder not found, unreadable, dataless cloud dir). Give
+                # an honest, actionable message + the exception TYPE (never str(e),
+                # which could quote a path/PII). Common cause: the folder doesn't
+                # exist (a mistyped path, e.g. "client" vs "clients").
+                fail("⛔ Bubble Shield n'a pas pu lister ce dossier "
+                     f"({type(e).__name__}). Vérifiez que le chemin existe et est "
+                     "lisible (dossier absent, non hydraté sur le cloud, ou "
+                     "permissions). Ce n'est PAS une erreur d'anonymisation.")
             else:
                 fail("⛔ Échec de l'anonymisation. "
                      "Le contenu brut n'est PAS renvoyé (sécurité).")

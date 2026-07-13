@@ -1,5 +1,17 @@
 # Changelog — bubble-shield
 
+## 1.23.17 — 2026-07-13 — FIX: honest error for bubble_shield_list (not "anonymisation")
+
+- **fix(bubble_shield_list) — misleading error label:** `bubble_shield_list` does
+  NO anonymisation (it just enumerates a folder's entries, names in clear). But
+  when it failed — e.g. a folder that doesn't exist (live case: a `client` vs
+  `clients` path typo) — the catch-all handler returned "⛔ Échec de
+  l'anonymisation", which sent debugging down a daemon/indexing rabbit hole even
+  though the NER daemon was healthy. Now list failures return an honest message
+  naming a listing/filesystem problem ("n'a pas pu lister ce dossier … dossier
+  absent, non hydraté, ou permissions") plus the exception TYPE. PII-safe: it
+  carries the exception type, never str(e) (which would echo the real path).
+
 ## 1.23.16 — 2026-07-13 — FIX: OCR a sparse-text-layer scanned PDF (liasse fiscale)
 
 - **fix(extraction) — mostly-scanned PDFs never indexed:** a liasse fiscale / KYC
