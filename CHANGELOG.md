@@ -1,5 +1,25 @@
 # Changelog — bubble-shield
 
+## 1.23.14 — 2026-07-13 — FIX: coverage panel reads a sweep snapshot (no FDA) + daemon stampede
+
+- **fix(coverage panel) — no more Full-Disk-Access dead-end:** the desktop app
+  runs through Apple's shared Python, so macOS won't attribute Full Disk Access to
+  "Bubble Shield" — the app's own disk scan of CloudStorage (where Dropbox lives)
+  is TCC-blocked and granting FDA to the app doesn't reach the reader. Fix: the
+  background sweep (a launchd agent that CAN read the folders) now writes a small
+  coverage snapshot to `~/.bubble_shield/coverage_state.json` (paths + counts
+  only, no PII), and the panel READS that snapshot instead of scanning the disk
+  itself. The panel is now FDA-independent and always reflects what the sweep
+  indexed. Falls back to a live scan only on a dev/CLI box or before the first
+  sweep. The misleading "grant Full Disk Access" prompt is removed.
+- **fix(NER daemon stampede) — memory blowup on a real Mac:** the NER daemon
+  loads GLiNER (~2.8GB resident) and takes seconds to warm. During a sweep
+  processing many files, every file that saw the daemon "not up yet" spawned
+  ANOTHER daemon — 6+ processes each loading the model (~17GB), thrashing swap on
+  a 16GB Mac. Added a spawn cooldown so at most ONE daemon starts per warm-up
+  window (`~/.bubble_shield/nerd-spawn.stamp`). A genuinely dead daemon is still
+  retried after the cooldown.
+
 ## 1.23.13 — 2026-07-13 — FIX: let the sweep index a plaintext store (v1)
 
 - **fix(sweep) — indexing was blocked by the parked encryption gate:** the

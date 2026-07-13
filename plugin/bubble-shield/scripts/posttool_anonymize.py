@@ -194,11 +194,50 @@ def _nerd_script() -> Path | None:
     return None
 
 
+# The NER daemon loads GLiNER (~2.8GB resident) and takes several seconds to
+# warm. During a SWEEP that processes many files back-to-back, every file whose
+# detector call sees the daemon "not up yet" would spawn ANOTHER daemon — a
+# stampede of 6+ processes each loading the model (17GB+), thrashing swap on a
+# 16GB Mac. This cooldown makes at most ONE spawn per warm-up window: a spawn
+# writes a timestamp; a spawn within COOLDOWN seconds of the last one is skipped
+# (the earlier daemon is still warming and will answer soon).
+_SPAWN_COOLDOWN_S = 45.0
+_SPAWN_STAMP = BUBBLE_SHIELD_HOME / "nerd-spawn.stamp"
+
+
+def _spawn_recently() -> bool:
+    """True if a daemon spawn was attempted within the last _SPAWN_COOLDOWN_S
+    seconds — i.e. one is still warming and we must NOT spawn a second. Best-
+    effort: a missing/unreadable stamp means 'no recent spawn' (allow one)."""
+    import time
+    try:
+        age = time.time() - _SPAWN_STAMP.stat().st_mtime
+        return age < _SPAWN_COOLDOWN_S
+    except OSError:
+        return False
+
+
+def _mark_spawn() -> None:
+    """Record a spawn attempt time (touch the stamp). Best-effort; a failure just
+    means the next call might spawn a redundant daemon — not fatal, only wasteful."""
+    try:
+        BUBBLE_SHIELD_HOME.mkdir(parents=True, exist_ok=True)
+        _SPAWN_STAMP.touch()
+    except OSError:
+        pass
+
+
 def _try_spawn_daemon() -> None:
     """If the ML pack is installed but the daemon isn't running, start it
     detached (safety net for the LaunchAgent). Best-effort, never blocks: we
     spawn and return immediately; the model warms in the background, so THIS
-    call still falls back to regex, but the NEXT tool result gets ML."""
+    call still falls back to regex, but the NEXT tool result gets ML.
+
+    Guarded by a spawn cooldown so a burst of calls during warm-up (e.g. a sweep
+    indexing many files) can't stack multiple model-loading daemons — that's the
+    fix for the 6×2.8GB memory blowup."""
+    if _spawn_recently():
+        return  # one is already warming; don't stack another model load
     manifest = BUBBLE_SHIELD_HOME / "ml.json"
     if not manifest.is_file():
         return  # ML pack not installed → nothing to start
@@ -213,6 +252,9 @@ def _try_spawn_daemon() -> None:
         import subprocess
         env = dict(os.environ)
         env["BUBBLE_SHIELD_HOME"] = str(BUBBLE_SHIELD_HOME)
+        # Mark BEFORE the Popen so a racing caller in the same window is blocked
+        # even if the spawn itself is slow to return.
+        _mark_spawn()
         subprocess.Popen(
             [vpy, str(nerd), "--port", str(NERD_PORT)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

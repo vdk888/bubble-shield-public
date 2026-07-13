@@ -232,6 +232,34 @@ def main(argv=None) -> int:
         print("sweep done -- roots {} indexed {} skipped {} deferred {} failed {}".format(
             len(roots), totals["indexed"], totals["skipped"],
             totals["deferred"], totals["failed"]))
+
+        # Persist a coverage SNAPSHOT the desktop app can read WITHOUT Full Disk
+        # Access. The sweep (this launchd process) has already read every root to
+        # index it, so it can compute coverage here; the GUI app — which runs
+        # through Apple's shared Python and can't get FDA to CloudStorage — then
+        # reads this snapshot instead of re-scanning the disk. Best-effort: a
+        # failed snapshot must not fail the sweep. Paths + counts only, no PII.
+        try:
+            from bubble_shield import coverage as _covmod
+            from bubble_shield import coverage_state as _cst
+            snap = []
+            for root in roots:
+                try:
+                    c = _covmod.coverage(root)
+                    snap.append({
+                        "root": root,
+                        "total": c.get("total", 0),
+                        "indexed": c.get("indexed", 0),
+                        "pct": round(c.get("pct", 0.0), 1),
+                        "pending": len(c.get("pending_files", [])),
+                    })
+                except Exception:
+                    snap.append({"root": root, "total": 0, "indexed": 0,
+                                 "pct": 0.0, "pending": 0, "error": True})
+            _cst.write_state(snap)
+        except Exception:
+            pass  # snapshot is best-effort; the sweep itself already succeeded
+
         return 0
     finally:
         shadow_index.release_lock()

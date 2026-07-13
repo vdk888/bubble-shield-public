@@ -647,9 +647,30 @@ def _coverage_state() -> dict:
     the misleading 'aucun dossier marqué'. Otherwise a Dropbox/iCloud user with
     folders marked would see an empty panel and no reason why.
 
+    PREFERRED SOURCE — the sweep's snapshot (FDA-free). The desktop app runs
+    through Apple's shared Python and can't get Full Disk Access to CloudStorage,
+    so its OWN disk scan is TCC-blocked. The background SWEEP (a launchd agent
+    whose disk access can be granted independently) already reads the folders to
+    index them, and writes a coverage snapshot to ~/.bubble_shield/. We read THAT
+    first: it needs no FDA and reflects exactly what the sweep indexed. We only
+    fall back to a live disk scan when there is no snapshot yet (first run before
+    any sweep) — correct on a dev/CLI box that DOES have disk access.
+
     Why coverage matters: a not-yet-indexed file is served RAW on first read (the
     shadow-index miss gap), so the user should see when their folder is fully
     swept and safe to read fast + masked."""
+    # 1) Prefer the sweep's snapshot (no Full Disk Access needed).
+    try:
+        from bubble_shield import coverage_state as _cst
+        snap = _cst.read_state()
+    except Exception:
+        snap = None
+    if snap is not None and snap.get("roots"):
+        return {"configured": True, "access_blocked": False,
+                "blocked_paths": [], "roots": snap["roots"],
+                "source": "sweep-snapshot"}
+
+    # 2) Fall back to a live scan (dev/CLI with disk access, or no sweep yet).
     try:
         from bubble_shield import coverage as _cov
     except Exception:

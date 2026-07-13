@@ -34,31 +34,16 @@
 <section class="dash-coverage">
   <h2 class="dash-h">Indexation du dossier protégé</h2>
   {% if not coverage or not coverage.configured %}
-    {% if coverage and coverage.access_blocked %}
-    <div class="cov-blocked">
-      <p class="dash-help">
-        <strong>Je n'arrive pas à lire vos dossiers.</strong> macOS bloque l'accès
-        de Bubble Shield à l'emplacement où sont vos dossiers clients (souvent
-        Dropbox&nbsp;/ iCloud, dans <code>Library/CloudStorage</code>). Vos dossiers
-        sont peut-être bien marqués — je ne peux simplement pas les voir tant que
-        l'autorisation manque.
-      </p>
-      <p class="dash-help">
-        <strong>Pour corriger&nbsp;:</strong> Réglages Système →
-        <em>Confidentialité et sécurité</em> → <em>Accès complet au disque</em> →
-        activez <strong>Bubble Shield</strong> (ajoutez-le avec «&nbsp;+&nbsp;» s'il
-        n'y est pas), puis <strong>quittez et rouvrez</strong> l'application.
-      </p>
-      <p class="dash-actions">
-        <a class="btn" href="/open-fda-settings">Ouvrir le réglage d'accès disque</a>
-      </p>
-    </div>
-    {% else %}
     <p class="dash-help">
-      Aucun dossier protégé configuré pour l'instant. Une fois un dossier marqué,
-      Bubble Shield l'indexe en arrière-plan — vous verrez ici la progression.
+      Aucun dossier indexé pour l'instant. Dès qu'un dossier est marqué comme
+      protégé, Bubble Shield l'indexe <strong>en arrière-plan</strong> (un
+      balayage tourne régulièrement) et vous verrez ici la progression.
     </p>
-    {% endif %}
+    <p class="dash-help">
+      Si vous venez de marquer un dossier, laissez au balayage le temps de passer
+      (il tourne à l'ouverture puis à intervalle régulier) — la progression
+      apparaîtra ici automatiquement, sans réglage à faire.
+    </p>
   {% else %}
     <p class="dash-help">
       Bubble Shield indexe vos dossiers en arrière-plan. Un fichier
