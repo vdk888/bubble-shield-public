@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.23.13 — 2026-07-13 — FIX: let the sweep index a plaintext store (v1)
+
+- **fix(sweep) — indexing was blocked by the parked encryption gate:** the
+  background sweep refused to run without `BUBBLE_SHIELD_STORE_PASSPHRASE` (it
+  won't write real client names to a plaintext store). But v1 accepts a plaintext
+  store (chmod 600) — encryption-at-rest is parked — so that hard refuse blocked
+  ALL indexing (coverage stuck at 0, folders never swept). The refuse is now
+  opt-out: set `BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1` (which the sweep
+  LaunchAgent now sets by default) to index a plaintext store. Without either a
+  passphrase OR the flag, the sweep still refuses — an encryption-intending
+  deployment isn't silently downgraded. Only the exact value `1` opts in.
+- **fix(launchd):** the sweep plist now carries `EnvironmentVariables`
+  (`BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1` + `BUBBLE_SHIELD_HOME`), since launchd
+  doesn't inherit the shell env.
+
 ## 1.23.12 — 2026-07-13 — FIX: kill stale app workers on launch + explain a blocked scan
 
 - **fix(launcher) — the real cause of "the app shows old state after reinstall":**

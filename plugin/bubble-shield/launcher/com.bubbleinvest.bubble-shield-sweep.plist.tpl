@@ -27,6 +27,16 @@
     <string>__PYTHON__</string>
     <string>__APP_DIR__/plugin/bubble-shield/scripts/bubble_shield_sweep.py</string>
   </array>
+  <!-- v1 (2026-07-13): encryption-at-rest is PARKED; v1 ships a plaintext store
+       (chmod 600). The sweep refuses to write plaintext unless the operator
+       opts in — so we set the opt-in here. Without it the sweep would refuse and
+       NOTHING would ever get indexed. launchd does NOT inherit the shell env, so
+       BUBBLE_SHIELD_HOME is set explicitly too (the store/log paths need it). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE</key><string>1</string>
+    <key>BUBBLE_SHIELD_HOME</key><string>__HOME__/.bubble_shield</string>
+  </dict>
   <key>StartInterval</key><integer>__INTERVAL__</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>__HOME__/.bubble_shield/sweep.log</string>

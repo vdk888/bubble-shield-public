@@ -47,13 +47,31 @@ PLUGIN_ROOT = Path(os.environ.get(
 
 # Env var carrying the machine-local passphrase for the shadow store at rest.
 # Must match shadow_store._PASSPHRASE_ENV — if unset/empty, the store writes
-# plaintext, which the sweep (the prod writer) MUST refuse.
+# plaintext.
 _PASSPHRASE_ENV = "BUBBLE_SHIELD_STORE_PASSPHRASE"
+
+# v1 DECISION (2026-07-13): encryption-at-rest for the shadow store is PARKED;
+# v1 ships accepting a PLAINTEXT store (chmod-600). The sweep is the store's prod
+# writer, so it historically REFUSED to run without a passphrase (would write real
+# client names to a plaintext SQLite file). With plaintext accepted for v1, that
+# refuse now BLOCKS indexing entirely — nothing ever gets swept. So the refuse
+# becomes OPT-OUT: set BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1 to let the sweep run
+# against a plaintext store (the v1 default the installer sets). Without either a
+# passphrase OR this flag, the sweep still refuses — so a deployment that WANTS
+# encryption isn't silently downgraded.
+_ALLOW_PLAINTEXT_ENV = "BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE"
 
 _NO_PASSPHRASE_ERROR = (
     "Bubble Shield — le coffre chiffré n'est pas configuré "
-    "(BUBBLE_SHIELD_STORE_PASSPHRASE absent). Le balayage est annulé pour ne "
-    "pas écrire les données en clair."
+    "(BUBBLE_SHIELD_STORE_PASSPHRASE absent) et le mode clair n'est pas autorisé "
+    "(BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE≠1). Le balayage est annulé pour ne pas "
+    "écrire les données en clair sans consentement explicite."
+)
+
+_PLAINTEXT_ACCEPTED_NOTE = (
+    "Bubble Shield — coffre en clair accepté pour cette version "
+    "(BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1) : le balayage indexe en clair, "
+    "protégé par les permissions du fichier (chmod 600)."
 )
 
 
@@ -88,6 +106,13 @@ def _passphrase_configured() -> bool:
     """True iff BUBBLE_SHIELD_STORE_PASSPHRASE is set to a non-empty value —
     mirrors shadow_store._passphrase()'s truthiness check exactly."""
     return bool(os.environ.get(_PASSPHRASE_ENV))
+
+
+def _plaintext_store_allowed() -> bool:
+    """True iff the operator explicitly opted into a plaintext store at rest via
+    BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1 (the v1 accepted-plaintext decision).
+    Only exact '1' counts — no accidental truthiness from an arbitrary value."""
+    return os.environ.get(_ALLOW_PLAINTEXT_ENV, "").strip() == "1"
 
 
 def _configured_protected_roots() -> list:
@@ -126,7 +151,9 @@ def main(argv=None) -> int:
     """Run one background sweep. Returns a process exit code.
 
     0  = success (sweep ran) OR safe no-op (another sweep already holds the lock)
-    1  = REFUSED: encrypted store not configured (would write plaintext PII)
+    1  = REFUSED: no passphrase AND plaintext not explicitly allowed
+         (BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE≠1) — would write plaintext PII
+         without consent.
     """
     parser = argparse.ArgumentParser(
         prog="bubble_shield_sweep",
@@ -140,13 +167,18 @@ def main(argv=None) -> int:
              "protected. --root is kept for a one-off manual sweep of a path.")
     args = parser.parse_args(argv)
 
-    # GATE 1 — refuse-plaintext (Task 4 review, hard guard). BEFORE anything
-    # touches the store: the sweep is the prod writer and must not persist the
-    # document base's real client names to a plaintext SQLite store. stderr +
-    # nonzero exit, nothing written.
+    # GATE 1 — plaintext-store policy. The sweep is the store's prod writer. If a
+    # passphrase is set the store is encrypted (best). If not, v1 accepts a
+    # plaintext store ONLY when the operator opted in via
+    # BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1 — then the sweep proceeds and logs a
+    # clear note. With neither, it still refuses (exit 1, nothing written) so an
+    # encryption-intending deployment isn't silently downgraded.
     if not _passphrase_configured():
-        sys.stderr.write(_NO_PASSPHRASE_ERROR + "\n")
-        return 1
+        if _plaintext_store_allowed():
+            sys.stderr.write(_PLAINTEXT_ACCEPTED_NOTE + "\n")
+        else:
+            sys.stderr.write(_NO_PASSPHRASE_ERROR + "\n")
+            return 1
 
     _wire_paths()
 
