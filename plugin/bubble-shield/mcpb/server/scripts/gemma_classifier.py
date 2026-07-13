@@ -129,6 +129,22 @@ class GemmaClassifier:
     def warm_up(self) -> None:
         from mlx_lm import load
         self._model, self._tok = load(self.model_id)
+        # Loading weights is NOT enough: the FIRST generate() of each distinct
+        # prompt shape pays the full MLX graph-compile / first-token cost (several
+        # seconds), which made the first real request per sweep TIME OUT even
+        # though /health reported warm. Prime BOTH inference paths with a tiny
+        # dummy generate so the graphs are compiled here, at warm time — not on
+        # the first client document. classify and extract_pii use DIFFERENT
+        # prompts, so we must prime each. Best-effort: a priming failure must not
+        # block the daemon (it still serves, just cold on the first real call).
+        try:
+            self.classify(["Dupont"])
+        except Exception:
+            pass
+        try:
+            self.extract_pii("Nom: DUPONT")
+        except Exception:
+            pass
         self.warm = True
 
     def classify(self, tokens):

@@ -234,10 +234,18 @@ def _warm_daemons() -> None:
         # NER: a trivial detect warms GLiNER.
         _warm_one("nerd", _NERD_PORT,
                   {"text": "Monsieur Jean Dupont"}, "/detect")
-        # Gemma ships with the ML pack (ml.json). If gemmad isn't actually up, the
-        # health probe returns None and _warm_one bails fast — safe.
+        # Gemma: warm via /extract_pii — the MASKING second-pass path (the one
+        # that fires on structured forms / scanned liasses). This matters two
+        # ways: (1) the previous warm hit /classify with a MALFORMED payload
+        # ({"text":...} where /classify wants {"tokens":[...]}) so it never ran a
+        # real inference; (2) /classify and /extract_pii are DIFFERENT prompts —
+        # priming one doesn't compile the other's MLX graph. Hitting /extract_pii
+        # with a real {"text":...} triggers the daemon's warm_up (which now primes
+        # BOTH classify + extract_pii inference) so the FIRST real form the sweep
+        # processes doesn't pay the cold-compile cost and time out. The generous
+        # warm timeout absorbs that one-time cost on this throwaway request.
         _warm_one("gemmad", _GEMMAD_PORT,
-                  {"text": "Dupont", "entity_type": "NOM"}, "/classify")
+                  {"text": "Nom: DUPONT\nNé le: 01/01/1980"}, "/extract_pii")
     except Exception:
         # Warming is best-effort; a failure must never abort the sweep. Files that
         # needed the model just stay pending and retry next sweep.

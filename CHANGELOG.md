@@ -1,5 +1,24 @@
 # Changelog — bubble-shield
 
+## 1.23.21 — 2026-07-13 — FIX: Gemma masking pass reliably warm (no cold-start timeout)
+
+- **fix(gemma masking) — the /extract_pii second-pass timed out on the first form
+  per sweep:** the Gemma masking pass (extract_pii, which fires on structured
+  forms / scanned liasses to catch PII the GLiNER floor misses) kept timing out on
+  its FIRST request even though /health said warm. Two causes, both fixed:
+  1. `warm_up()` only ran `load(model)` — it never ran a generate(), so the first
+     real inference paid the full MLX graph-compile cost. And classify vs
+     extract_pii use different prompts, so one didn't prime the other. warm_up now
+     runs a dummy classify AND a dummy extract_pii, compiling both graphs at warm
+     time; `warm=True` is set only after, so /health warm:true means genuinely
+     primed.
+  2. The sweep's Gemma warm request hit /classify with a MALFORMED payload
+     ({"text":...} where /classify wants {"tokens":[...]}) — so it never ran a real
+     inference. It now hits /extract_pii (the masking path) with a real {"text":…},
+     so the sweep primes the masking graph before processing the first form.
+  Proven: cold gemmad → warm request 13s (absorbs compile) → first real form 4s
+  with all spans (was: timeout → fell back to GLiNER-floor, un-verified form).
+
 ## 1.23.20 — 2026-07-13 — FIX: sweep logs indexed files to the audit (stats reflect reality)
 
 - **fix(dashboard stats) — the cards were frozen at week-old test data:** the
