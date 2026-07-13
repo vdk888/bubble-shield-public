@@ -288,6 +288,53 @@ def list_indexed() -> set:
         conn.close()
         _drop_working_copy()
 
+
+# Mask-token shape ⟦TYPE_id⟧ — mirrors vault.TOKEN_RE. Used to derive per-type
+# entity counts from stored cloaked text for the dashboard stats.
+import re as _re
+_STATS_TOKEN_RE = _re.compile(r"⟦([A-Z_]+)_(\d{4,}[a-z]?)⟧")
+
+
+def stats() -> dict:
+    """Live dashboard stats derived from the SHADOW STORE — the current truth of
+    what is indexed — rather than the append-only audit log (which only recorded
+    the old interactive path and missed all background-sweep indexing, so the
+    cards froze).
+
+    Returns:
+      {"indexed_files": int,              # rows in the shadow store
+       "entity_totals": {TYPE: count},    # DISTINCT ⟦TYPE_id⟧ tokens summed across
+                                          #   all files (same client repeated in one
+                                          #   file = one token; counted per file so
+                                          #   the total reflects masked entities)
+       "total_entities": int}            # sum of entity_totals
+
+    NO PII: reads only the cloaked_text's token TYPE + numeric id, never a value.
+    Best-effort: any error yields zeros (the panel degrades, never crashes)."""
+    from collections import Counter
+    totals: "Counter[str]" = Counter()
+    n_files = 0
+    conn = connect()
+    try:
+        for (clean_text,) in conn.execute("SELECT clean_text FROM shadows"):
+            n_files += 1
+            # distinct (type,id) within THIS file, then add to the running totals
+            per_file = {}
+            for m in _STATS_TOKEN_RE.finditer(clean_text or ""):
+                per_file.setdefault(m.group(1), set()).add(m.group(2))
+            for etype, ids in per_file.items():
+                totals[etype] += len(ids)
+    except Exception:
+        return {"indexed_files": 0, "entity_totals": {}, "total_entities": 0}
+    finally:
+        conn.close()
+        _drop_working_copy()
+    return {
+        "indexed_files": n_files,
+        "entity_totals": dict(totals.most_common()),
+        "total_entities": sum(totals.values()),
+    }
+
 def mark_pending(src_path: str) -> None:
     """Queue a source file for the shadow-index sweep (Task 5's read-miss path
     calls this). A WRITE, so it mirrors put_shadow EXACTLY: connect → write →

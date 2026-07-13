@@ -1,5 +1,19 @@
 # Changelog — bubble-shield
 
+## 1.23.22 — 2026-07-13 — FIX: dashboard stats from the shadow store (no longer frozen)
+
+- **fix(dashboard stats) — the cards showed week-old numbers:** the stats cards
+  (anonymisations / masked / type badges) read the append-only audit log, which
+  only recorded the OLD interactive path — so once indexing moved to the
+  background sweep, the cards froze (e.g. "3 anonymisations" while 34 files were
+  actually indexed with 647 masked entities). Fix: VOLUME stats now come from the
+  SHADOW STORE — the current truth — via `shadow_store.stats()` (files indexed +
+  distinct ⟦TYPE_id⟧ tokens per type across all cloaked copies; no PII, only the
+  token TYPE is read). RISK signals (unsafe/errors/reveals) stay from the audit.
+  `_merge_store_stats` lets the store lead on volume once anything is indexed, and
+  degrades to the audit if the store is empty/unavailable. The cards now reflect
+  the real indexed base.
+
 ## 1.23.21 — 2026-07-13 — FIX: Gemma masking pass reliably warm (no cold-start timeout)
 
 - **fix(gemma masking) — the /extract_pii second-pass timed out on the first form

@@ -659,6 +659,37 @@ def _reconcile_snapshot_roots(roots: list) -> list:
     return out
 
 
+def _merge_store_stats(audit_stats: dict, store_stats: dict) -> dict:
+    """Merge the shadow-store stats (current indexed truth) into the audit-derived
+    summary. The audit froze because background-sweep indexing never logged there;
+    the store knows every indexed file + its masked entity types. So:
+
+      - VOLUME (how much is protected): from the STORE — `indexed_files` becomes
+        `total_runs`, `entity_totals`/`total_entities` from the store's tokens.
+      - RISK/VERDICT (unsafe sends, errors, reveals, recent list, safe_rate):
+        kept from the AUDIT — the store doesn't track verdicts.
+      - `has_data` is true if EITHER source has anything.
+
+    Non-destructive: if the store is empty (no indexing yet), the audit numbers
+    stand. Never raises — a bad store dict degrades to the audit stats."""
+    if not isinstance(store_stats, dict):
+        return audit_stats
+    out = dict(audit_stats)
+    indexed = int(store_stats.get("indexed_files", 0) or 0)
+    if indexed > 0:
+        # The store IS the truth for volume once anything is indexed.
+        out["total_runs"] = indexed
+        out["total_entities"] = int(store_stats.get("total_entities", 0) or 0)
+        out["entity_totals"] = store_stats.get("entity_totals", {}) or {}
+        # safe_runs tracks total_runs when the store leads (indexed files passed
+        # the fail-closed pipeline); unsafe/errors stay from the audit.
+        unsafe = int(audit_stats.get("unsafe_runs", 0) or 0)
+        out["safe_runs"] = max(0, indexed - unsafe)
+        out["safe_rate"] = round((out["safe_runs"] / indexed), 3) if indexed else 0.0
+    out["has_data"] = bool(indexed) or bool(audit_stats.get("has_data"))
+    return out
+
+
 def _coverage_state() -> dict:
     """Sweep-index coverage for the dashboard: for each protected folder, how
     much has the background sweep already masked into the shadow store.
@@ -838,7 +869,17 @@ def _render_dashboard(request: Request):
     from webapp.dashboard import summarize
     from bubble_shield.policy import load_policy, extended_policy_view
 
+    # Stats = audit (risk signals: unsafe/errors/reveals) MERGED with the shadow
+    # store (the current truth of what's indexed). The audit alone froze because
+    # background-sweep indexing never logged there; the store knows every indexed
+    # file + its masked entity types. So: coverage/volume numbers come from the
+    # store; risk/verdict numbers stay from the audit. See _merge_store_stats.
     stats = summarize(read_audit(AUDIT_LOG))
+    try:
+        from bubble_shield import shadow_store as _ss
+        stats = _merge_store_stats(stats, _ss.stats())
+    except Exception:
+        pass  # store unavailable → fall back to audit-only stats (never crash)
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
