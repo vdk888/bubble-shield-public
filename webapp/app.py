@@ -866,6 +866,17 @@ def dashboard(request: Request):
     return _render_dashboard(request)
 
 
+@app.get("/api/coverage")
+def api_coverage(request: Request):
+    """JSON coverage snapshot for the dashboard's live auto-refresh. Reads the
+    sweep snapshot (fast, no models, no disk scan) so the panel can poll this
+    every ~20s and update itself in place — the coverage % changes only when a
+    background sweep completes, so the page no longer needs a manual reload to
+    show fresh progress."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_coverage_state())
+
+
 @app.get("/open-fda-settings")
 def open_fda_settings(request: Request):
     """Open macOS System Settings straight to the Full-Disk-Access pane, then

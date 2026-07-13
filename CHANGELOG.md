@@ -1,5 +1,21 @@
 # Changelog — bubble-shield
 
+## 1.23.18 — 2026-07-13 — FIX: sweep warms its own daemons + live coverage panel
+
+- **fix(sweep) — the last holdout to 100% indexing:** the NER + Gemma daemons
+  idle-shutdown after 10 min, but the sweep runs every 20 min — so the daemons
+  were ALWAYS dead when the sweep fired, and any file needing the model (a scanned
+  liasse fiscale → OCR+GLiNER+Gemma) fail-closed on EVERY sweep and never indexed
+  (the 20-min cron DID fire; the daemons were down). The sweep now WARMS its
+  daemons before processing: spawn if needed → one real request to load the lazy
+  `--no-warm` model → poll /health until warm. Bounded + best-effort: a dead port
+  is abandoned in ~20s (not the full timeout), and warming never aborts the sweep.
+- **feat(dashboard) — live coverage refresh:** the coverage panel now auto-updates
+  without a manual page reload. New `GET /api/coverage` (JSON snapshot, no models)
+  is polled every ~20s and the panel is rebuilt in place — so background-sweep
+  progress appears on its own. (Coverage changes only when a sweep completes, so a
+  20s poll is ample and costs ~nothing — a local snapshot read.)
+
 ## 1.23.17 — 2026-07-13 — FIX: honest error for bubble_shield_list (not "anonymisation")
 
 - **fix(bubble_shield_list) — misleading error label:** `bubble_shield_list` does

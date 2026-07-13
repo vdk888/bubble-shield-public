@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -113,6 +114,103 @@ def _plaintext_store_allowed() -> bool:
     BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1 (the v1 accepted-plaintext decision).
     Only exact '1' counts — no accidental truthiness from an arbitrary value."""
     return os.environ.get(_ALLOW_PLAINTEXT_ENV, "").strip() == "1"
+
+
+# Daemon endpoints (mirror posttool_anonymize / bubble_shield_gemmad defaults).
+_NERD_PORT = int(os.environ.get("BUBBLE_SHIELD_NERD_PORT", "8723"))
+_GEMMAD_PORT = int(os.environ.get("BUBBLE_SHIELD_GEMMAD_PORT", "8724"))
+_WARM_TIMEOUT_S = float(os.environ.get("BUBBLE_SHIELD_SWEEP_WARM_TIMEOUT", "180"))
+
+
+def _http_json(url, payload=None, timeout=5):
+    """Tiny stdlib POST/GET returning parsed JSON or None. Never raises."""
+    import json as _json
+    import urllib.request
+    try:
+        if payload is None:
+            req = urllib.request.Request(url, method="GET")
+        else:
+            req = urllib.request.Request(
+                url, data=_json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _json.load(r)
+    except Exception:
+        return None
+
+
+def _warm_one(name, port, warm_payload, warm_path):
+    """Spawn (if needed) + warm ONE daemon, waiting until /health reports warm
+    (or a bounded timeout). Best-effort: logs and returns, never raises.
+
+    The daemons run `--no-warm` (lazy): the LaunchAgent opens the port fast but
+    the model loads on the FIRST real request. So we: (1) make sure the port is
+    up (spawn via the shared posttool helper if not), (2) fire one real request
+    to trigger the model load, (3) poll /health until warm."""
+    base = f"http://127.0.0.1:{port}"
+
+    # 1) Ensure the daemon process is up (spawn if the port is dead). Reuse the
+    #    hardened spawn (cooldown + ml-pack check) from posttool_anonymize.
+    if _http_json(base + "/health", timeout=1) is None:
+        try:
+            import posttool_anonymize as _pt
+            # posttool only spawns the NER daemon; gemmad relies on its own
+            # LaunchAgent. If a daemon can't be brought up, we bail fast below
+            # rather than block the whole warm timeout on a dead port.
+            if port == _NERD_PORT:
+                _pt._try_spawn_daemon()
+        except Exception:
+            pass
+
+    # 2) Fire one real request to trigger the lazy model load, then 3) poll warm.
+    #    Two bounded phases: PORT_WAIT for the port to answer /health at all, then
+    #    the model-load wait. A dead port that never answers is abandoned in
+    #    ~PORT_WAIT seconds (not the full warm timeout) — don't hang the sweep.
+    port_deadline = time.monotonic() + 20.0  # port should bind within ~20s
+    warm_deadline = time.monotonic() + _WARM_TIMEOUT_S
+    fired = False
+    while time.monotonic() < warm_deadline:
+        h = _http_json(base + "/health", timeout=2)
+        if h is None:
+            if time.monotonic() > port_deadline:
+                print(f"sweep warm -- {name} port down (skipped; retry next sweep)")
+                return
+            time.sleep(2)
+            continue
+        if h.get("warm") is True:
+            print(f"sweep warm -- {name} ready")
+            return
+        if not fired:
+            # Port is up but cold — send the warm-up request ONCE (loads model).
+            _http_json(base + warm_path, payload=warm_payload, timeout=_WARM_TIMEOUT_S)
+            fired = True
+            continue
+        time.sleep(2)
+    print(f"sweep warm -- {name} not warm after {_WARM_TIMEOUT_S:.0f}s "
+          "(proceeding; unindexed files retry next sweep)")
+
+
+def _warm_daemons() -> None:
+    """Warm the NER + Gemma daemons before the sweep processes files, so a file
+    needing the model gets a LIVE pipeline instead of fail-closing every run.
+    Best-effort, bounded, never fatal. Skips entirely if the ML pack isn't
+    installed (nothing to warm — regex-only sweep)."""
+    home = Path(os.environ.get(
+        "BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield")))
+    if not (home / "ml.json").is_file():
+        return  # ML pack not installed → no daemons to warm
+    try:
+        # NER: a trivial detect warms GLiNER.
+        _warm_one("nerd", _NERD_PORT,
+                  {"text": "Monsieur Jean Dupont"}, "/detect")
+        # Gemma ships with the ML pack (ml.json). If gemmad isn't actually up, the
+        # health probe returns None and _warm_one bails fast — safe.
+        _warm_one("gemmad", _GEMMAD_PORT,
+                  {"text": "Dupont", "entity_type": "NOM"}, "/classify")
+    except Exception:
+        # Warming is best-effort; a failure must never abort the sweep. Files that
+        # needed the model just stay pending and retry next sweep.
+        pass
 
 
 def _configured_protected_roots() -> list:
@@ -213,6 +311,16 @@ def main(argv=None) -> int:
         print("sweep already running -- skip")
         return 0
     try:
+        # WARM THE DAEMONS FIRST (the sweep owns its dependencies). The NER +
+        # Gemma daemons idle-shutdown after 10 min; the sweep runs every 20 min —
+        # so left alone the daemons are ALWAYS dead when the sweep needs them, and
+        # any file needing the model (a scanned liasse fiscale) fail-closes on
+        # EVERY sweep and never indexes. Here the sweep spawns + warms them and
+        # waits (bounded) before processing, so a hard file gets a live pipeline.
+        # Best-effort: warming failures are non-fatal — those files just stay
+        # pending and retry next sweep, exactly as before this fix.
+        _warm_daemons()
+
         totals = {"indexed": 0, "skipped": 0, "deferred": 0, "failed": 0}
         for root in roots:
             if not Path(root).is_dir():

@@ -31,8 +31,13 @@
 {% endif %}
 
 <!-- ===== Shadow-index coverage (background sweep progress) ===== -->
+<!-- Auto-refreshing: a small script polls /api/coverage every ~20s and rebuilds
+     #cov-body in place, so the % updates while a background sweep runs WITHOUT a
+     manual page reload. Coverage only changes when a sweep completes (~20 min),
+     so a 20s poll is more than responsive and costs ~nothing (local snapshot). -->
 <section class="dash-coverage">
   <h2 class="dash-h">Indexation du dossier protégé</h2>
+  <div id="cov-body">
   {% if not coverage or not coverage.configured %}
     <p class="dash-help">
       Aucun dossier indexé pour l'instant. Dès qu'un dossier est marqué comme
@@ -66,7 +71,55 @@
     </div>
     {% endfor %}
   {% endif %}
+  </div>
 </section>
+
+<script>
+(function () {
+  // Live coverage refresh — rebuild #cov-body from /api/coverage every 20s.
+  var BODY = document.getElementById('cov-body');
+  if (!BODY) return;
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function renderEmpty() {
+    return '<p class="dash-help">Aucun dossier indexé pour l\'instant. Dès qu\'un '
+      + 'dossier est marqué comme protégé, Bubble Shield l\'indexe '
+      + '<strong>en arrière-plan</strong> et vous verrez ici la progression.</p>';
+  }
+  function renderRows(cov) {
+    var html = '<p class="dash-help">Bubble Shield indexe vos dossiers en '
+      + 'arrière-plan. Un fichier <strong>déjà indexé</strong> se lit vite et '
+      + 'masqué ; un fichier tout neuf peut être lu <strong>en clair</strong> à '
+      + 'sa première lecture, le temps que le balayage le rattrape.</p>';
+    (cov.roots || []).forEach(function (r) {
+      var pct = (typeof r.pct === 'number') ? r.pct : 0;
+      html += '<div class="cov-item"><div class="cov-head">'
+        + '<code class="cov-root">' + esc(r.root) + '</code>'
+        + '<span class="cov-pct">' + esc(pct) + ' %</span></div>'
+        + '<div class="cov-bar"><div class="cov-fill" style="width:' + pct + '%;"></div></div>'
+        + '<div class="cov-meta">' + esc(r.indexed) + ' / ' + esc(r.total)
+        + ' fichiers indexés'
+        + (r.pending ? ' · <strong>' + esc(r.pending) + '</strong> en attente d\'indexation' : '')
+        + (r.error ? ' · <span class="cov-err">erreur de lecture</span>' : '')
+        + '</div></div>';
+    });
+    return html;
+  }
+  function refresh() {
+    fetch('/api/coverage', { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cov) {
+        if (!cov) return;  // transient failure — keep the last render
+        BODY.innerHTML = (cov.configured && (cov.roots || []).length)
+          ? renderRows(cov) : renderEmpty();
+      })
+      .catch(function () { /* network blip — leave current content */ });
+  }
+  setInterval(refresh, 20000);
+})();
+</script>
 
 <!-- ===== Risk-control stats ===== -->
 <section class="dash-stats">
