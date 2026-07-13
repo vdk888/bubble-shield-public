@@ -1,5 +1,19 @@
 # Changelog — bubble-shield
 
+## 1.23.16 — 2026-07-13 — FIX: OCR a sparse-text-layer scanned PDF (liasse fiscale)
+
+- **fix(extraction) — mostly-scanned PDFs never indexed:** a liasse fiscale / KYC
+  pack is often a multi-page PDF where pypdf pulls a THIN text layer (a few form
+  labels) while the real data is on scanned image pages. That thin text isn't
+  "garbled", so the existing garble→OCR path never fired — and downstream the
+  anonymiser HARD FAIL-CLOSES on a scanned financial doc where GLiNER found
+  nothing (correct anti-leak behaviour, mcp #589), so the file failed forever.
+  Fix: `extract_pdf_text` now also triggers OCR when the native text layer is
+  SPARSE (very low chars-per-page on a multi-page PDF), using the OCR result when
+  it reads materially more than the thin native layer. Fail-open: OCR absent or
+  no-better keeps the native text. Single-page short docs are excluded (a short
+  note shouldn't force OCR).
+
 ## 1.23.15 — 2026-07-13 — FIX: stop counting OS junk as failures + reflect unmark fast
 
 - **fix(coverage "30/34 stuck") — OS junk was counted as failures:** a folder of

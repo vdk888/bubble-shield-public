@@ -324,6 +324,24 @@ def _is_garbled_extraction(text: str) -> bool:
     return True
 
 
+# A native PDF page of real prose/forms yields hundreds of characters. A scanned
+# page yields ~0 (no text layer) — but a MIXED liasse can average a low-but-
+# nonzero count when a few pages have labels and most are scans. Below this
+# per-page floor we treat the text layer as too thin to trust and prefer OCR.
+_SPARSE_CHARS_PER_PAGE = 120
+
+
+def _is_sparse_text(text: str, n_pages: int) -> bool:
+    """True when a multi-page PDF's native text layer is so thin (few chars per
+    page) that most pages are almost certainly scanned images the text layer
+    doesn't cover — the case where OCR must be tried even though SOME text came
+    back. Single-page docs are excluded (a short one-page note is legitimately
+    short and shouldn't force OCR)."""
+    if n_pages < 2:
+        return False
+    return (len(text) / n_pages) < _SPARSE_CHARS_PER_PAGE
+
+
 def extract_pdf_text(raw: bytes) -> str:
     """Extract text from a PDF, or raise ExtractionError with a clear reason.
 
@@ -376,7 +394,9 @@ def extract_pdf_text(raw: bytes) -> str:
         except Exception:
             parts.append("")
     text = "\n".join(parts).strip()
+    n_pages = max(1, len(reader.pages))
 
+    # OCR trigger 1 — NO text layer at all (fully scanned PDF).
     if not text:
         # OCR pack: if installed, try layout-aware local OCR on the scanned pages.
         # Fail-open: any OCR error falls through to the original message.
@@ -390,6 +410,24 @@ def extract_pdf_text(raw: bytes) -> str:
             "Aucun texte extractible -- PDF probablement scanne (image). "
             "Installez le pack OCR (bubble_shield_setup_ocr) pour lire ce type de fichier, "
             "ou collez le texte manuellement.")
+
+    # OCR trigger 2 — SPARSE text layer (mostly-scanned PDF). A liasse fiscale /
+    # KYC pack is often a multi-page PDF where pypdf pulls a thin text layer
+    # (headers, a few form labels) while the ACTUAL data lives on scanned image
+    # pages. That thin text isn't "garbled" (it's clean labels), so the garble
+    # path below never fires — and downstream the anonymiser HARD FAIL-CLOSES on
+    # a scanned financial doc where GLiNER "found nothing" (real leak class,
+    # mcp #589). Result: the file never indexes. Fix: when the text density is
+    # very low per page, prefer OCR (which reads the scanned pages) over the thin
+    # native layer. Fail-open: OCR absent/failing keeps the native text.
+    if _is_sparse_text(text, n_pages):
+        try:
+            _ocr_text = _ocr_pdf_if_pack_present(raw)
+        except Exception:
+            _ocr_text = None
+        if _ocr_text and len(_ocr_text) > len(text):
+            # OCR read materially MORE than the thin native layer → use it.
+            return _ocr_text
 
     # #276 -- GARBLED extraction path: pypdf returned non-empty text but it looks
     # garbled (glue artifacts: words fused without spaces).  When the OCR pack is
