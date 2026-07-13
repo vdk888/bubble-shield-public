@@ -619,18 +619,17 @@ def _gemma_state() -> dict:
 
 
 def _protected_roots() -> list[str]:
-    """The folders whose files the background sweep indexes. Read the guard
-    config's `protected_folders` list (best-effort; missing/bad config → [])."""
-    import json
+    """The folders whose files the background sweep indexes. Discovered by
+    scanning the likely client-dossier roots for `.bubble-shield.json` markers,
+    UNION the guard config's `protected_folders`. Marker-discovery means a folder
+    marked from Cowork (marker written, but host ~/.config unreachable from the
+    sandbox) is still shown here — the app doesn't depend on the config write.
+    Best-effort; any error → []."""
     try:
-        path = _guard_config_path()
-        if path.is_file():
-            cfg = json.loads(path.read_text(encoding="utf-8")) or {}
-            roots = cfg.get("protected_folders") or []
-            return [str(r) for r in roots if r]
+        from bubble_shield import coverage as _cov
+        return _cov.discover_protected_roots()
     except Exception:
-        pass
-    return []
+        return []
 
 
 def _coverage_state() -> dict:

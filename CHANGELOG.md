@@ -1,5 +1,18 @@
 # Changelog — bubble-shield
 
+## 1.23.11 — 2026-07-13 — FIX: the desktop app's coverage panel now discovers marked folders
+
+- **fix(app) — the missing half of v1.23.9:** the desktop app's coverage panel
+  said "Aucun dossier protégé configuré" even with folders marked, because the
+  installed `webapp/app.py._protected_roots()` still read ONLY the guard config's
+  `protected_folders` — the config-only path that Cowork can't populate. The
+  marker-discovery fix (v1.23.9) landed in the vendored `coverage.py` and in the
+  DEV `app.py`, but `webapp/app.py` was never synced to the public repo that
+  `install-app.sh` clones — so the installed app kept running the stale resolver.
+  Now `_protected_roots()` calls `coverage.discover_protected_roots()` (scan for
+  `.bubble-shield.json` markers ∪ config), so the panel shows every marked folder
+  and its indexing progress. Re-run `install-app.sh` to pick it up.
+
 ## 1.23.10 — 2026-07-13 — DOCS: "Comment ça marche" + onboarding match the real engine
 
 - **docs(about):** the client-facing "Comment ça marche" page now names the real
