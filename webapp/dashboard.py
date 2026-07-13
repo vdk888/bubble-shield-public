@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Mapping
 EVENT_ERROR = "error"
 EVENT_ANONYMIZE = "anonymize"
 EVENT_VAULT_REVEAL = "vault_reveal"
+# The background sweep cloaks each indexed file and logs it as "sweep_index"
+# (distinct from interactive "anonymize" so the audit stays honest about WHICH
+# path ran). For the risk-control stats it IS an anonymisation run, so both count
+# in the `runs` population below.
+EVENT_SWEEP_INDEX = "sweep_index"
+_ANONYMISE_EVENTS = (EVENT_ANONYMIZE, EVENT_SWEEP_INDEX)
 
 
 def _is_unsafe(entry: Mapping[str, Any]) -> bool:
@@ -48,7 +54,7 @@ def summarize(entries: List[Mapping[str, Any]], *, recent: int = 50) -> Dict[str
     relire". They are surfaced separately as `reveal_runs`, never merged into
     the anonymise/risk numbers.
     """
-    runs = [e for e in entries if e.get("event") == EVENT_ANONYMIZE]
+    runs = [e for e in entries if e.get("event") in _ANONYMISE_EVENTS]
     errors = [e for e in entries if e.get("event") == EVENT_ERROR]
     reveals = [e for e in entries if e.get("event") == EVENT_VAULT_REVEAL]
 

@@ -276,6 +276,74 @@ def _configured_protected_roots() -> list:
     return out
 
 
+# ── audit logging for indexed files ─────────────────────────────────────────
+# The dashboard's stats cards read ~/.bubble_shield/audit.jsonl. Only the OLD
+# interactive anonymise/write path logged there, so once work moved to the
+# background sweep the cards froze at the last interactive run. Here the sweep
+# records one audit entry per successfully-indexed file, with per-type counts
+# derived from the cloaked text's ⟦TYPE_NNNN⟧ tokens (distinct IDs per type —
+# the same client repeated is one token, counted once). No PII: we read only the
+# token TYPE + numeric id, never a real value.
+import re as _re
+_MASK_TOKEN_RE = _re.compile(r"⟦([A-Z_]+)_(\d{4,}[a-z]?)⟧")
+
+
+def _count_tokens_by_type(cloaked_text: str) -> dict:
+    """Distinct ⟦TYPE_id⟧ tokens per TYPE, e.g. {'NOM': 2, 'IBAN': 1}. Distinct
+    on the (type,id) pair so repeated mentions of the same masked entity count
+    once — matching how the interactive audit counts entities."""
+    seen = {}
+    for m in _MASK_TOKEN_RE.finditer(cloaked_text or ""):
+        etype, eid = m.group(1), m.group(2)
+        seen.setdefault(etype, set()).add(eid)
+    return {t: len(ids) for t, ids in seen.items()}
+
+
+class _CountResult:
+    """Minimal AnonymizationResult-shape for audit.log_result: exposes the
+    per-type counts as `.entities` (type-only stand-ins), `.entity_count`, and
+    `.safe_to_send`. We only ever expose the TYPE, never a value."""
+    class _Ent:
+        __slots__ = ("entity_type",)
+        def __init__(self, t): self.entity_type = t
+    def __init__(self, counts: dict):
+        self.entities = [self._Ent(t) for t, n in counts.items() for _ in range(n)]
+        self.entity_count = sum(counts.values())
+        self.safe_to_send = True  # a swept+indexed file passed the fail-closed pipeline
+
+
+def _audit_indexed(path: str, cloaked_text: str) -> None:
+    """Append an audit entry for a file the sweep just indexed. Best-effort:
+    audit failures must never affect indexing. Mission = the folder name, event
+    = 'sweep_index' (distinct from interactive 'anonymize')."""
+    try:
+        from bubble_shield import audit as _audit
+        home = Path(os.environ.get(
+            "BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield")))
+        # log_result's FIRST arg is the AUDIT LOG path (where to append), not the
+        # document being processed. Resolve it the same way the webapp does:
+        # BUBBLE_SHIELD_AUDIT_LOG override, else ~/.bubble_shield/audit.jsonl.
+        log_path = os.environ.get("BUBBLE_SHIELD_AUDIT_LOG") or str(home / "audit.jsonl")
+        counts = _count_tokens_by_type(cloaked_text)
+        mission = Path(path).parent.name or "sweep"
+        _audit.log_result(log_path, _CountResult(counts),
+                          mission=mission, event="sweep_index")
+    except Exception:
+        pass  # audit is display-only; never break the sweep
+
+
+def _audit_wrapped(anonymize_fn):
+    """Wrap an anonymize_fn so each successful call ALSO records an audit entry
+    (per-type token counts) for the dashboard stats. Transparent: returns the
+    exact cloaked text the inner fn produced, so run_sweep/index_one are
+    unaffected. An audit failure is swallowed — indexing must not depend on it."""
+    def _wrapped(path):
+        cloaked = anonymize_fn(path)
+        _audit_indexed(path, cloaked)
+        return cloaked
+    return _wrapped
+
+
 def main(argv=None) -> int:
     """Run one background sweep. Returns a process exit code.
 
@@ -360,8 +428,14 @@ def main(argv=None) -> int:
             # The REAL anonymize_fn: the plugin's full model pipeline
             # (extract_file + GLiNER + Gemma) — the same anonymisation the old
             # read path ran, now off the read path where latency doesn't matter.
+            # Wrap it to also record an AUDIT entry per indexed file, so the
+            # dashboard's stats cards (which read the audit log) reflect the REAL
+            # background indexing — before this, only the old interactive
+            # anonymise path logged, so the cards froze while the sweep did the
+            # actual work. Counts come from the cloaked text's ⟦TYPE_NNNN⟧ tokens
+            # (distinct per type) — no PII, no result-object plumbing needed.
             result = shadow_index.run_sweep(
-                root, anonymize_fn=bubble_shield_mcp._anonymise_file)
+                root, anonymize_fn=_audit_wrapped(bubble_shield_mcp._anonymise_file))
             for k in totals:
                 totals[k] += result.get(k, 0)
         # deferred = dataless/online-only (Dropbox not yet hydrated, retried next

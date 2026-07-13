@@ -1,5 +1,19 @@
 # Changelog — bubble-shield
 
+## 1.23.20 — 2026-07-13 — FIX: sweep logs indexed files to the audit (stats reflect reality)
+
+- **fix(dashboard stats) — the cards were frozen at week-old test data:** the
+  stats cards (anonymisations / masked / type badges) read the audit log, but
+  only the OLD interactive anonymise path logged there — so once the real work
+  moved to the background sweep, the cards froze at the last interactive run
+  while the sweep silently indexed dozens of files. The sweep now records one
+  audit entry per indexed file (`event: sweep_index`), with per-type counts
+  derived from the cloaked ⟦TYPE_NNNN⟧ tokens (distinct per type — the same
+  masked client counted once; no PII, only the token TYPE is read). The dashboard
+  summarizer counts `sweep_index` alongside `anonymize`, so the cards now reflect
+  the real background indexing. Best-effort: an audit failure never affects
+  indexing.
+
 ## 1.23.19 — 2026-07-13 — FIX: sweep spawns the Gemma daemon too (not just NER)
 
 - **fix(sweep) — gemmad wasn't spawned when down:** v1.23.18's warm step spawned
