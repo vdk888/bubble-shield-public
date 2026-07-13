@@ -1,5 +1,16 @@
 # Changelog — bubble-shield
 
+## 1.23.19 — 2026-07-13 — FIX: sweep spawns the Gemma daemon too (not just NER)
+
+- **fix(sweep) — gemmad wasn't spawned when down:** v1.23.18's warm step spawned
+  only the NER daemon (via posttool, which is NER-only); gemmad relied on its
+  LaunchAgent being alive. If gemmad was down (LaunchAgent unloaded/crashed), a
+  SCANNED financial doc needing the Gemma second pass fail-closed every sweep. The
+  sweep now spawns gemmad too (`_spawn_gemmad`, mirroring its LaunchAgent:
+  gemma-env python + daemon script + --no-warm + HF_HUB_OFFLINE), so BOTH daemons
+  are guaranteed available when the sweep runs. Best-effort + no-op when gemmad
+  isn't installed at the stable paths.
+
 ## 1.23.18 — 2026-07-13 — FIX: sweep warms its own daemons + live coverage panel
 
 - **fix(sweep) — the last holdout to 100% indexing:** the NER + Gemma daemons

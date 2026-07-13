@@ -139,6 +139,36 @@ def _http_json(url, payload=None, timeout=5):
         return None
 
 
+def _spawn_gemmad() -> None:
+    """Start the Gemma judge daemon detached if it isn't running. Mirrors its
+    LaunchAgent exactly: <gemma-env python> <daemon>/scripts/bubble_shield_gemmad.py
+    --no-warm, with BUBBLE_SHIELD_HOME + HF_HUB_OFFLINE=1. Best-effort, never
+    raises.
+
+    Why the sweep needs this: posttool._try_spawn_daemon only starts the NER
+    daemon; gemmad otherwise depends on its LaunchAgent being alive. If the
+    LaunchAgent isn't loaded (or died), a SCANNED financial doc that needs the
+    Gemma second pass fail-closes on every sweep. Spawning gemmad here guarantees
+    BOTH daemons are available when the sweep runs."""
+    import subprocess
+    home = Path(os.environ.get(
+        "BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield")))
+    vpy = home / "gemma-env" / "bin" / "python"
+    script = home / "daemon" / "scripts" / "bubble_shield_gemmad.py"
+    if not (vpy.exists() and script.exists()):
+        return  # gemmad not installed at the stable paths → nothing to spawn
+    try:
+        env = dict(os.environ)
+        env["BUBBLE_SHIELD_HOME"] = str(home)
+        env["HF_HUB_OFFLINE"] = "1"
+        subprocess.Popen(
+            [str(vpy), str(script), "--no-warm"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=env)
+    except Exception:
+        pass
+
+
 def _warm_one(name, port, warm_payload, warm_path):
     """Spawn (if needed) + warm ONE daemon, waiting until /health reports warm
     (or a bounded timeout). Best-effort: logs and returns, never raises.
@@ -149,16 +179,17 @@ def _warm_one(name, port, warm_payload, warm_path):
     to trigger the model load, (3) poll /health until warm."""
     base = f"http://127.0.0.1:{port}"
 
-    # 1) Ensure the daemon process is up (spawn if the port is dead). Reuse the
-    #    hardened spawn (cooldown + ml-pack check) from posttool_anonymize.
+    # 1) Ensure the daemon process is up (spawn if the port is dead). NER via the
+    #    hardened posttool spawn (cooldown + ml-pack check); gemmad via our own
+    #    _spawn_gemmad (mirrors its LaunchAgent). If a daemon can't be brought up,
+    #    we bail fast below rather than block the whole warm timeout on a dead port.
     if _http_json(base + "/health", timeout=1) is None:
         try:
-            import posttool_anonymize as _pt
-            # posttool only spawns the NER daemon; gemmad relies on its own
-            # LaunchAgent. If a daemon can't be brought up, we bail fast below
-            # rather than block the whole warm timeout on a dead port.
             if port == _NERD_PORT:
+                import posttool_anonymize as _pt
                 _pt._try_spawn_daemon()
+            elif port == _GEMMAD_PORT:
+                _spawn_gemmad()
         except Exception:
             pass
 
