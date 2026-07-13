@@ -1,5 +1,17 @@
 # Changelog — bubble-shield
 
+## 1.23.9 — 2026-07-13 — FIX: detect protected folders by their markers (Cowork-proof)
+
+- **fix(discovery):** the coverage panel and the sweep now find protected folders
+  by scanning the likely client-dossier roots (Documents, Desktop, the cloud
+  folders, home) for `.bubble-shield.json` markers — unioned with the config
+  `protected_folders` registry. This makes the in-folder marker sufficient on its
+  own: a folder marked from Cowork (which can write the marker but cannot reach
+  the host `~/.config`) is now detected + indexed all the same. The marker is the
+  single source of truth the guard, the sweep, and the dashboard all agree on.
+  Bounded scan (depth/entry-capped, ~75 ms) — never walks a giant tree. Supports
+  any number of marked folders.
+
 ## 1.23.8 — 2026-07-12 — FIX: the sweep indexes the folder you actually marked
 
 - **fix(sweep) — the big one:** the background sweep no longer indexes a fixed

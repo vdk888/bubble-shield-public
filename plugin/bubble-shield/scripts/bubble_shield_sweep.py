@@ -161,7 +161,13 @@ def main(argv=None) -> int:
     if args.root:
         roots = [str(Path(os.path.expanduser(args.root)).resolve())]
     else:
-        roots = _configured_protected_roots()
+        # Discover marked folders (bounded scan for .bubble-shield.json markers)
+        # UNION the config protected_folders registry. Marker-discovery means a
+        # folder marked from Cowork (marker written, but host ~/.config not
+        # reachable) is still swept — the app/sweep don't depend on the config
+        # write that Cowork can't do.
+        from bubble_shield import coverage as _cov
+        roots = _cov.discover_protected_roots()
         if not roots:
             # No folder marked yet — nothing to sweep. NOT an error: the user
             # simply hasn't protected a folder. (This is the state that used to
