@@ -192,7 +192,7 @@ def _is_ignorable(p: Path) -> bool:
     return False
 
 
-def run_sweep(root: str, *, anonymize_fn, exts=None) -> dict:
+def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
     """Resumable folder walk: index new/changed files, skip already-indexed ones.
 
     Walks `root` recursively. For each file, if its content_hash is already in
@@ -220,6 +220,12 @@ def run_sweep(root: str, *, anonymize_fn, exts=None) -> dict:
     whose Gemma second pass is unreachable) is counted as FAILED and marked
     pending — fail-closed (no shadow stored) but never fatal to the sweep. The
     returned dict carries `deferred` and `failed` counts alongside indexed/skipped.
+
+    Optional `on_progress(indexed_so_far)` is called after EACH file the sweep
+    successfully indexes — the caller uses this to rewrite the coverage snapshot
+    live, so the dashboard % climbs during a long cold index instead of jumping
+    from 0 to 100 only when the whole pass finishes. Best-effort: a callback that
+    raises is swallowed (progress reporting must never break indexing).
     """
     root_p = Path(os.path.expanduser(root)).resolve()
     already = shadow_store.list_indexed()
@@ -259,6 +265,11 @@ def run_sweep(root: str, *, anonymize_fn, exts=None) -> dict:
             outcome = _index_one_resilient(str(p), anonymize_fn=anonymize_fn)
             if outcome == "indexed":
                 indexed += 1
+                if on_progress is not None:
+                    try:
+                        on_progress(indexed)
+                    except Exception:
+                        pass  # progress reporting must never break indexing
             elif outcome == "failed":
                 failed += 1
             else:

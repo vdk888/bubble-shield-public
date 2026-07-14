@@ -332,7 +332,24 @@ def main(argv=None):
                     help="don't preload the model at boot (load lazily on the "
                          "first inference request, on the worker thread)")
     args = ap.parse_args(argv)
+
+    # SINGLETON — bind the port BEFORE starting the worker / loading the model.
+    # A duplicate gemmad (LaunchAgent + a sweep spawn, or two spawns racing) must
+    # exit INSTANTLY on EADDRINUSE, before spinning up an InferenceWorker that
+    # would load/warm a second ~4GB Gemma it can never serve. Binding first is the
+    # atomic singleton (mirrors the nerd fix). Exit clean (0) so the LaunchAgent's
+    # KeepAlive={SuccessfulExit:false} does not restart-loop us.
     from gemma_classifier import GemmaClassifier  # Task 4
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), None)
+    except OSError as exc:
+        import errno
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            print(f"[bubble-shield-gemmad] port {args.port} already in use — "
+                  "another instance owns it; exiting (singleton).", flush=True)
+            return 0
+        raise
+
     clf = GemmaClassifier()
     worker = InferenceWorker(clf, lazy=args.no_warm)
     worker.start()
@@ -341,7 +358,9 @@ def main(argv=None):
         # exactly as before. With --no-warm we skip this block and open the port
         # immediately; the worker loads the model on the first request.
         worker.wait_ready()
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler_class(worker))
+    # Attach the real handler now that the worker exists (we bound with a
+    # placeholder handler above purely to claim the port atomically).
+    srv.RequestHandlerClass = make_handler_class(worker)
     threading.Thread(target=_idle_watchdog, args=(srv,), daemon=True).start()
     srv.serve_forever()
 

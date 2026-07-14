@@ -352,6 +352,57 @@ def _audit_wrapped(anonymize_fn):
     return _wrapped
 
 
+# ── coverage snapshot (dashboard reads this — FDA-free) ──────────────────────
+
+def _write_coverage_snapshot(roots) -> None:
+    """Compute + persist the coverage snapshot the desktop app reads (the GUI
+    can't self-scan under macOS TCC, so the sweep — which CAN read the folders —
+    writes it here). Best-effort: a failed snapshot must never fail the sweep.
+    Paths + counts only, no PII. Called at sweep START (folder appears at once),
+    LIVE during indexing (throttled), and at END (authoritative)."""
+    try:
+        from bubble_shield import coverage as _covmod
+        from bubble_shield import coverage_state as _cst
+        snap = []
+        for root in roots:
+            try:
+                c = _covmod.coverage(root)
+                snap.append({
+                    "root": root,
+                    "total": c.get("total", 0),
+                    "indexed": c.get("indexed", 0),
+                    "pct": round(c.get("pct", 0.0), 1),
+                    "pending": len(c.get("pending_files", [])),
+                })
+            except Exception:
+                snap.append({"root": root, "total": 0, "indexed": 0,
+                             "pct": 0.0, "pending": 0, "error": True})
+        _cst.write_state(snap)
+    except Exception:
+        pass  # snapshot is best-effort; never let it break the sweep
+
+
+# Minimum seconds between live progress snapshot writes during a sweep, so a
+# large cold index doesn't rewrite the file on every single file.
+_SNAPSHOT_MIN_INTERVAL_S = float(
+    os.environ.get("BUBBLE_SHIELD_SNAPSHOT_INTERVAL", "2"))
+
+
+def _throttled_snapshot(roots):
+    """Return an on_progress(indexed) callback that rewrites the coverage snapshot
+    at most once every _SNAPSHOT_MIN_INTERVAL_S seconds — so the dashboard %
+    climbs live during a long index without thrashing the disk. Each call also
+    recomputes coverage (a bounded rglob), which is why we throttle."""
+    state = {"last": 0.0}
+
+    def _cb(_indexed):
+        now = time.monotonic()
+        if now - state["last"] >= _SNAPSHOT_MIN_INTERVAL_S:
+            state["last"] = now
+            _write_coverage_snapshot(roots)
+    return _cb
+
+
 def main(argv=None) -> int:
     """Run one background sweep. Returns a process exit code.
 
@@ -428,22 +479,32 @@ def main(argv=None) -> int:
         # pending and retry next sweep, exactly as before this fix.
         _warm_daemons()
 
+        # SNAPSHOT AT START — write the coverage snapshot BEFORE indexing, so the
+        # marked folder appears in the dashboard IMMEDIATELY (at 0%/pending)
+        # instead of showing "no protected folder" for the whole first cold index.
+        # The GUI app can't self-scan (TCC), so without this the panel is blank
+        # from a fresh install until the first full pass finishes.
+        _write_coverage_snapshot(roots)
+
         totals = {"indexed": 0, "skipped": 0, "deferred": 0, "failed": 0}
         for root in roots:
             if not Path(root).is_dir():
                 print(f"sweep skip -- not a directory: {root}")
                 continue
+            # LIVE PROGRESS — rewrite the snapshot as files index so the dashboard
+            # % climbs in real time instead of jumping 0→100 at the end. Throttled
+            # (min interval) so a 100-file cold index doesn't thrash the disk.
+            _prog = _throttled_snapshot(roots)
             # The REAL anonymize_fn: the plugin's full model pipeline
             # (extract_file + GLiNER + Gemma) — the same anonymisation the old
             # read path ran, now off the read path where latency doesn't matter.
             # Wrap it to also record an AUDIT entry per indexed file, so the
             # dashboard's stats cards (which read the audit log) reflect the REAL
-            # background indexing — before this, only the old interactive
-            # anonymise path logged, so the cards froze while the sweep did the
-            # actual work. Counts come from the cloaked text's ⟦TYPE_NNNN⟧ tokens
-            # (distinct per type) — no PII, no result-object plumbing needed.
+            # background indexing. Counts come from the cloaked text's ⟦TYPE_NNNN⟧
+            # tokens (distinct per type) — no PII, no result-object plumbing needed.
             result = shadow_index.run_sweep(
-                root, anonymize_fn=_audit_wrapped(bubble_shield_mcp._anonymise_file))
+                root, anonymize_fn=_audit_wrapped(bubble_shield_mcp._anonymise_file),
+                on_progress=_prog)
             for k in totals:
                 totals[k] += result.get(k, 0)
         # deferred = dataless/online-only (Dropbox not yet hydrated, retried next
@@ -454,32 +515,8 @@ def main(argv=None) -> int:
             len(roots), totals["indexed"], totals["skipped"],
             totals["deferred"], totals["failed"]))
 
-        # Persist a coverage SNAPSHOT the desktop app can read WITHOUT Full Disk
-        # Access. The sweep (this launchd process) has already read every root to
-        # index it, so it can compute coverage here; the GUI app — which runs
-        # through Apple's shared Python and can't get FDA to CloudStorage — then
-        # reads this snapshot instead of re-scanning the disk. Best-effort: a
-        # failed snapshot must not fail the sweep. Paths + counts only, no PII.
-        try:
-            from bubble_shield import coverage as _covmod
-            from bubble_shield import coverage_state as _cst
-            snap = []
-            for root in roots:
-                try:
-                    c = _covmod.coverage(root)
-                    snap.append({
-                        "root": root,
-                        "total": c.get("total", 0),
-                        "indexed": c.get("indexed", 0),
-                        "pct": round(c.get("pct", 0.0), 1),
-                        "pending": len(c.get("pending_files", [])),
-                    })
-                except Exception:
-                    snap.append({"root": root, "total": 0, "indexed": 0,
-                                 "pct": 0.0, "pending": 0, "error": True})
-            _cst.write_state(snap)
-        except Exception:
-            pass  # snapshot is best-effort; the sweep itself already succeeded
+        # SNAPSHOT AT END — final authoritative write once every root is done.
+        _write_coverage_snapshot(roots)
 
         return 0
     finally:

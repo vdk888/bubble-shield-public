@@ -1,5 +1,25 @@
 # Changelog — bubble-shield
 
+## 1.23.23 — 2026-07-14 — FIX: daemon singleton (no cold-start stampede) + live coverage progress
+
+- **fix(daemons) — cold-start stampede that hung the sweep:** the NER + Gemma
+  daemons loaded the model (~50s / ~2.8GB for GLiNER) BEFORE binding the port. When
+  more than one started together (LaunchAgent + a sweep/posttool spawn + retries),
+  each loser burned ~50s + memory loading a model it could never serve — N copies
+  thrashing so NONE finished, and the sweep hung forever waiting for a warm daemon
+  (observed: 4 nerd processes on Joris's Mac after a cold start). Fix: BIND THE
+  PORT FIRST. A duplicate exits INSTANTLY on EADDRINUSE (exit 0, so the LaunchAgent
+  KeepAlive={SuccessfulExit:false} doesn't restart-loop it), before any model load.
+  At most one instance ever loads the model. Applied to both nerd and gemmad;
+  verified live (3 rapid launches → 1 serves, 2 exit clean, 1 owns the socket).
+- **feat(dashboard) — live indexing progress:** the coverage snapshot is now
+  written at sweep START (the marked folder appears immediately at 0% instead of
+  "no protected folder" for the whole first cold index — the GUI can't self-scan
+  under macOS TCC) AND throttled DURING indexing (`run_sweep` gained an
+  `on_progress` callback), so the % climbs live as files index instead of jumping
+  0→100 only when the pass finishes. Throttled (≥2s between writes) so a large
+  cold index doesn't thrash the disk.
+
 ## 1.23.22 — 2026-07-13 — FIX: dashboard stats from the shadow store (no longer frozen)
 
 - **fix(dashboard stats) — the cards showed week-old numbers:** the stats cards

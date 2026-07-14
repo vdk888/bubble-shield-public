@@ -442,10 +442,31 @@ def main() -> int:
     Handler.openai_pf_ext = openai_pf_ext
     Handler.merge_mod = merge_mod
 
+    # SINGLETON — bind the port BEFORE loading the model. GLiNER's cold load is
+    # ~50s; if two daemons start together (LaunchAgent + a spawn from the sweep /
+    # posttool, or two sweep warm requests) and each loaded the model FIRST (as
+    # the old order did), every loser would burn ~50s + ~2.8GB loading a model it
+    # can never serve — N copies thrashing memory/CPU so NONE finishes (the
+    # observed 4-nerd stampede that hung the sweep). Binding first makes a
+    # duplicate exit INSTANTLY on EADDRINUSE, before any heavy work, so at most
+    # one nerd ever loads the model.
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except OSError as exc:
+        # Port already bound → another nerd owns it. Exit clean (0) so the
+        # LaunchAgent's KeepAlive={SuccessfulExit:false} does NOT restart us.
+        import errno
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            print(f"[bubble-shield-nerd] port {args.port} already in use — "
+                  "another instance owns it; exiting (singleton).", flush=True)
+            return 0
+        raise
+
+    # Model load happens AFTER the bind now — we hold the port, so no duplicate
+    # can start loading. (Lazy `--no-warm` still loads on first request.)
     if not args.no_warm:
         warm_up(gliner_ext, openai_pf_ext, mode)
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     threading.Thread(target=_idle_watchdog, args=(server,), daemon=True).start()
     print(f"[bubble-shield-nerd] serving on 127.0.0.1:{args.port} "
           f"(idle-shutdown {IDLE_SECS}s, mode={mode})", flush=True)
