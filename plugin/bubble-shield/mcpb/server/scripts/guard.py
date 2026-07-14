@@ -1219,24 +1219,115 @@ def decide_block_for_path(path, config: dict | None = None) -> "tuple[bool, str]
     return False, ""
 
 
+# --- FIX 2 (transient-OSError retry) + FIX 1 (traceback logging) -------------
+# Symptom (2026-07-14, Joris): the guard intermittently fail-CLOSES with the
+# generic "erreur interne du guard" on legit ops (git commit/add, Telegram send),
+# and CLEARS on identical retry. The hook fires a fresh `python3` per Read/Edit/
+# Write/Grep/Bash AND per mcp__* call, so a burst (git add+commit+telegram) runs
+# several cold-start interpreters that all hammer the filesystem (config reads +
+# marker walk-ups: is_file / read_text / os.scandir up the tree). Under that
+# concurrent I/O pressure a TRANSIENT OSError (EINTR, EMFILE "too many open
+# files", or a momentary Dropbox/CloudStorage placeholder miss) can raise on an
+# fs call that isn't locally wrapped → it reaches the blanket-except → fail-closed
+# on a decision that would have succeeded a millisecond later. Retry = pressure
+# gone = same input passes. This is a false block, not a real policy hit.
+#
+# The decision (`_main`) is a READ-ONLY, idempotent computation over stdin + the
+# filesystem — re-running it is safe. So on a transient OSError we RE-RUN the whole
+# decision a few times with tiny backoff before giving up. This is deliberately
+# scoped to OSError (the transient-I/O class); a logic bug (TypeError, KeyError,
+# ...) is NOT retried — it still fails closed immediately, correctly.
+_RETRYABLE_OS_ERRNOS = frozenset({
+    4,    # EINTR  — interrupted syscall
+    24,   # EMFILE — too many open files (this process)
+    23,   # ENFILE — too many open files (system-wide)
+    35,   # EAGAIN / EWOULDBLOCK (BSD/macOS) — resource temporarily unavailable
+    11,   # EAGAIN (Linux)
+})
+_MAX_RETRIES = 3          # total attempts = 1 + retries
+_RETRY_BACKOFF_S = 0.03   # 30ms, 60ms, ... — enough to clear a burst, invisible to the user
+
+
+def _is_transient_oserror(exc: BaseException) -> bool:
+    """True for the transient-I/O errors that a concurrent-hook burst provokes.
+    A cloud-placeholder miss surfaces as FileNotFoundError/OSError with assorted
+    errnos, so we also treat a *bare* OSError (errno None / not in the set) as
+    transient — the cost of a wrong retry is 3×30ms then the SAME fail-closed,
+    never a wrong ALLOW. We never retry non-OSError (logic bugs fail closed now)."""
+    if not isinstance(exc, OSError):
+        return False
+    return exc.errno is None or exc.errno in _RETRYABLE_OS_ERRNOS
+
+
+def _log_guard_error(raw: str, attempt: int, final: bool) -> None:
+    """FIX 1: append the real traceback + a REDACTED event snapshot to a rotating
+    log so the next occurrence is diagnosable instead of a guessing game. MUST NEVER
+    raise (a logging failure must not turn into another guard failure) and MUST NOT
+    log raw PII — we log the tool NAME and the exception, never tool_input values
+    or command strings (those can carry client paths/PII). Best-effort, fail-open
+    on the log itself."""
+    import datetime
+    import traceback
+    try:
+        log_dir = Path.home() / ".bubble_shield"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "guard_errors.log"
+        # Cheap size cap: truncate if it grows past ~1MB (keep it a tail, not a leak).
+        try:
+            if log_path.is_file() and log_path.stat().st_size > 1_000_000:
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-200_000:]
+                log_path.write_text(tail, encoding="utf-8")
+        except OSError:
+            pass
+        # Tool name only — NEVER tool_input / command (PII-bearing).
+        tool_name = "?"
+        try:
+            ev = json.loads(raw) if raw.strip() else {}
+            if isinstance(ev, dict):
+                tn = ev.get("tool_name")
+                tool_name = tn if isinstance(tn, str) else str(tn)
+        except Exception:
+            pass
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        verdict = "FAIL-CLOSED" if final else f"retry (attempt {attempt})"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n===== {stamp} — tool={tool_name} — {verdict} =====\n")
+            fh.write(traceback.format_exc())
+    except Exception:
+        pass  # logging must never break the guard
+
+
 def main() -> None:
     raw = sys.stdin.read()
-    try:
-        _main(raw)
-    except SystemExit:
-        # _deny / _allow legitimately call sys.exit(0) — let those through.
-        raise
-    except Exception:
-        # FIX 1 (P0-SEC-1): ANY uncaught exception in the decision path must
-        # fail CLOSED. Without this backstop, an unhandled error → Python exits
-        # code 1 with NO deny JSON → per Claude Code hook semantics (only exit 2
-        # or an explicit deny-JSON blocks; exit 1 is non-blocking) the tool RUNS,
-        # leaking raw PII. This blanket wrapper enforces the guard's own stated
-        # "anything goes wrong → we DENY" invariant. It is a BACKSTOP, not a
-        # replacement — the explicit deny paths below (malformed event, etc.)
-        # remain and give better messages; this only catches what they miss
-        # (e.g. tool_input being a list, cwd being an int — both reproduced).
-        _deny("🔒 Bubble Shield — erreur interne du guard, accès bloqué par sécurité.")
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            _main(raw)
+            return
+        except SystemExit:
+            # _deny / _allow legitimately call sys.exit(0) — let those through.
+            raise
+        except Exception as exc:
+            last_attempt = attempt >= _MAX_RETRIES
+            # FIX 2: a TRANSIENT OSError (concurrent-hook I/O pressure) is retried —
+            # the decision is idempotent, so a re-run usually succeeds once the burst
+            # clears. A non-transient error (logic bug) is NOT retried: fail closed now.
+            if _is_transient_oserror(exc) and not last_attempt:
+                _log_guard_error(raw, attempt, final=False)
+                import time
+                time.sleep(_RETRY_BACKOFF_S * attempt)
+                continue
+            # FIX 1: log the real traceback before failing closed, so we finally SEE
+            # what "erreur interne" actually is instead of guessing.
+            _log_guard_error(raw, attempt, final=True)
+            # ANY uncaught exception in the decision path must fail CLOSED. Without
+            # this backstop, an unhandled error → Python exits code 1 with NO deny
+            # JSON → per Claude Code hook semantics (only exit 2 or an explicit deny-
+            # JSON blocks; exit 1 is non-blocking) the tool RUNS, leaking raw PII.
+            # This backstop enforces the guard's "anything goes wrong → we DENY"
+            # invariant; the explicit deny paths in _main give better messages, this
+            # only catches what they miss (tool_input a list, cwd an int — reproduced).
+            _deny("🔒 Bubble Shield — erreur interne du guard, accès bloqué par sécurité.")
+            return
 
 
 def _main(raw: str) -> None:

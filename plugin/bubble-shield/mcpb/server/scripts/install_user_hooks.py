@@ -96,8 +96,29 @@ def _wrapped_cmd(script: str) -> str:
     `[ -f X ] && python3 X || exit 0` — if the stable script ever disappears,
     the hook exits 0 (allow) instead of erroring (which would block the tool).
     This is the safety net that prevents a repeat of the temp-purge self-lock.
+
+    FIX 3 (2026-07-14): for guard.py we run it as an IMPORTED MODULE, not as a
+    `__main__` script. `python3 X` compiles X from source EVERY fire (a `__main__`
+    module is never byte-cached), so the 88KB guard was recompiled on every Read/
+    Edit/Write/Bash/mcp__* call — pure CPU + a bigger transient-failure window under
+    concurrent bursts. Importing it (`import guard; guard.main()`) writes/reuses
+    guard.cpython-3XX.pyc in __pycache__, so after the first fire each subsequent
+    fire skips the recompile. Behaviour is identical (guard.main() is the same
+    entry point); only startup cost drops. Other scripts stay `python3 X` (small).
     """
     path = f"{STABLE_DIR}/{script}"
+    if script == "guard.py":
+        mod = script[:-3]  # "guard"
+        inner = (
+            "import sys; "
+            f"sys.path.insert(0, '{STABLE_DIR}'); "
+            f"import {mod}; {mod}.main()"
+        )
+        return (
+            f"[ -f '{path}' ] && CLAUDE_PLUGIN_ROOT='{STABLE_DIR}' "
+            f"python3 -c \"{inner}\" "
+            f"|| exit 0  # {MARKER}:{script}"
+        )
     return (
         f"[ -f '{path}' ] && CLAUDE_PLUGIN_ROOT='{STABLE_DIR}' python3 '{path}' "
         f"|| exit 0  # {MARKER}:{script}"

@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.py\""
+            "command": "python3 -c \"import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts'); import guard; guard.main()\""
           }
         ]
       }

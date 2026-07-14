@@ -1,5 +1,311 @@
 # Changelog — bubble-shield
 
+## 1.23.27 — 2026-07-14 — FIX: guard no longer false-blocks under concurrent-hook load
+
+Symptom (Joris, live): the PreToolUse guard intermittently fail-CLOSED with the
+generic "🔒 erreur interne du guard, accès bloqué par sécurité." on legit ops
+(git commit/add, Telegram sends) and CLEARED on identical retry — a false block,
+not a policy hit, escalating as more tools got wired over a session. Root cause:
+the hook fires a fresh `python3` per Read/Edit/Write/Grep/Bash AND per `mcp__*`
+call (Telegram included), so a burst runs several cold-start interpreters that all
+hammer the filesystem (config reads + `.bubble-shield.json` marker walk-ups). Under
+that concurrent I/O pressure a TRANSIENT OSError (EINTR, EMFILE "too many open
+files", or a momentary Dropbox/CloudStorage placeholder miss) raised on an fs call
+that isn't locally wrapped → reached the blanket-except → fail-closed on a decision
+that would have succeeded a millisecond later.
+
+- **fix(guard) — FIX 2: retry the decision on a transient OSError before failing
+  closed.** The guard's decision is a read-only, idempotent computation, so on a
+  transient-I/O OSError (EINTR/EMFILE/ENFILE/EAGAIN, or a bare errno-None OSError
+  like a cloud-placeholder miss) it now re-runs up to 3× with tiny backoff before
+  giving up. A NON-transient error (a real logic bug — TypeError/KeyError) is NOT
+  retried; it still fails closed immediately. The retry can never coerce toward
+  ALLOW — a re-run that lands on a legit block still denies.
+- **fix(guard) — FIX 1: log the real traceback before failing closed.** The
+  blanket-except now appends the exception + a REDACTED event snapshot (tool NAME
+  only — never `tool_input`/command strings, which can carry client paths/PII) to
+  `~/.bubble_shield/guard_errors.log` (1 MB tail-capped, best-effort, never raises).
+  So the next "erreur interne" is diagnosable instead of a guessing game.
+- **perf(guard) — FIX 3: run the guard as an imported MODULE, not `__main__`.**
+  `python3 guard.py` compiles the 88 KB guard from source EVERY fire (a `__main__`
+  module is never byte-cached), which under concurrent bursts is wasted CPU and a
+  larger transient-failure window. The hook now runs `import guard; guard.main()`
+  so the `.pyc` caches and subsequent fires skip the recompile — less pressure, the
+  same behaviour. (Applies on the next install/SessionStart that re-writes the hook
+  command; host `settings.json` guard command is updated on re-install.)
+
+## 1.23.26 — 2026-07-14 — PERF: de-pollution judges each entry ONCE (not every sweep)
+
+- **perf(de-pollution) — per-sweep pass was re-judging the WHOLE gazetteer:** with
+  v1.23.25 running de-pollution every sweep, `depollute_gazetteer` re-judged every
+  kept NOM entry through Gemma on EVERY run (~6s each → ~11 min on a 265-entry
+  base, and potentially longer than the 20-min sweep interval on a large client
+  base — the Mac grinding Gemma continuously). A NOM verdict is stable, so
+  re-judging is pure waste. Fix: remember judged values (as SHA-256 hashes in
+  `depollute_judged.json` — no raw PII) and SKIP them on later passes. First pass
+  judges the backlog once; every pass after judges only NEW entries (usually zero
+  → near-instant). A Gemma ERROR does NOT mark entries judged (they retry next
+  pass, never skipped-forever-unjudged). Verified: pass 2 over an unchanged base
+  makes zero Gemma calls.
+
+## 1.23.25 — 2026-07-14 — FIX: de-pollution runs per sweep + un-masks are sticky (no human step)
+
+- **fix(de-pollution) — a fully-indexed base never self-cleaned:** de-pollution
+  (Gemma un-masking gazetteer false positives) only fired INSIDE per-file
+  anonymisation, so once a base was fully indexed (every sweep = "indexed 0
+  skipped N") it never ran — FPs accumulated until a human clicked the app button.
+  The sweep now runs one `depollute_gazetteer` pass at the end of every run,
+  regardless of whether any file indexed. Best-effort: a failure / down Gemma just
+  leaves FPs for next sweep (never fatal, never un-masks on error).
+- **fix(de-pollution) — un-masks are now STICKY (no human confirm required):**
+  before, an un-masked FP was re-masked on the next re-index (fail-toward-masking
+  re-seeded it) unless a human confirmed the un-mask. Now de-pollution adds the
+  un-masked value to `safe_words` (the self-improving "never mask" list the engine
+  checks) — the SAME thing a human "dismiss" does — so Gemma's un-mask persists by
+  default. `confirm()` (human: "re-mask, Gemma was wrong") now REMOVES the value
+  from `safe_words` so the override still works. Contained: de-pollution only ever
+  un-masks NOM/POSTE/ADRESSE, and safe_words only suppresses NOM masks — no
+  IBAN/SECU/date can be sticky-un-masked.
+
+## 1.23.24 — 2026-07-14 — FIX: stat cards + entity badges refresh live (like the coverage bar)
+
+- **fix(dashboard) — stats cards lagged the coverage bar:** the coverage panel
+  auto-refreshed every 20s (via /api/coverage), but the stat cards
+  (anonymisations / masked total / type badges) were left out of the poll — they
+  only re-rendered on a full page reload, so during a sweep the coverage bar
+  climbed live while the cards stayed frozen a step behind. Added an /api/stats
+  endpoint (the SAME _dashboard_stats() the page renders) and extended the poll to
+  update the cards + entity badges in place. Now the whole dashboard climbs live.
+  No PII: counts + entity TYPES only.
+
+## 1.23.23 — 2026-07-14 — FIX: daemon singleton (no cold-start stampede) + live coverage progress
+
+- **fix(daemons) — cold-start stampede that hung the sweep:** the NER + Gemma
+  daemons loaded the model (~50s / ~2.8GB for GLiNER) BEFORE binding the port. When
+  more than one started together (LaunchAgent + a sweep/posttool spawn + retries),
+  each loser burned ~50s + memory loading a model it could never serve — N copies
+  thrashing so NONE finished, and the sweep hung forever waiting for a warm daemon
+  (observed: 4 nerd processes on Joris's Mac after a cold start). Fix: BIND THE
+  PORT FIRST. A duplicate exits INSTANTLY on EADDRINUSE (exit 0, so the LaunchAgent
+  KeepAlive={SuccessfulExit:false} doesn't restart-loop it), before any model load.
+  At most one instance ever loads the model. Applied to both nerd and gemmad;
+  verified live (3 rapid launches → 1 serves, 2 exit clean, 1 owns the socket).
+- **feat(dashboard) — live indexing progress:** the coverage snapshot is now
+  written at sweep START (the marked folder appears immediately at 0% instead of
+  "no protected folder" for the whole first cold index — the GUI can't self-scan
+  under macOS TCC) AND throttled DURING indexing (`run_sweep` gained an
+  `on_progress` callback), so the % climbs live as files index instead of jumping
+  0→100 only when the pass finishes. Throttled (≥2s between writes) so a large
+  cold index doesn't thrash the disk.
+
+## 1.23.22 — 2026-07-13 — FIX: dashboard stats from the shadow store (no longer frozen)
+
+- **fix(dashboard stats) — the cards showed week-old numbers:** the stats cards
+  (anonymisations / masked / type badges) read the append-only audit log, which
+  only recorded the OLD interactive path — so once indexing moved to the
+  background sweep, the cards froze (e.g. "3 anonymisations" while 34 files were
+  actually indexed with 647 masked entities). Fix: VOLUME stats now come from the
+  SHADOW STORE — the current truth — via `shadow_store.stats()` (files indexed +
+  distinct ⟦TYPE_id⟧ tokens per type across all cloaked copies; no PII, only the
+  token TYPE is read). RISK signals (unsafe/errors/reveals) stay from the audit.
+  `_merge_store_stats` lets the store lead on volume once anything is indexed, and
+  degrades to the audit if the store is empty/unavailable. The cards now reflect
+  the real indexed base.
+
+## 1.23.21 — 2026-07-13 — FIX: Gemma masking pass reliably warm (no cold-start timeout)
+
+- **fix(gemma masking) — the /extract_pii second-pass timed out on the first form
+  per sweep:** the Gemma masking pass (extract_pii, which fires on structured
+  forms / scanned liasses to catch PII the GLiNER floor misses) kept timing out on
+  its FIRST request even though /health said warm. Two causes, both fixed:
+  1. `warm_up()` only ran `load(model)` — it never ran a generate(), so the first
+     real inference paid the full MLX graph-compile cost. And classify vs
+     extract_pii use different prompts, so one didn't prime the other. warm_up now
+     runs a dummy classify AND a dummy extract_pii, compiling both graphs at warm
+     time; `warm=True` is set only after, so /health warm:true means genuinely
+     primed.
+  2. The sweep's Gemma warm request hit /classify with a MALFORMED payload
+     ({"text":...} where /classify wants {"tokens":[...]}) — so it never ran a real
+     inference. It now hits /extract_pii (the masking path) with a real {"text":…},
+     so the sweep primes the masking graph before processing the first form.
+  Proven: cold gemmad → warm request 13s (absorbs compile) → first real form 4s
+  with all spans (was: timeout → fell back to GLiNER-floor, un-verified form).
+
+## 1.23.20 — 2026-07-13 — FIX: sweep logs indexed files to the audit (stats reflect reality)
+
+- **fix(dashboard stats) — the cards were frozen at week-old test data:** the
+  stats cards (anonymisations / masked / type badges) read the audit log, but
+  only the OLD interactive anonymise path logged there — so once the real work
+  moved to the background sweep, the cards froze at the last interactive run
+  while the sweep silently indexed dozens of files. The sweep now records one
+  audit entry per indexed file (`event: sweep_index`), with per-type counts
+  derived from the cloaked ⟦TYPE_NNNN⟧ tokens (distinct per type — the same
+  masked client counted once; no PII, only the token TYPE is read). The dashboard
+  summarizer counts `sweep_index` alongside `anonymize`, so the cards now reflect
+  the real background indexing. Best-effort: an audit failure never affects
+  indexing.
+
+## 1.23.19 — 2026-07-13 — FIX: sweep spawns the Gemma daemon too (not just NER)
+
+- **fix(sweep) — gemmad wasn't spawned when down:** v1.23.18's warm step spawned
+  only the NER daemon (via posttool, which is NER-only); gemmad relied on its
+  LaunchAgent being alive. If gemmad was down (LaunchAgent unloaded/crashed), a
+  SCANNED financial doc needing the Gemma second pass fail-closed every sweep. The
+  sweep now spawns gemmad too (`_spawn_gemmad`, mirroring its LaunchAgent:
+  gemma-env python + daemon script + --no-warm + HF_HUB_OFFLINE), so BOTH daemons
+  are guaranteed available when the sweep runs. Best-effort + no-op when gemmad
+  isn't installed at the stable paths.
+
+## 1.23.18 — 2026-07-13 — FIX: sweep warms its own daemons + live coverage panel
+
+- **fix(sweep) — the last holdout to 100% indexing:** the NER + Gemma daemons
+  idle-shutdown after 10 min, but the sweep runs every 20 min — so the daemons
+  were ALWAYS dead when the sweep fired, and any file needing the model (a scanned
+  liasse fiscale → OCR+GLiNER+Gemma) fail-closed on EVERY sweep and never indexed
+  (the 20-min cron DID fire; the daemons were down). The sweep now WARMS its
+  daemons before processing: spawn if needed → one real request to load the lazy
+  `--no-warm` model → poll /health until warm. Bounded + best-effort: a dead port
+  is abandoned in ~20s (not the full timeout), and warming never aborts the sweep.
+- **feat(dashboard) — live coverage refresh:** the coverage panel now auto-updates
+  without a manual page reload. New `GET /api/coverage` (JSON snapshot, no models)
+  is polled every ~20s and the panel is rebuilt in place — so background-sweep
+  progress appears on its own. (Coverage changes only when a sweep completes, so a
+  20s poll is ample and costs ~nothing — a local snapshot read.)
+
+## 1.23.17 — 2026-07-13 — FIX: honest error for bubble_shield_list (not "anonymisation")
+
+- **fix(bubble_shield_list) — misleading error label:** `bubble_shield_list` does
+  NO anonymisation (it just enumerates a folder's entries, names in clear). But
+  when it failed — e.g. a folder that doesn't exist (live case: a `client` vs
+  `clients` path typo) — the catch-all handler returned "⛔ Échec de
+  l'anonymisation", which sent debugging down a daemon/indexing rabbit hole even
+  though the NER daemon was healthy. Now list failures return an honest message
+  naming a listing/filesystem problem ("n'a pas pu lister ce dossier … dossier
+  absent, non hydraté, ou permissions") plus the exception TYPE. PII-safe: it
+  carries the exception type, never str(e) (which would echo the real path).
+
+## 1.23.16 — 2026-07-13 — FIX: OCR a sparse-text-layer scanned PDF (liasse fiscale)
+
+- **fix(extraction) — mostly-scanned PDFs never indexed:** a liasse fiscale / KYC
+  pack is often a multi-page PDF where pypdf pulls a THIN text layer (a few form
+  labels) while the real data is on scanned image pages. That thin text isn't
+  "garbled", so the existing garble→OCR path never fired — and downstream the
+  anonymiser HARD FAIL-CLOSES on a scanned financial doc where GLiNER found
+  nothing (correct anti-leak behaviour, mcp #589), so the file failed forever.
+  Fix: `extract_pdf_text` now also triggers OCR when the native text layer is
+  SPARSE (very low chars-per-page on a multi-page PDF), using the OCR result when
+  it reads materially more than the thin native layer. Fail-open: OCR absent or
+  no-better keeps the native text. Single-page short docs are excluded (a short
+  note shouldn't force OCR).
+
+## 1.23.15 — 2026-07-13 — FIX: stop counting OS junk as failures + reflect unmark fast
+
+- **fix(coverage "30/34 stuck") — OS junk was counted as failures:** a folder of
+  30 real docs + 3 `.DS_Store` + 1 scanned PDF read as "30/34 · en attente"
+  because `.DS_Store` (macOS folder metadata) has no extractable text, so the
+  sweep fail-closed it and coverage() counted it in the total. Now the sweep AND
+  coverage skip OS junk (`.DS_Store`, `Thumbs.db`, `desktop.ini`), our own marker,
+  and non-document media/binaries (images, archives, media) — so `total` is real
+  documents only and a complete folder reads ~100%. Stale pending rows from a
+  pre-fix sweep are cleared on the next pass (self-healing). A genuinely scanned
+  PDF still fails closed (correct — it needs manual handling rather than shipping
+  an unmasked scan).
+- **fix(panel reflects unmark quickly):** the panel reads the sweep snapshot,
+  which only rewrites every ~20 min — so UNmarking a folder left a stale row for
+  up to 20 min. The panel now drops snapshot roots whose `.bubble-shield.json`
+  marker no longer exists (a cheap stat, works without Full Disk Access),
+  reflecting an unmark on the next page load. Ambiguous (stat raises) → root kept.
+
+## 1.23.14 — 2026-07-13 — FIX: coverage panel reads a sweep snapshot (no FDA) + daemon stampede
+
+- **fix(coverage panel) — no more Full-Disk-Access dead-end:** the desktop app
+  runs through Apple's shared Python, so macOS won't attribute Full Disk Access to
+  "Bubble Shield" — the app's own disk scan of CloudStorage (where Dropbox lives)
+  is TCC-blocked and granting FDA to the app doesn't reach the reader. Fix: the
+  background sweep (a launchd agent that CAN read the folders) now writes a small
+  coverage snapshot to `~/.bubble_shield/coverage_state.json` (paths + counts
+  only, no PII), and the panel READS that snapshot instead of scanning the disk
+  itself. The panel is now FDA-independent and always reflects what the sweep
+  indexed. Falls back to a live scan only on a dev/CLI box or before the first
+  sweep. The misleading "grant Full Disk Access" prompt is removed.
+- **fix(NER daemon stampede) — memory blowup on a real Mac:** the NER daemon
+  loads GLiNER (~2.8GB resident) and takes seconds to warm. During a sweep
+  processing many files, every file that saw the daemon "not up yet" spawned
+  ANOTHER daemon — 6+ processes each loading the model (~17GB), thrashing swap on
+  a 16GB Mac. Added a spawn cooldown so at most ONE daemon starts per warm-up
+  window (`~/.bubble_shield/nerd-spawn.stamp`). A genuinely dead daemon is still
+  retried after the cooldown.
+
+## 1.23.13 — 2026-07-13 — FIX: let the sweep index a plaintext store (v1)
+
+- **fix(sweep) — indexing was blocked by the parked encryption gate:** the
+  background sweep refused to run without `BUBBLE_SHIELD_STORE_PASSPHRASE` (it
+  won't write real client names to a plaintext store). But v1 accepts a plaintext
+  store (chmod 600) — encryption-at-rest is parked — so that hard refuse blocked
+  ALL indexing (coverage stuck at 0, folders never swept). The refuse is now
+  opt-out: set `BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1` (which the sweep
+  LaunchAgent now sets by default) to index a plaintext store. Without either a
+  passphrase OR the flag, the sweep still refuses — an encryption-intending
+  deployment isn't silently downgraded. Only the exact value `1` opts in.
+- **fix(launchd):** the sweep plist now carries `EnvironmentVariables`
+  (`BUBBLE_SHIELD_ALLOW_PLAINTEXT_STORE=1` + `BUBBLE_SHIELD_HOME`), since launchd
+  doesn't inherit the shell env.
+
+## 1.23.12 — 2026-07-13 — FIX: kill stale app workers on launch + explain a blocked scan
+
+- **fix(launcher) — the real cause of "the app shows old state after reinstall":**
+  ⌘Q closed the pywebview window but the uvicorn subprocess was reparented to
+  launchd (PPID 1) and kept serving PRE-UPDATE code on its old port; each reopen
+  spawned a new worker while the window reconnected to a zombie. `start()` now
+  reaps any stray `uvicorn webapp.app:app` worker before spawning, so every launch
+  self-heals. The reaper is narrow (matches our exact worker argv, never a bare
+  `uvicorn`) and never raises.
+- **fix(coverage panel) — "je ne peux pas lire vos dossiers" ≠ "aucun dossier
+  marqué":** the marker scan now reports a macOS Full-Disk-Access / TCC
+  PermissionError (e.g. on `Library/CloudStorage` where Dropbox lives) instead of
+  swallowing it. When the scan is blocked, the dashboard shows an actionable
+  prompt — grant Full Disk Access, quit & reopen — with a one-click
+  `/open-fda-settings` button, rather than the misleading empty state that a
+  Dropbox/iCloud user would otherwise hit.
+
+## 1.23.11 — 2026-07-13 — FIX: the desktop app's coverage panel now discovers marked folders
+
+- **fix(app) — the missing half of v1.23.9:** the desktop app's coverage panel
+  said "Aucun dossier protégé configuré" even with folders marked, because the
+  installed `webapp/app.py._protected_roots()` still read ONLY the guard config's
+  `protected_folders` — the config-only path that Cowork can't populate. The
+  marker-discovery fix (v1.23.9) landed in the vendored `coverage.py` and in the
+  DEV `app.py`, but `webapp/app.py` was never synced to the public repo that
+  `install-app.sh` clones — so the installed app kept running the stale resolver.
+  Now `_protected_roots()` calls `coverage.discover_protected_roots()` (scan for
+  `.bubble-shield.json` markers ∪ config), so the panel shows every marked folder
+  and its indexing progress. Re-run `install-app.sh` to pick it up.
+
+## 1.23.10 — 2026-07-13 — DOCS: "Comment ça marche" + onboarding match the real engine
+
+- **docs(about):** the client-facing "Comment ça marche" page now names the real
+  detection stack — **Motifs + clés de contrôle** (always-on, no model) / **GLiNER**
+  (fine neural NER) / **Gemma** (false-positive cleanup + scanned-form re-read) /
+  firm allowlist — instead of a vague "petit modèle". New section explains the
+  **shadow-index** read model honestly (a brand-new file can be read raw on its
+  very first read, until the background sweep indexes it) and **multi-folder**
+  support (mark any number of folders).
+- **fix(about) — false RGPD claim removed:** the page said the coffre (token↔value
+  vault) is "chiffré au repos". It is not — the runtime persists it via
+  `Vault.save()` = plaintext, chmod-600. Only the shadow-index store is encrypted
+  (the sweep refuses to run without a passphrase). Reworded to "accès restreint /
+  permissions verrouillées". Also removed a leftover "REDACTEDFIRM" placeholder
+  and a hardcoded "8 documents" example.
+- **docs(onboarding skill):** Étape 4 no longer instructs writing the folder into
+  the host `~/.config` guard config — impossible from the Cowork sandbox and
+  unnecessary since v1.23.9 marker-discovery. The in-folder marker is the single
+  source of truth; the sweep + coverage panel discover it. Added "mark as many
+  folders as you like".
+- **test(doc-drift guard):** `about.html` is now under the doc-surface grep-guard,
+  plus two new checks — Class E (no "chiffré au repos" vault claim) and Class F
+  (no `~/.config` config-write registration instruction) — so neither stale claim
+  can regress.
+
 ## 1.23.9 — 2026-07-13 — FIX: detect protected folders by their markers (Cowork-proof)
 
 - **fix(discovery):** the coverage panel and the sweep now find protected folders
