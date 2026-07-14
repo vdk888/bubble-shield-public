@@ -1,5 +1,24 @@
 # Changelog — bubble-shield
 
+## 1.23.25 — 2026-07-14 — FIX: de-pollution runs per sweep + un-masks are sticky (no human step)
+
+- **fix(de-pollution) — a fully-indexed base never self-cleaned:** de-pollution
+  (Gemma un-masking gazetteer false positives) only fired INSIDE per-file
+  anonymisation, so once a base was fully indexed (every sweep = "indexed 0
+  skipped N") it never ran — FPs accumulated until a human clicked the app button.
+  The sweep now runs one `depollute_gazetteer` pass at the end of every run,
+  regardless of whether any file indexed. Best-effort: a failure / down Gemma just
+  leaves FPs for next sweep (never fatal, never un-masks on error).
+- **fix(de-pollution) — un-masks are now STICKY (no human confirm required):**
+  before, an un-masked FP was re-masked on the next re-index (fail-toward-masking
+  re-seeded it) unless a human confirmed the un-mask. Now de-pollution adds the
+  un-masked value to `safe_words` (the self-improving "never mask" list the engine
+  checks) — the SAME thing a human "dismiss" does — so Gemma's un-mask persists by
+  default. `confirm()` (human: "re-mask, Gemma was wrong") now REMOVES the value
+  from `safe_words` so the override still works. Contained: de-pollution only ever
+  un-masks NOM/POSTE/ADRESSE, and safe_words only suppresses NOM masks — no
+  IBAN/SECU/date can be sticky-un-masked.
+
 ## 1.23.24 — 2026-07-14 — FIX: stat cards + entity badges refresh live (like the coverage bar)
 
 - **fix(dashboard) — stats cards lagged the coverage bar:** the coverage panel

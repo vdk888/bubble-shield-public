@@ -270,6 +270,20 @@ def confirm(
             # the queue save fails, the masking is in effect.
             add_confirmed_pii(value, entity_type)
 
+            # STICKY-UNMASK OVERRIDE (2026-07-14): de-pollution now makes an
+            # un-mask sticky by adding the value to safe_words (self-improving
+            # "never mask" list). A human confirming "this IS PII, re-mask it" must
+            # therefore REMOVE it from safe_words — otherwise safe_words would keep
+            # suppressing the mask the human just asked for (a leak). The gazetteer
+            # already wins over safe_words in the engine, but we clear safe_words
+            # too so the two stores never disagree. FAIL-OPEN: a safe_words write
+            # failure must not break the confirm (gazetteer is the safety side).
+            try:
+                from bubble_shield import safe_words as _sw
+                _sw.remove_safe(value)
+            except Exception:
+                pass
+
             # Move to dismissed_log (confirmed, auditable).
             resolved = {**item, "status": "confirmed", "resolved_at": now}
             raw["dismissed_log"].append(resolved)

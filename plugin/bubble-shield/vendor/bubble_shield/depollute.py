@@ -126,6 +126,21 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
     for v in unmasked:
         kps.remove_pii(v, path=gaz_path)
         entity_type = gaz.entity_type_of(v)
+        # STICKY UN-MASK (2026-07-14): make Gemma's un-mask PERSIST without a human
+        # confirm. Add the value to the self-improving safe-list — the SAME thing
+        # review_queue.dismiss() does for a human "not PII" verdict. The masking
+        # engine checks safe_words.is_safe() and won't re-mask a safe word, so this
+        # value stays un-masked across future re-indexing / re-seeds instead of the
+        # old fail-toward-masking behaviour re-hiding it on the next pass. Gemma is
+        # the accurate judge here; we trust its un-mask by default. FAIL-OPEN: a
+        # safe-list write failure must never break the un-mask itself. (A human can
+        # still CONFIRM a value back to masked via the review queue if Gemma erred —
+        # confirm() removes it from safe_words + re-seeds the gazetteer.)
+        try:
+            from bubble_shield import safe_words as _sw
+            _sw.add_safe(v)
+        except Exception:
+            pass
         try:
             result = rq.add_candidate(
                 v, entity_type, "depollute", path=queue_path, gaz_path=gaz_path

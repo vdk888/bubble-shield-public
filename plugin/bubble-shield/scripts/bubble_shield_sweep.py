@@ -515,6 +515,25 @@ def main(argv=None) -> int:
             len(roots), totals["indexed"], totals["skipped"],
             totals["deferred"], totals["failed"]))
 
+        # DE-POLLUTION PER SWEEP — clean gazetteer false positives on the sweep's
+        # OWN schedule, once per run, REGARDLESS of whether any file indexed.
+        # Before this, de-pollution only fired inside per-file anonymisation
+        # (_anonymise_text), so a fully-indexed base (every sweep = "indexed 0
+        # skipped N") NEVER self-cleaned — FPs accumulated until a human clicked
+        # the app button. Now the sweep runs one pass here. Gemma judges the
+        # uncertain gazetteer entries; a MOT verdict un-masks (sticky via
+        # safe_words, see depollute.py). Best-effort + bounded: a failure or a
+        # down Gemma daemon just leaves FPs for next sweep — never fatal, never
+        # un-masks on error (fail-toward-masking in depollute_gazetteer).
+        try:
+            from bubble_shield.depollute import depollute_gazetteer, daemon_classify
+            dp = depollute_gazetteer(daemon_classify)
+            print("depollute done -- unmasked {} kept {} logged {}".format(
+                len(dp.get("unmasked", [])), len(dp.get("kept", [])),
+                dp.get("logged", 0)))
+        except Exception as _e:
+            print(f"depollute skipped -- {type(_e).__name__} (retry next sweep)")
+
         # SNAPSHOT AT END — final authoritative write once every root is done.
         _write_coverage_snapshot(roots)
 
