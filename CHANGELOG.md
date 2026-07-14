@@ -1,5 +1,19 @@
 # Changelog — bubble-shield
 
+## 1.23.26 — 2026-07-14 — PERF: de-pollution judges each entry ONCE (not every sweep)
+
+- **perf(de-pollution) — per-sweep pass was re-judging the WHOLE gazetteer:** with
+  v1.23.25 running de-pollution every sweep, `depollute_gazetteer` re-judged every
+  kept NOM entry through Gemma on EVERY run (~6s each → ~11 min on a 265-entry
+  base, and potentially longer than the 20-min sweep interval on a large client
+  base — the Mac grinding Gemma continuously). A NOM verdict is stable, so
+  re-judging is pure waste. Fix: remember judged values (as SHA-256 hashes in
+  `depollute_judged.json` — no raw PII) and SKIP them on later passes. First pass
+  judges the backlog once; every pass after judges only NEW entries (usually zero
+  → near-instant). A Gemma ERROR does NOT mark entries judged (they retry next
+  pass, never skipped-forever-unjudged). Verified: pass 2 over an unchanged base
+  makes zero Gemma calls.
+
 ## 1.23.25 — 2026-07-14 — FIX: de-pollution runs per sweep + un-masks are sticky (no human step)
 
 - **fix(de-pollution) — a fully-indexed base never self-cleaned:** de-pollution

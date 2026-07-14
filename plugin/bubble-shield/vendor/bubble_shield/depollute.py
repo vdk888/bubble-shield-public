@@ -85,8 +85,14 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
     """
     from bubble_shield import known_pii_store as kps
     from bubble_shield import review_queue as rq
+    from bubble_shield import depollute_state as ds
 
     gaz = kps.load_gazetteer(path=gaz_path)
+    # JUDGE-ONCE (FIX 3): skip entries already de-pollution-judged on a prior pass.
+    # A NOM verdict is stable, so re-judging a kept name every sweep is pure waste
+    # (~6s Gemma call each). Load the judged-set once; skip any value in it. First
+    # pass judges the backlog (slow, once); later passes judge only NEW entries.
+    _already = ds.load_judged()
     junk: list[str] = []
     uncertain: list[str] = []
     for e in gaz.entries:
@@ -99,6 +105,8 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
         # PIECE_IDENTITE entry can EVER be un-masked here.
         if gaz.entity_type_of(e.value) not in DEPOLLUTE_ALLOWLIST:
             continue
+        if ds.was_judged(e.value, _already):
+            continue  # already judged on a prior pass — verdict is stable, skip
         t = triage(e.value)
         if t == "junk":
             junk.append(e.value)
@@ -108,6 +116,7 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
     # Gemma adjudicates only the uncertain set. Fail-toward-masking: any error
     # from classify_fn means NONE of the uncertain entries un-mask this pass.
     mot: list[str] = []
+    _judged_ok = False
     if uncertain:
         try:
             verdicts = classify_fn(uncertain)
@@ -115,8 +124,22 @@ def depollute_gazetteer(classify_fn, *, gaz_path=None, queue_path=None) -> dict:
                 r.get("token") for r in verdicts if r.get("verdict") == "MOT"
             }
             mot = [v for v in uncertain if v in mot_tokens]
+            _judged_ok = True  # Gemma actually ran → these were genuinely judged
         except Exception:
             mot = []  # fail-toward-masking
+            # _judged_ok stays False — a down/erroring Gemma must NOT mark these
+            # as judged, or they'd be skipped forever without ever being judged.
+
+    # Mark the judged NOM entries so later passes skip them (FIX 3). Only the ones
+    # that STAYED masked (uncertain minus MOT) — a MOT entry is removed from the
+    # gazetteer below, so it never recurs and needn't be remembered. Junk-lane
+    # values (auto-unmasked, no Gemma) are also removed. Only mark when Gemma
+    # actually ran, so an error pass re-judges next time instead of skipping.
+    if _judged_ok:
+        try:
+            ds.mark_judged([v for v in uncertain if v not in set(mot)])
+        except Exception:
+            pass  # best-effort; a missed mark just re-judges next pass
 
     unmasked = junk + mot
     unmasked_set = set(unmasked)
