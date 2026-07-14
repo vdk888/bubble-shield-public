@@ -51,6 +51,73 @@ are FR-first) but the engine is generic and the entity list is easy to extend.
   `python3 -m bubble_shield.vault encrypt <vault-dir>` (`status` to audit first).
   *Encrypt-by-default with machine-local key management is the tracked follow-up.*
 
+## How it works — the pipeline
+
+Three flows: the **guard** stops a raw read, **read** serves a masked copy fast,
+and a background **sweep** does the heavy anonymisation off the read path. A
+separate **restore** flow writes a finished document with the real values back —
+without the assistant ever seeing them.
+
+```mermaid
+flowchart TD
+    subgraph GUARD["🔒 Guard (PreToolUse)"]
+        A[Assistant tries Read/Bash<br/>on a protected folder] --> B{Path under a<br/>.bubble-shield.json<br/>marker?}
+        B -- no --> Z1[Allowed — not our scope]
+        B -- yes --> C[BLOCK + steer:<br/>use bubble_shield_read]
+    end
+
+    C --> R
+    subgraph READ["📖 bubble_shield_read — fast, zero models"]
+        R[hash the file] --> H{Shadow already<br/>indexed for this<br/>content-hash?}
+        H -- HIT --> H1[Serve the MASKED shadow<br/>⟦TYPE_NNNN⟧ · no models]
+        H -- MISS --> H2[Serve RAW extracted text ONCE<br/>+ queue the file for the sweep<br/>the accepted first-read gap]
+    end
+
+    H2 -.queued.-> S
+    subgraph SWEEP["⚙️ Background sweep — heavy pipeline, off the read path"]
+        S[launchd every ~20 min<br/>warms NER + Gemma daemons] --> E[Extract text<br/>pypdf → OCR fallback for scans]
+        E --> L1["L1 · Regex + checksums<br/>IBAN mod-97 · SIREN/SIRET Luhn ·<br/>email · NIR · dates · amounts — always on"]
+        L1 --> L2[L2 · GLiNER neural NER<br/>names/addresses in prose]
+        L2 --> FORM{Structured form?<br/>liasse / CERFA / KYC}
+        FORM -- yes --> G1["L3 · Gemma verify<br/>(fail-CLOSED if unverifiable)"]
+        FORM -- no --> G2["L3 · Gemma additive<br/>(fail-OPEN — GLiNER floor stands)"]
+        G1 --> DP
+        G2 --> DP
+        DP["De-pollution · Gemma un-masks<br/>false positives (common words)<br/>soft-removal → self-corrects next pass"]
+        DP --> QC{Certified?}
+        QC -- yes --> ST[Store the masked shadow<br/>keyed by content-hash]
+        QC -- no / models down --> FC[Fail-CLOSED · no shadow<br/>retried next sweep]
+    end
+
+    subgraph RESTORE["✍️ bubble_shield_write — restore, assistant stays blind"]
+        W[Assistant drafts using ⟦tokens⟧] --> WV{Target is a<br/>GUARDED path?}
+        WV -- no --> WR[REFUSE — never write<br/>real PII to a readable path]
+        WV -- yes --> WW[Replace ⟦tokens⟧ → real values<br/>from the local vault · write file]
+        WW --> WD[Return a count only —<br/>NEVER the clear content]
+    end
+
+    VAULT[(Local vault<br/>token ↔ real value<br/>never leaves the machine)]
+    H1 -.tokens.-> VAULT
+    ST -.tokens.-> VAULT
+    WW -.reads.-> VAULT
+```
+
+**Reading the chart**
+
+- **Guard → read:** a raw `Read` of a protected file is blocked; the assistant
+  must go through `bubble_shield_read`, which serves a pre-masked shadow with
+  **zero models** on a cache hit. Only a brand-new file's *first* read returns raw
+  (then it's queued) — the documented, accepted gap.
+- **Sweep:** the expensive work (extract → OCR → GLiNER → Gemma → de-pollution)
+  runs in the background where latency doesn't matter, and **fail-closes** a
+  document it can't certify (no shadow stored — it retries next sweep).
+- **De-pollution self-corrects:** un-masking a false positive is a *soft removal*
+  (no permanent allowlist), so if the judge was wrong the value is re-detected and
+  re-masked on a later pass — no human in the loop for the routine case.
+- **Restore:** `bubble_shield_write` refuses any non-guarded target, so a restored
+  real document can only land where a later `Read` is itself blocked — the assistant
+  never sees the clear values.
+
 ## Detection layers
 
 | # | Layer | Backend | Default | Covers |
