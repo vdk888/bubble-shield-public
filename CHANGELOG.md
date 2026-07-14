@@ -1,5 +1,16 @@
 # Changelog — bubble-shield
 
+## 1.23.24 — 2026-07-14 — FIX: stat cards + entity badges refresh live (like the coverage bar)
+
+- **fix(dashboard) — stats cards lagged the coverage bar:** the coverage panel
+  auto-refreshed every 20s (via /api/coverage), but the stat cards
+  (anonymisations / masked total / type badges) were left out of the poll — they
+  only re-rendered on a full page reload, so during a sweep the coverage bar
+  climbed live while the cards stayed frozen a step behind. Added an /api/stats
+  endpoint (the SAME _dashboard_stats() the page renders) and extended the poll to
+  update the cards + entity badges in place. Now the whole dashboard climbs live.
+  No PII: counts + entity TYPES only.
+
 ## 1.23.23 — 2026-07-14 — FIX: daemon singleton (no cold-start stampede) + live coverage progress
 
 - **fix(daemons) — cold-start stampede that hung the sweep:** the NER + Gemma

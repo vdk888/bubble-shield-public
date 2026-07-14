@@ -107,7 +107,7 @@
     });
     return html;
   }
-  function refresh() {
+  function refreshCoverage() {
     fetch('/api/coverage', { headers: { 'Accept': 'application/json' } })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (cov) {
@@ -117,6 +117,38 @@
       })
       .catch(function () { /* network blip — leave current content */ });
   }
+  // Stats cards + entity badges read the SAME shadow store as coverage, so they
+  // must climb live too during a sweep (before this they only updated on a full
+  // page reload, lagging the coverage bar).
+  function refreshStats() {
+    fetch('/api/stats', { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) {
+        if (!s) return;
+        function set(key, val) {
+          var el = document.querySelector('[data-stat="' + key + '"]');
+          if (el) el.textContent = val;
+        }
+        set('total_runs', s.total_runs);
+        set('unsafe_runs', s.unsafe_runs);
+        set('error_runs', s.error_runs);
+        set('safe_rate_pct', Math.round((s.safe_rate || 0) * 100) + '%');
+        set('total_entities', s.total_entities);
+        set('reveal_runs', s.reveal_runs);
+        var bars = document.getElementById('entity-bars');
+        if (bars && s.entity_totals) {
+          var html = '';
+          Object.keys(s.entity_totals).forEach(function (t) {
+            html += '<li class="entity-bar"><code class="eb-type">' + esc(t)
+              + '</code><span class="eb-count">' + esc(s.entity_totals[t])
+              + '</span></li>';
+          });
+          bars.innerHTML = html;
+        }
+      })
+      .catch(function () { /* leave current content */ });
+  }
+  function refresh() { refreshCoverage(); refreshStats(); }
   setInterval(refresh, 20000);
 })();
 </script>
@@ -128,33 +160,33 @@
   {% else %}
   <div class="stat-cards">
     <div class="stat-card">
-      <div class="stat-num">{{ stats.total_runs }}</div>
+      <div class="stat-num" data-stat="total_runs">{{ stats.total_runs }}</div>
       <div class="stat-lbl">anonymisations</div>
     </div>
     <div class="stat-card{% if stats.unsafe_runs %} stat-card--warn{% endif %}">
-      <div class="stat-num">{{ stats.unsafe_runs }}</div>
+      <div class="stat-num" data-stat="unsafe_runs">{{ stats.unsafe_runs }}</div>
       <div class="stat-lbl">signalées à risque (PII résiduelle possible)</div>
     </div>
     <div class="stat-card{% if stats.error_runs %} stat-card--warn{% endif %}">
-      <div class="stat-num">{{ stats.error_runs }}</div>
+      <div class="stat-num" data-stat="error_runs">{{ stats.error_runs }}</div>
       <div class="stat-lbl">erreurs</div>
     </div>
     <div class="stat-card">
-      <div class="stat-num">{{ (stats.safe_rate * 100) | round(0) | int }}%</div>
+      <div class="stat-num" data-stat="safe_rate_pct">{{ (stats.safe_rate * 100) | round(0) | int }}%</div>
       <div class="stat-lbl">sûr à envoyer</div>
     </div>
     <div class="stat-card">
-      <div class="stat-num">{{ stats.total_entities }}</div>
+      <div class="stat-num" data-stat="total_entities">{{ stats.total_entities }}</div>
       <div class="stat-lbl">données masquées au total</div>
     </div>
     <div class="stat-card">
-      <div class="stat-num">{{ stats.reveal_runs }}</div>
+      <div class="stat-num" data-stat="reveal_runs">{{ stats.reveal_runs }}</div>
       <div class="stat-lbl">restaurations (vault_reveal, hors risque)</div>
     </div>
   </div>
 
   <h2 class="dash-h">Types de données rencontrés</h2>
-  <ul class="entity-bars">
+  <ul class="entity-bars" id="entity-bars">
     {% for etype, n in stats.entity_totals.items() %}
     <li class="entity-bar">
       <code class="eb-type">{{ etype }}</code>

@@ -690,6 +690,23 @@ def _merge_store_stats(audit_stats: dict, store_stats: dict) -> dict:
     return out
 
 
+def _dashboard_stats() -> dict:
+    """The dashboard stats = audit (risk signals: unsafe/errors/reveals) MERGED
+    with the shadow store (the current truth of what's indexed). Single source of
+    truth for BOTH the page render and the /api/stats live-refresh endpoint, so
+    the cards + entity badges climb live during a sweep exactly like the coverage
+    bar. Store leads on volume once anything is indexed; audit keeps verdicts."""
+    from bubble_shield.audit import read_audit
+    from webapp.dashboard import summarize
+    stats = summarize(read_audit(AUDIT_LOG))
+    try:
+        from bubble_shield import shadow_store as _ss
+        stats = _merge_store_stats(stats, _ss.stats())
+    except Exception:
+        pass  # store unavailable → fall back to audit-only stats (never crash)
+    return stats
+
+
 def _coverage_state() -> dict:
     """Sweep-index coverage for the dashboard: for each protected folder, how
     much has the background sweep already masked into the shadow store.
@@ -865,21 +882,9 @@ def _render_dashboard(request: Request):
     which entity types showed up. Plus the shadow-index coverage panel, the
     editable cloak/keep config table (including custom fields), and the
     detector-mode selector."""
-    from bubble_shield.audit import read_audit
-    from webapp.dashboard import summarize
     from bubble_shield.policy import load_policy, extended_policy_view
 
-    # Stats = audit (risk signals: unsafe/errors/reveals) MERGED with the shadow
-    # store (the current truth of what's indexed). The audit alone froze because
-    # background-sweep indexing never logged there; the store knows every indexed
-    # file + its masked entity types. So: coverage/volume numbers come from the
-    # store; risk/verdict numbers stay from the audit. See _merge_store_stats.
-    stats = summarize(read_audit(AUDIT_LOG))
-    try:
-        from bubble_shield import shadow_store as _ss
-        stats = _merge_store_stats(stats, _ss.stats())
-    except Exception:
-        pass  # store unavailable → fall back to audit-only stats (never crash)
+    stats = _dashboard_stats()
     rows = extended_policy_view(load_policy())
     custom = _custom_fields_view()
     detector = _detector_state()
@@ -916,6 +921,17 @@ def api_coverage(request: Request):
     show fresh progress."""
     from fastapi.responses import JSONResponse
     return JSONResponse(_coverage_state())
+
+
+@app.get("/api/stats")
+def api_stats(request: Request):
+    """JSON risk-control stats for the dashboard's live auto-refresh — the SAME
+    _dashboard_stats() the page renders. Polled every ~20s so the stat cards +
+    entity badges climb live during a sweep (they read the shadow store, which
+    the sweep updates per file) instead of lagging behind the coverage bar until
+    a manual reload. No PII: counts + entity TYPES only."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_dashboard_stats())
 
 
 @app.get("/open-fda-settings")
