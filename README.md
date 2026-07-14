@@ -61,7 +61,7 @@ without the assistant ever seeing them.
 ```mermaid
 flowchart TD
     subgraph GUARD["🔒 Guard (PreToolUse)"]
-        A[Assistant tries Read/Bash<br/>on a protected folder] --> B{Path under a<br/>.bubble-shield.json<br/>marker?}
+        A["Assistant tries Read / Edit / Write /<br/>Bash / MCP tool on a protected folder"] --> B{Path under a<br/>.bubble-shield.json<br/>marker?}
         B -- no --> Z1[Allowed — not our scope]
         B -- yes --> C[BLOCK + steer:<br/>use bubble_shield_read]
     end
@@ -77,17 +77,17 @@ flowchart TD
     subgraph SWEEP["⚙️ Background sweep — heavy pipeline, off the read path"]
         S[launchd every ~20 min<br/>warms NER + Gemma daemons] --> E[Extract text<br/>pypdf → OCR fallback for scans]
         E --> L1["L1 · Regex + checksums<br/>IBAN mod-97 · SIREN/SIRET Luhn ·<br/>email · NIR · dates · amounts — always on"]
-        L1 --> L2[L2 · GLiNER neural NER<br/>names/addresses in prose]
+        L1 -- "merged, priority-resolved<br/>in one pass" --> L2[L2 · GLiNER neural NER<br/>names/addresses in prose]
         L2 --> FORM{Structured form?<br/>liasse / CERFA / KYC}
         FORM -- yes --> G1["L3 · Gemma verify<br/>(fail-CLOSED if unverifiable)"]
         FORM -- no --> G2["L3 · Gemma additive<br/>(fail-OPEN — GLiNER floor stands)"]
-        G1 --> DP
-        G2 --> DP
-        DP["De-pollution · Gemma un-masks<br/>false positives (common words)<br/>soft-removal → self-corrects next pass"]
-        DP --> QC{Certified?}
+        G1 --> QC{Certified?}
+        G2 --> QC
         QC -- yes --> ST[Store the masked shadow<br/>keyed by content-hash]
         QC -- no / models down --> FC[Fail-CLOSED · no shadow<br/>retried next sweep]
     end
+
+    L2 -.async, background.-> DP["De-pollution (background thread)<br/>Gemma un-masks false positives across<br/>the cross-doc gazetteer · soft-removal →<br/>self-corrects next pass · does NOT gate<br/>this file's certification"]
 
     subgraph RESTORE["✍️ bubble_shield_write — restore, assistant stays blind"]
         W[Assistant drafts using ⟦tokens⟧] --> WV{Target is a<br/>GUARDED path?}
@@ -97,23 +97,34 @@ flowchart TD
     end
 
     VAULT[(Local vault<br/>token ↔ real value<br/>never leaves the machine)]
-    H1 -.tokens.-> VAULT
     ST -.tokens.-> VAULT
     WW -.reads.-> VAULT
 ```
 
 **Reading the chart**
 
-- **Guard → read:** a raw `Read` of a protected file is blocked; the assistant
-  must go through `bubble_shield_read`, which serves a pre-masked shadow with
-  **zero models** on a cache hit. Only a brand-new file's *first* read returns raw
-  (then it's queued) — the documented, accepted gap.
-- **Sweep:** the expensive work (extract → OCR → GLiNER → Gemma → de-pollution)
-  runs in the background where latency doesn't matter, and **fail-closes** a
-  document it can't certify (no shadow stored — it retries next sweep).
-- **De-pollution self-corrects:** un-masking a false positive is a *soft removal*
-  (no permanent allowlist), so if the judge was wrong the value is re-detected and
-  re-masked on a later pass — no human in the loop for the routine case.
+- **Guard → read:** a raw `Read` (or `Edit`/`Write`/`Bash`/any `mcp__*` tool) on a
+  protected file is blocked; the assistant must go through `bubble_shield_read`,
+  which serves a pre-masked shadow with **zero models** on a cache hit. Only a
+  brand-new file's *first* read returns raw (then it's queued) — the documented,
+  accepted gap.
+- **Shadow store vs. vault:** these are two different stores with different access
+  patterns. The **shadow store** maps `content_hash → clean_text` (tokenised,
+  no real values) — a cache HIT serves straight from it with **zero vault access**.
+  The **vault** maps `token → real value` and is the *only* place PII persists;
+  it is written only at **sweep** time (once a file is certified) and read only
+  by **restore**. Read-time and vault-time never touch.
+- **Sweep:** the expensive work (extract → OCR → L1 regex/checksums merged with
+  L2 GLiNER in one priority-resolved pass → L3 Gemma verify/additive) runs in the
+  background where latency doesn't matter, and **fail-closes** a document it
+  can't certify (no shadow stored — it retries next sweep). Certification depends
+  only on this per-file chain — de-pollution plays no part in it.
+- **De-pollution is async and out-of-band:** it's a background-thread pass over
+  the *cross-document* gazetteer (not the current file), fired right after
+  detection. It does **not** gate this file's certification. Un-masking a false
+  positive is a *soft removal* (no permanent allowlist), so if the judge was
+  wrong the value is re-detected and re-masked on a later pass — no human in the
+  loop for the routine case.
 - **Restore:** `bubble_shield_write` refuses any non-guarded target, so a restored
   real document can only land where a later `Read` is itself blocked — the assistant
   never sees the clear values.
