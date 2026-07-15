@@ -49,6 +49,32 @@ MIRRORED_DIRS = [
 # anything. Empty today — document any future addition here with a reason.
 MCPB_ONLY_EXCLUDES: set[str] = set()
 
+# #576 — the INVERSE: files that legitimately exist ONLY on the PLUGIN side and are
+# NOT expected in the bundle (so the inverse "missing-from-bundle" check must not flag
+# them). test_*.py are excluded by the glob below (never bundled). Empty today: as of
+# 2026-07-16 every plugin scripts/*.py + vendor/*.py IS mirrored to the bundle — so a
+# NEW plugin file with no bundle copy is a real "never-mirrored" bug, exactly what
+# #576 closes. Document any future plugin-only runtime file here with a reason.
+PLUGIN_ONLY_EXCLUDES: set[str] = set()
+
+
+def _discover_missing_from_bundle():
+    """#576 — INVERSE of _discover_mirror_pairs: glob the PLUGIN side and find files
+    that SHOULD be in the bundle but have NO bundle counterpart ("new-plugin-file-
+    never-mirrored"). Excludes test_*.py (never bundled) + PLUGIN_ONLY_EXCLUDES.
+    Returns the list of plugin-side labels missing from the bundle."""
+    orphans = []
+    for dir_label, plugin_dir, bundle_dir in MIRRORED_DIRS:
+        if not plugin_dir.is_dir():
+            continue
+        for plugin_file in sorted(plugin_dir.glob("*.py")):
+            name = plugin_file.name
+            if name.startswith("test_") or name in PLUGIN_ONLY_EXCLUDES:
+                continue
+            if not (bundle_dir / name).is_file():
+                orphans.append(f"{dir_label}/{name}")
+    return orphans
+
 
 def _discover_mirror_pairs():
     """Glob every *.py the bundle ships and pair it with its plugin source.
@@ -108,4 +134,23 @@ def test_plugin_and_mcpb_mirror_copies_are_byte_identical():
         "plugin ↔ mcpb bundle DRIFT — the shipped .mcpb would run stale/divergent "
         f"code for: {drifted}. Re-sync per RELEASING.md and re-pack the .mcpb "
         "(rsync scripts/ + vendor/ into mcpb/server/, then mcpb pack)."
+    )
+
+
+def test_no_plugin_file_missing_from_bundle():
+    """#576 — the INVERSE tripwire: a NEW plugin scripts/ or vendor/ file that should
+    be mirrored to the .mcpb bundle but was NEVER copied ("new-plugin-file-never-
+    mirrored"). #564 closed the 'mirrored-but-stale' class (byte-identity above); this
+    closes the 'never-mirrored' class — a plugin file with no bundle counterpart means
+    the shipped .mcpb is MISSING code a Cowork client's server needs.
+
+    If a NEW plugin file is legitimately plugin-only (a hook/installer that never runs
+    in the bundled server), add it to PLUGIN_ONLY_EXCLUDES with a documented reason —
+    do NOT delete this assertion."""
+    orphans = _discover_missing_from_bundle()
+    assert not orphans, (
+        "plugin file(s) NOT mirrored to the .mcpb bundle (never-copied) — the shipped "
+        f".mcpb is missing code the bundled server needs: {orphans}. Re-sync per "
+        "RELEASING.md (rsync scripts/ + vendor/ → mcpb/server/, re-pack), OR if the "
+        "file is legitimately plugin-only, add it to PLUGIN_ONLY_EXCLUDES with a reason."
     )
