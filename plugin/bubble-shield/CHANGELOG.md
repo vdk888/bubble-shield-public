@@ -1,5 +1,30 @@
 # Changelog — bubble-shield
 
+## 1.23.30 — 2026-07-15 — FIX: guard no longer fail-closes on long inputs (ENAMETOOLONG) — the REAL "erreur interne" cause
+
+The v1.23.27 traceback log (FIX 1) finally caught the actual exception behind the
+recurring "🔒 erreur interne du guard" on long git commits / long Telegram sends:
+```
+OSError: [Errno 63] File name too long
+  at guard.py:170  start = target if target.is_dir() else target.parent
+```
+A tool ARGUMENT that isn't a real path — a long commit body, a long chat message —
+gets extracted as a "path candidate" and handed to `_find_marker_root`, whose first
+line called `target.is_dir()` UNGUARDED. On a string longer than PATH_MAX the OS
+raises ENAMETOOLONG, which escaped to the blanket-except → generic fail-CLOSED.
+This is DETERMINISTIC on length (not the v1.23.27 transient race) — which is exactly
+why every report said "longer inputs trip it more." The retry loop didn't catch it
+because errno 63 isn't transient (retrying a too-long string never helps).
+
+- **fix(guard) — `_find_marker_root` guards the initial `is_dir()` against
+  ENAMETOOLONG.** A string that can't even be `stat`'d is not a real file, so it
+  cannot be inside a protected folder → return `None` (no marker) and let the
+  decision proceed, instead of crashing. Security: a path over PATH_MAX cannot
+  exist on disk, so allowing it can never leak a real protected file — there is no
+  real file it could reference. Real protection is unchanged (a normal-length path
+  inside a marked folder still blocks — tested). 4 regression tests incl. the exact
+  long-commit + long-MCP-message repro + a "real protected path still blocks" guard.
+
 ## 1.23.29 — 2026-07-15 — FIX: daemon idle-shutdown must outlast the sweep interval (stuck-doc 4GB loop)
 
 Incident (found live): a client base showed 29/30 docs indexed, stuck at 96% — one

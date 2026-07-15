@@ -167,7 +167,20 @@ def _find_marker_root(target: Path) -> tuple[Path, dict] | None:
     The marker file itself is always readable (it's our own metadata, not PII).
     """
     # Start at the file's own directory (or the path itself if it's a dir).
-    start = target if target.is_dir() else target.parent
+    # ROBUSTNESS (#561-C, 2026-07-15): `target` is derived from a tool ARGUMENT,
+    # which is not always a real path — a long Bash command body or a long Telegram
+    # message can arrive as a "path candidate" thousands of chars long. `.is_dir()`
+    # on such a string raises OSError [Errno 63] ENAMETOOLONG (a path over PATH_MAX
+    # is not a real file). That was escaping to the blanket-except → generic
+    # "erreur interne" fail-CLOSED on any long input (the real cause of the
+    # "longer inputs trip it more" reports). A string that can't even be stat'd is
+    # NOT inside a protected folder, so return None (no marker) — the caller then
+    # gates it by the OTHER path checks, never fail-closing on a non-path.
+    try:
+        is_dir = target.is_dir()
+    except OSError:
+        return None
+    start = target if is_dir else target.parent
     candidates = [start, *start.parents]
     for anc in candidates:
         marker = anc / MARKER_NAME
