@@ -1,5 +1,28 @@
 # Changelog — bubble-shield
 
+## 1.23.33 — 2026-07-15 — FIX #644: host update also refreshes the DAEMON stable dir (was stranding daemon code)
+
+Same 'repo ≠ running code' class as the guard host-refresh (v1.23.28), different
+location. The launchd nerd/gemmad run from `~/.bubble_shield/daemon/{scripts,vendor}`,
+which `setup_ml` copies out ONCE at ML-pack setup and NEVER refreshes on update.
+Verified live 2026-07-15: the daemon's vendored `engine.py` was 3 days stale while the
+checkout was current — a shipped detection/verify fix (e.g. #643) would silently never
+reach the running daemon.
+
+- **fix(installer) — the armed host-refresh (`_refresh_stable_scripts_if_armed`) now
+  ALSO refreshes the daemon stable dir.** `_refresh_daemon_stable_dir_if_present`
+  re-copies the daemon scripts (nerd/gemmad/gemma_classifier/setup_ml) + the whole
+  vendor tree into `~/.bubble_shield/daemon/`, GATED on that dir already EXISTING (a
+  host without the ML pack is untouched — zero footprint). It copies only when content
+  DIFFERS (cheap content check + an engine.py staleness probe), and only then
+  `launchctl kickstart -k`s the daemons so a long-lived KeepAlive process picks up the
+  new code instead of running stale in-memory for up to its idle window (4h). No churn
+  on an already-current host. Copy-only, best-effort, never raises.
+- Verified live: on this Mac the daemon vendor engine was STALE; running the refresh
+  made it FRESH and detected the change (would kickstart). 4 new tests
+  (`test_644_daemon_refresh.py`) incl. the zero-footprint (no ML pack) + no-churn
+  (unchanged) guarantees.
+
 ## 1.23.32 — 2026-07-15 — FIX #643: structured-form Gemma verify covers the WHOLE doc (was blind to 83% of long forms)
 
 The structured-form second pass (#589 — "escalate to Gemma to catch PII the fast

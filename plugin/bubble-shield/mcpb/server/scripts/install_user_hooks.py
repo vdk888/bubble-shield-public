@@ -238,6 +238,7 @@ def _refresh_stable_scripts_if_armed() -> None:
     if not _guard_armed_in_host_settings():
         return
     _install_scripts()
+    _refresh_daemon_stable_dir_if_present()
     # `_install_scripts` skips vendor/ if already present (it's big + usually
     # unchanged). But a refresh is exactly when a stale vendored engine should be
     # updated too, so force it here.
@@ -247,6 +248,87 @@ def _refresh_stable_scripts_if_armed() -> None:
             shutil.copytree(vendor_src, STABLE_DIR / "vendor", dirs_exist_ok=True)
     except Exception:
         pass  # best-effort; the script refresh above is the critical part
+
+
+_DAEMON_STABLE_ROOT = (Path(os.environ.get("BUBBLE_SHIELD_HOME")
+                            or (Path.home() / ".bubble_shield")) / "daemon")
+# The daemon files the launchd nerd/gemmad run (mirrors setup_ml's allowlists).
+_DAEMON_STABLE_SCRIPTS = (
+    "bubble_shield_nerd.py", "bubble_shield_setup_ml.py",
+    "bubble_shield_gemmad.py", "gemma_classifier.py",
+)
+_DAEMON_LAUNCHD_LABELS = (
+    "com.bubbleinvest.bubble-shield-nerd", "com.bubbleshield.gemmad",
+)
+
+
+def _refresh_daemon_stable_dir_if_present() -> None:
+    """#644 (2026-07-15) — a plugin/app UPDATE must ALSO refresh the DAEMON stable dir.
+
+    The launchd nerd/gemmad run from `~/.bubble_shield/daemon/{scripts,vendor}`, which
+    `setup_ml.install_daemon_to_stable_path` copies out ONCE at ML-pack setup and NEVER
+    refreshes on update. Verified live 2026-07-15: the daemon's vendored engine was 3
+    days stale while the checkout was current — the SAME 'repo ≠ running code' class the
+    guard host-refresh (v1.23.28) fixed, in a different location. A detection/verify fix
+    (e.g. #643) shipped to the plugin would silently never reach the running daemon.
+
+    Fix: on the armed host-refresh, ALSO re-copy the daemon's scripts (allowlist) + the
+    whole vendor tree into the daemon stable dir — GATED on that dir already EXISTING (a
+    machine without the ML pack has no daemon dir → untouched, zero footprint). Then
+    KICKSTART the launchd daemons so a long-lived KeepAlive process picks up the new code
+    instead of running stale in-memory for up to its idle window (4h). Copy-only + best-
+    effort: never raises, never installs anything new."""
+    try:
+        if not _DAEMON_STABLE_ROOT.is_dir():
+            return  # ML pack not installed on this host → nothing to refresh
+        src_scripts = Path(PLUGIN_ROOT) / "scripts"
+        dst_scripts = _DAEMON_STABLE_ROOT / "scripts"
+        dst_scripts.mkdir(parents=True, exist_ok=True)
+        changed = False
+        for name in _DAEMON_STABLE_SCRIPTS:
+            s = src_scripts / name
+            if not s.is_file():
+                continue
+            d = dst_scripts / name
+            # Only copy (and flag changed) when the content actually differs — so we
+            # DON'T pointlessly kickstart the daemons on every SessionStart.
+            if (not d.is_file()) or (s.read_bytes() != d.read_bytes()):
+                shutil.copy2(s, d)
+                changed = True
+        vendor_src = Path(PLUGIN_ROOT) / "vendor"
+        dst_vendor_engine = _DAEMON_STABLE_ROOT / "vendor" / "bubble_shield" / "engine.py"
+        src_vendor_engine = vendor_src / "bubble_shield" / "engine.py"
+        if vendor_src.is_dir():
+            # Cheap staleness probe on the engine (the file that stranded live today);
+            # if it differs, refresh the WHOLE vendor tree and flag changed.
+            if (not dst_vendor_engine.is_file() or not src_vendor_engine.is_file()
+                    or src_vendor_engine.read_bytes() != dst_vendor_engine.read_bytes()):
+                shutil.copytree(vendor_src, _DAEMON_STABLE_ROOT / "vendor",
+                                dirs_exist_ok=True)
+                changed = True
+        # Only restart the launchd daemons when code ACTUALLY changed, so a stale
+        # KeepAlive process picks up the fix — but we don't churn them every session.
+        if changed:
+            _kickstart_daemons()
+    except Exception:
+        pass  # best-effort; a refresh failure must never break SessionStart
+
+
+def _kickstart_daemons() -> None:
+    """launchctl kickstart -k each daemon label so it restarts with fresh code. Uses
+    the modern gui/<uid> domain; best-effort, never raises."""
+    import subprocess
+    try:
+        uid = os.getuid()
+    except Exception:
+        return
+    for label in _DAEMON_LAUNCHD_LABELS:
+        try:
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+                capture_output=True, timeout=10)
+        except Exception:
+            pass  # daemon not loaded / launchctl unavailable → skip
 
 
 def main() -> None:
