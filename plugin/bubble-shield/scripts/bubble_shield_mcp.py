@@ -893,6 +893,19 @@ def _structured_form_note() -> str:
             "document. Une relecture humaine reste conseillée avant envoi.]")
 
 
+# #589-F (2026-07-15) — the second-pass /extract_pii timeout. Was a hard 30s,
+# which is MARGINAL on a real multi-page liasse: measured 9.1s / 21.0s / >30s
+# (timeout) for the SAME ~35k-char doc across runs — pure load variance on the
+# single serial MLX worker. A marginal timeout makes certification a COIN FLIP,
+# and a timed-out structured form is retried EVERY sweep forever, burning ~30s of
+# the serial worker per retry without ever completing — strictly worse than
+# letting the call finish once. 120s = 4× the worst measurement. Env-tunable per
+# deployment (a Mac-mini indexer can afford more; an interactive client may want
+# less): BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT.
+_GEMMA_EXTRACT_TIMEOUT_S = float(
+    os.environ.get("BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT", "120"))
+
+
 def _gemma_extract_call(text: str):
     """POST text to the local Gemma daemon /extract_pii. Returns the spans list.
     Raises on any transport/HTTP/parse failure (caller fails closed)."""
@@ -901,7 +914,7 @@ def _gemma_extract_call(text: str):
     req = urllib.request.Request(
         f"http://127.0.0.1:{_GEMMA_PORT}/extract_pii", data=data,
         headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:   # 30s: Gemma on a full block
+    with urllib.request.urlopen(req, timeout=_GEMMA_EXTRACT_TIMEOUT_S) as r:
         payload = _json.loads(r.read().decode("utf-8"))
     if not payload.get("ok"):
         raise RuntimeError("gemma extract not ok")
@@ -936,6 +949,9 @@ def _gemma_second_pass(res, engine) -> str:
     try:
         spans = _gemma_extract_call(res.anonymized)
     except Exception as e:
+        # Gemma ACTUALLY FAILED (down/timeout/non-200/malformed). The escalation we
+        # required did not run → we cannot trust the fast pass on a form → fail closed.
+        # This is the #589 guarantee and is UNCHANGED.
         raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR) from e
     out = res.anonymized
     applied = False
@@ -945,14 +961,36 @@ def _gemma_second_pass(res, engine) -> str:
             token = engine.vault.token_for(val, typ)
             out = out.replace(val, token)
             applied = True
-    # Fail-closed: a structured form where the second pass applied NO masking cannot be
-    # certified — regardless of length. (If it fingerprinted as a form, "nothing to mask"
-    # is itself suspicious; the 120-char carve-out is dropped per the #589-B final review.)
-    if not applied:
-        raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR)
     if applied:
         out += _structured_form_note()
-    return out
+        return out
+
+    # ── applied == 0: Gemma RAN SUCCESSFULLY but found nothing to add. ────────────
+    # Two very different situations hide behind "0 spans applied", and the old code
+    # conflated them into a blanket fail-closed (which stranded EVERY form the fast
+    # pass had already fully masked — a liasse whose PII GLiNER+regex already caught
+    # could NEVER be certified, because Gemma correctly had nothing left to add):
+    #
+    #   (a) VERIFIED-CLEAN — the fast pass ALREADY masked real PII on this form
+    #       (entity_count > 0) and left no residual, and Gemma (which ran fine)
+    #       confirms nothing was missed. The form IS protected. Returning it is
+    #       correct, NOT a leak — the whole point of the second pass (catch what the
+    #       fast pass MISSED) is satisfied: it missed nothing.
+    #
+    #   (b) SUSPICIOUS-EMPTY — the fast pass found ~nothing on a SUBSTANTIAL form
+    #       (zero_detection / entity_count == 0). On a structured form that is the
+    #       #589 danger: degraded columnar extraction can hide entities from BOTH
+    #       passes, so "clean" here is untrustworthy. This MUST still fail closed.
+    #
+    # So: fail closed ONLY in case (b). This preserves the #589 protection exactly
+    # (a form the fast pass missed still fails closed) while letting a fully-masked
+    # form through (the actual bug). fail-toward-masking: any ambiguity → (b).
+    fast_pass_masked_real_pii = (res.entity_count > 0 and not res.has_residual)
+    if fast_pass_masked_real_pii:
+        # (a) verified-clean: fast pass covered it, Gemma confirmed no misses.
+        return out + _structured_form_note()
+    # (b) fast pass found ~nothing on a form → cannot trust "clean" → fail closed.
+    raise StructuredFormUnverifiedError(_STRUCTURED_FORM_UNVERIFIED_ERROR)
 
 
 def _gemma_additive_pass(res, engine) -> str:

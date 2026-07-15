@@ -10,8 +10,14 @@ class _FakeVault:
         return f"⟦{entity_type}_{self.n:04d}⟧"
 
 class _Res:
-    def __init__(self, original, anonymized):
+    # entity_count / has_residual model the FAST-PASS outcome. Defaults (0, False)
+    # = "fast pass found nothing" → the #589 suspicious-empty case that must still
+    # fail closed when Gemma also finds nothing. Tests exercising the "fast pass
+    # already masked real PII" path pass entity_count>0 explicitly.
+    def __init__(self, original, anonymized, entity_count=0, has_residual=False):
         self.original, self.anonymized = original, anonymized
+        self.entity_count = entity_count
+        self.has_residual = has_residual
 
 class _Engine:
     def __init__(self): self.vault = _FakeVault()
@@ -64,5 +70,60 @@ def test_second_pass_failclosed_on_nonmatching_spans(monkeypatch):
     monkeypatch.setattr(bsmcp, "_gemma_extract_call",
                         lambda text: [{"type": "NOM", "text": "ValeurQuiNexistePas"}])
     res = _Res(original="x"*200, anonymized="un corps masqué assez long "*10)
+    with pytest.raises(bsmcp.StructuredFormUnverifiedError):
+        bsmcp._gemma_second_pass(res, _Engine())
+
+
+# ── #589-D (2026-07-15): the fast-pass-already-covered-it fix ────────────────────
+# A structured form the fast pass ALREADY fully masked (entity_count>0, no residual)
+# where Gemma runs fine + finds 0 to add is VERIFIED-CLEAN, not unverified. The old
+# code fail-closed it → a well-masked liasse could NEVER index (observed live: 1
+# liasse stuck at 96%). Fix: return the masked body in this case, while STILL failing
+# closed when the fast pass found ~nothing (the #589 suspicious-empty danger).
+
+def test_form_fully_masked_by_fastpass_gemma_finds_nothing_is_VERIFIED(monkeypatch):
+    """THE FIX: fast pass masked real PII (entity_count>0, no residual) + Gemma ran
+    fine + 0 new spans → return the masked body (do NOT fail closed)."""
+    monkeypatch.setattr(bsmcp, "_gemma_extract_call", lambda text: [])  # Gemma: nothing to add
+    res = _Res(original="Liasse fiscale "+"mot "*100,
+               anonymized="⟦NOM_0001⟧ ⟦SIRET_0002⟧ "+"masqué "*100,
+               entity_count=7, has_residual=False)   # fast pass already caught 7
+    out = bsmcp._gemma_second_pass(res, _Engine())
+    assert out.startswith("⟦NOM_0001⟧"), "the already-masked body is returned"
+    assert "seconde passe" in out, "the structured-form note is still appended"
+
+
+def test_form_fastpass_found_NOTHING_gemma_finds_nothing_STILL_failclosed(monkeypatch):
+    """THE PRESERVED #589 GUARANTEE: fast pass found ~nothing on a substantial form
+    (entity_count==0) + Gemma also finds nothing → the extraction may have hidden
+    entities from BOTH passes → MUST still fail closed. This is the whole point of
+    the escalation and must not regress."""
+    monkeypatch.setattr(bsmcp, "_gemma_extract_call", lambda text: [])
+    res = _Res(original="Liasse fiscale "+"mot "*100,
+               anonymized="corps assez long sans jetons "*10,
+               entity_count=0, has_residual=False)   # fast pass caught NOTHING
+    with pytest.raises(bsmcp.StructuredFormUnverifiedError):
+        bsmcp._gemma_second_pass(res, _Engine())
+
+
+def test_form_with_residual_never_verified_even_if_fastpass_had_entities(monkeypatch):
+    """Belt-and-suspenders: if the fast pass left RESIDUAL visible PII (a real leak
+    marker), the applied==0 path must NOT certify it clean, even with entity_count>0.
+    has_residual=True → not the verified-clean case → fail closed."""
+    monkeypatch.setattr(bsmcp, "_gemma_extract_call", lambda text: [])
+    res = _Res(original="Liasse fiscale "+"mot "*100,
+               anonymized="⟦NOM_0001⟧ "+"masqué "*100,
+               entity_count=3, has_residual=True)    # masked some BUT residual remains
+    with pytest.raises(bsmcp.StructuredFormUnverifiedError):
+        bsmcp._gemma_second_pass(res, _Engine())
+
+
+def test_gemma_failure_still_failclosed_even_if_fastpass_covered_it(monkeypatch):
+    """The fix must NOT weaken the daemon-failure guarantee: if Gemma actually FAILS
+    (exception), fail closed even when the fast pass had entities — we never verified."""
+    def boom(text): raise TimeoutError("gemma timed out")
+    monkeypatch.setattr(bsmcp, "_gemma_extract_call", boom)
+    res = _Res(original="Liasse "+"mot "*100, anonymized="⟦NOM_0001⟧ "+"x "*100,
+               entity_count=9, has_residual=False)
     with pytest.raises(bsmcp.StructuredFormUnverifiedError):
         bsmcp._gemma_second_pass(res, _Engine())

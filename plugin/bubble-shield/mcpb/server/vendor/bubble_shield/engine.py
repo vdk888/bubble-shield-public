@@ -311,7 +311,45 @@ class AnonymizationEngine:
         # alphabetic char (PDF glued-token output normalisation).
         out = _GLUED_TOKEN_RE.sub(r"\1 \2", out)
 
-        residual = self._residual_scan(out)
+        # CONSISTENCY (#589-E, 2026-07-15): the residual scan runs the SAME detector
+        # as masking, but on the OUTPUT — which the mask step rearranged (token
+        # replacement shifts offsets; the #273 glue-fix inserts spaces). That
+        # rearrangement can make a real PII value MATCHABLE on the output that was
+        # not matchable on the input (e.g. a SIREN whose grouping only becomes a
+        # clean `\d{3} \d{3} \d{3}` after an adjacent token fixed the spacing). The
+        # OLD behaviour just REPORTED that as "residual → fail-closed", stranding a
+        # doc for a leak it could actually mask. The consistent fix: if the residual
+        # scan finds maskable PII, MASK IT (same vault) and re-scan — so everything
+        # the detector sees gets masked, whether found in pass 1 or on the output.
+        # Only PII that genuinely SURVIVES masking stays residual (a real fail-close).
+        # Bounded loop (rearrangement can reveal a new match once more); 3 iters is
+        # ample and guarantees termination.
+        for _ in range(3):
+            residual = self._residual_scan(out)
+            if not residual:
+                break
+            applied_any = False
+            for m in sorted(residual, key=lambda x: x.start, reverse=True):
+                # Only mask a residual we can cleanly locate + tokenise; a match we
+                # can't apply (shouldn't happen post-scan) is left as a real residual.
+                if not (m.value and 0 <= m.start < m.end <= len(out)):
+                    continue
+                token = self.vault.token_for(m.value, m.entity_type)
+                out = out[:m.start] + token + out[m.end:]
+                entities.append(DetectedEntity(
+                    entity_type=m.entity_type, value=m.value, token=token,
+                    score=m.score, start=m.start, end=m.end, priority=m.priority))
+                min_score = min(min_score, m.score)
+                applied_any = True
+            out = _GLUED_TOKEN_RE.sub(r"\1 \2", out)
+            if not applied_any:
+                # residual found but none were maskable → a genuine leak. Stop and
+                # let it be reported (fail-closed) rather than loop forever.
+                break
+        else:
+            # loop exhausted without going empty → final scan is authoritative.
+            residual = self._residual_scan(out)
+        entities.sort(key=lambda e: e.start)
         return AnonymizationResult(
             original=text, anonymized=out, entities=entities,
             residual=residual, min_score=min_score if entities else 1.0,
@@ -335,9 +373,27 @@ class AnonymizationEngine:
 
         Also includes custom recognizers so a custom pattern that was detected in
         the main pass is also checked for residual — consistent detection.
+
+        CONSISTENCY FIX (#589-E, 2026-07-15): the residual scan MUST use the EXACT
+        same detection pipeline as the masking pass — `self._detect` — not a
+        bare-regex `detect(anonymized, self._recognizer_list())`. They diverged:
+        the masking pass runs regex + extra-layer (GLiNER/neural) + `resolve_overlaps`
+        + the soft-ML NOM sweep, while the old residual scan ran regex ONLY, with no
+        overlap resolution. So a match the masking pass's `resolve_overlaps` had
+        ABSORBED (a lower-priority overlap losing to a higher one) could reappear as
+        raw-regex "residual" on the shifted post-mask text — a structured form then
+        FAIL-CLOSED for a "leak" its OWN masker never considered a distinct entity
+        (observed live: a mangled-spacing SIREN on a liasse the masker didn't detect
+        as SIREN, so it couldn't mask it, yet the raw-regex re-scan flagged it →
+        stuck at 96% forever). By running `self._detect` here, the residual scan can
+        only flag what the masker's own full detector ALSO sees on the output: if the
+        masker missed it (couldn't detect → couldn't mask), the residual scan misses
+        it too — no more phantom fail-closes from detector disagreement. A REAL leak
+        (the masker DID detect a value but a bug left it in clear) is still caught,
+        because `_detect` on the output would re-detect that same value.
         """
         leftover: List[Match] = []
-        for m in detect(anonymized, self._recognizer_list()):
+        for m in self._detect(anonymized):
             # Ignore matches that fall entirely inside one of our tokens
             # (e.g. a recognizer firing on the digits of ⟦IBAN_0001⟧).
             if any(t.start() <= m.start and m.end <= t.end()

@@ -1,5 +1,39 @@
 # Changelog — bubble-shield
 
+## 1.23.31 — 2026-07-15 — FIX: residual scan consistent with masking + masks what it finds; Gemma verify timeout tunable
+
+Closes the "stuck structured form" incident end-to-end (a real liasse stranded at
+96% / 29-of-30 for days): after the daemon-idle fix (v1.23.29), TWO more independent
+gates were blocking it. Both fixed:
+
+- **fix(engine) #589-E — the residual scan now runs the SAME detector as masking,
+  and MASKS what it finds instead of just crying "leak".** The old scan ran a
+  WEAKER pipeline (bare regex, no GLiNER, no overlap resolution) on the OUTPUT —
+  which masking rearranges (token replacement + the #273 glue-fix change spacing/
+  word boundaries). A mangled-spacing SIREN unmatchable on the INPUT became
+  matchable on the rearranged OUTPUT → reported as residual → 'leak' → the form
+  fail-closed EVERY sweep, forever, for a value its own masker never saw. Now:
+  (1) `_residual_scan` uses `self._detect` (identical pipeline, same sensitivity
+  by construction); (2) a maskable value found on the output is MASKED into the
+  same vault (bounded 3-iter loop) and the output re-scanned — the leak is FIXED,
+  not blocked on and not ignored. Genuinely un-maskable residuals still report →
+  'leak' → fail-closed (tested); the safety net is intact, only the phantom
+  false-blocks are gone.
+- **fix(mcp) #589-F — the structured-form Gemma /extract_pii timeout was a hard,
+  MARGINAL 30s.** Measured on the same real ~35k-char liasse: 9.1s / 21.0s / >30s
+  (timeout) / ~60s across runs — pure load variance on the single serial MLX
+  worker. A marginal timeout makes certification a coin flip, and a timed-out form
+  is retried every sweep forever (30s of worker burned per retry, never completes).
+  Now 120s default (4× worst measurement), env-tunable per deployment via
+  `BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT`.
+- Includes the #589-D fix (verified-clean: a form the fast pass fully masked +
+  Gemma-ran-fine-found-nothing certifies instead of fail-closing) shipped in the
+  same train.
+- Verified on the REAL stuck liasse: certifies in ~64s, 149 entities masked
+  (including the revealed SIREN), zero residual. 5 new tests
+  (`test_residual_masked_not_reported.py`) incl. the un-maskable-residual
+  fail-closed guarantee + timeout env knob.
+
 ## 1.23.30 — 2026-07-15 — FIX: guard no longer fail-closes on long inputs (ENAMETOOLONG) — the REAL "erreur interne" cause
 
 The v1.23.27 traceback log (FIX 1) finally caught the actual exception behind the
