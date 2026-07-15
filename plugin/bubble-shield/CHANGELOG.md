@@ -1,5 +1,26 @@
 # Changelog — bubble-shield
 
+## 1.23.36 — 2026-07-16 — FEAT #574: strip the 2D-DOC barcode block by default (covert PII channel)
+
+French tax notices carry a machine-decodable ANSSI 2D-DOC barcode that encodes identity
++ amounts — a COVERT PII channel that survives even when the visible text is tokenized
+(the barcode payload is a base32-ish run, not caught by name/IBAN recognizers). Per
+Joris's #547 decision (barcode-first; amounts stay toggleable).
+
+- **feat(extract) — deterministic pre-tokenization 2D-DOC strip, default-on.**
+  `strip_2ddoc_barcodes` replaces a 2D-DOC block (`DC` header + version + CA id + a 40+-char
+  contiguous uppercase-alnum payload) with a single `⟦2DDOC_BARCODE_STRIPPED⟧` marker
+  (so the reader knows a block was removed, not silently dropped). Applied at
+  `extract_text`, the single dispatch every branch (PDF/DOCX/image/text) returns through.
+  The 40+-char CONTIGUOUS payload requirement is what stops normal uppercase prose/headings
+  (which have spaces) from ever matching. Idempotent + best-effort (a strip error returns
+  the original — never loses the doc). AMOUNTS in the visible text are UNTOUCHED (#547).
+  Applied in BOTH extractors: `scripts/bubble_shield_extract.py` AND `webapp/extract.py`
+  (the webapp has its own copy — both surfaces covered so no branch leaks the barcode).
+- 6 tests (`test_574_2ddoc_strip.py`), SYNTHETIC fixtures only (fabricated DC-header + fake
+  payload — never a real barcode), incl. the amounts-untouched + normal-text-not-stripped
+  regression guards.
+
 ## 1.23.35 — 2026-07-16 — FIX #581: ID-value regex no longer crosses a newline (8 mis-tags, hurt LIEU_NAISSANCE precision)
 
 The #577 LIEU_NAISSANCE bench surfaced 8 mis-tags: `structured_ext`'s ID-value char

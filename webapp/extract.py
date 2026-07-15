@@ -40,6 +40,22 @@ PDF_MAGIC = b"%PDF"
 
 _OCR_TAG = "[OCR]"  # prepended to signal OCR-sourced text to callers
 
+# #574 — strip the ANSSI 2D-DOC barcode block (a covert PII channel on FR tax notices)
+# from extracted text before tokenization. Mirrors bubble_shield_extract.py — keep the
+# two in sync. Amounts in the visible text are untouched (#547). Best-effort.
+import re as _re
+_2DDOC_MARKER = "⟦2DDOC_BARCODE_STRIPPED⟧"
+_2DDOC_RE = _re.compile(r"\bDC[0-9A-Z]{2}[0-9A-Z]{4}[0-9A-Z]{40,}")
+
+
+def strip_2ddoc_barcodes(text: str) -> str:
+    """Replace any 2D-DOC barcode block with the marker. Deterministic, idempotent,
+    best-effort (a strip error returns the original text, never loses the doc)."""
+    try:
+        return _2DDOC_RE.sub(_2DDOC_MARKER, text or "")
+    except Exception:
+        return text or ""
+
 # Image formats routed through OCR (#338). Mirrors bubble_shield_extract.py.
 # Detection by magic bytes OR extension so a mislabelled image still gets caught
 # (it must NOT fall through to the UTF-8 decoder — that returns a multi-MB binary
@@ -269,7 +285,9 @@ def extract_text(filename: str, raw: bytes) -> str:
     if not raw:
         return ""
     if looks_like_pdf(filename or "", raw):
-        return extract_pdf_text(raw)
-    if looks_like_image(filename or "", raw):
-        return extract_image_text(raw, filename or "")
-    return raw.decode("utf-8", errors="replace")
+        text = extract_pdf_text(raw)
+    elif looks_like_image(filename or "", raw):
+        text = extract_image_text(raw, filename or "")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    return strip_2ddoc_barcodes(text)  # #574 — strip 2D-DOC on every branch

@@ -40,6 +40,32 @@ DOCX_MAGIC = b"PK\x03\x04"  # docx is a zip
 
 _OCR_TAG = "[OCR]"  # prepended to signal OCR-sourced text to callers
 
+# #574 (child of #547, Joris 2026-07-07 → barcode-first) — strip the ANSSI 2D-DOC
+# barcode block from extracted text BEFORE tokenization. French tax notices carry a
+# machine-decodable 2D-DOC barcode that encodes identity + amounts — a COVERT PII
+# channel that survives even when the visible text is tokenized (the barcode payload
+# is a base32-ish run, not caught by name/IBAN recognizers). We replace the whole
+# block with a single marker so the reader knows a block was removed, not silently
+# dropped. Amounts in the VISIBLE text are untouched (per #547 they stay toggleable).
+#
+# Signature (rendered in a text layer): the header `DC` + 2 version chars + a 4-char
+# issuing-CA id + more header, then a long uninterrupted uppercase-alnum payload. Real
+# blocks are 100-600 chars. The 40+-char contiguous payload requirement is what stops
+# normal uppercase prose/headings (which have spaces) from ever matching.
+_2DDOC_MARKER = "⟦2DDOC_BARCODE_STRIPPED⟧"
+_2DDOC_RE = re.compile(r"\bDC[0-9A-Z]{2}[0-9A-Z]{4}[0-9A-Z]{40,}")
+
+
+def strip_2ddoc_barcodes(text: str) -> str:
+    """Replace any ANSSI 2D-DOC barcode block with `_2DDOC_MARKER`. Deterministic,
+    no models. Idempotent (the marker itself never matches). Best-effort: on any
+    regex error the original text is returned unchanged (a strip failure must never
+    lose the document)."""
+    try:
+        return _2DDOC_RE.sub(_2DDOC_MARKER, text or "")
+    except Exception:
+        return text or ""
+
 # Image formats we route through OCR. Detection is by extension OR magic bytes,
 # so a mislabelled/extensionless image still gets caught (a .png renamed .dat
 # must NOT fall through to the UTF-8 decoder — that returns a multi-MB binary
@@ -494,12 +520,16 @@ def extract_text(filename: str, raw: bytes) -> str:
     if not raw:
         return ""
     if looks_like_pdf(filename or "", raw):
-        return extract_pdf_text(raw)
-    if looks_like_docx(filename or "", raw):
-        return extract_docx_text(raw)
-    if looks_like_image(filename or "", raw):
-        return extract_image_text(raw, filename or "")
-    return raw.decode("utf-8", errors="replace")
+        text = extract_pdf_text(raw)
+    elif looks_like_docx(filename or "", raw):
+        text = extract_docx_text(raw)
+    elif looks_like_image(filename or "", raw):
+        text = extract_image_text(raw, filename or "")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    # #574 — strip any 2D-DOC barcode block from EVERY extraction branch, before the
+    # text reaches tokenization (the single choke-point so no branch can leak it).
+    return strip_2ddoc_barcodes(text)
 
 
 def extract_file(path: str | Path) -> str:
