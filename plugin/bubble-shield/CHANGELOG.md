@@ -1,5 +1,34 @@
 # Changelog — bubble-shield
 
+## 1.23.32 — 2026-07-15 — FIX #643: structured-form Gemma verify covers the WHOLE doc (was blind to 83% of long forms)
+
+The structured-form second pass (#589 — "escalate to Gemma to catch PII the fast
+pass MISSED on a form") truncated to `text[:6000]`. On a real ~35k-char liasse the
+verify saw ~17% of the doc, silently defeating the guarantee on exactly the long-form
+class that dominates a CGP base.
+
+- **fix(verify) — window the WHOLE doc, CLIENT-SIDE.** `_gemma_extract_call` now
+  splits the text into overlapping windows and POSTs each as a SHORT separate
+  `/extract_pii` request (mirroring the de-pollution `daemon_classify` pattern), then
+  unions the spans. `gemma_classifier.extract_pii` processes ONE window per request.
+  WHY client-side: a whole-doc call in ONE request took 121s and tripped the daemon's
+  internal `REQ_TIMEOUT_EXTRACT` (90s) → HTTP 500; N short requests each stay well
+  under it. Gemma can't be parallelized (measured: 2 parallel procs 77.5s+53.6s vs
+  13.7s solo — Metal serializes), so the cost is genuinely N-sequential and correct.
+  Fail-closed preserved: a per-window request error re-raises (the caller fails
+  closed) — a dropped window is a hole in the verify, never silently accepted.
+- **fix(verify) — size cap → quarantine (#646).** A form over
+  `_GEMMA_VERIFY_MAX_WINDOWS` (12 ≈ 72k chars) is NOT ground for many minutes on the
+  single serial worker (that starves the backlog); it raises `StructuredFormTooLargeError`
+  (a SUBCLASS of StructuredFormUnverifiedError so every fail-closed handler still
+  catches it — no leak) so the sweep can quarantine it. Note: a 300-page acte de
+  cession is PROSE (not a fiscal form) → fast-pass only, never hits this path.
+- Verified live on the real 35k liasse: whole-doc verify OK in ~5 min (7 sequential
+  windows), 153 tokens masked (MORE than the truncated version's 149 — it now catches
+  what the first-6000-chars pass missed). 7 new tests (`test_643_windowed_verify.py`).
+- Strategic follow-up (#594): a faster whole-doc detector collapses the 7 sequential
+  windows into 1 — the real speed lever, since parallelism is off the table.
+
 ## 1.23.31 — 2026-07-15 — FIX: residual scan consistent with masking + masks what it finds; Gemma verify timeout tunable
 
 Closes the "stuck structured form" incident end-to-end (a real liasse stranded at

@@ -92,6 +92,14 @@ _EXTRACT_PROMPT = (
 _ALLOWED_TYPES = {"NOM", "PRENOM", "SIRET", "DATE_NAISSANCE", "LIEU_NAISSANCE",
                   "ADRESSE", "TELEPHONE", "RAISON_SOCIALE"}
 
+# #643 — windowed extract_pii over the WHOLE doc (was a hard text[:6000] truncation).
+# Window ≈ the old 6000-char cap (a size the model handles well in one decode);
+# OVERLAP so a value straddling a boundary appears whole in ≥1 window. Env-tunable
+# for a machine that wants larger/smaller windows.
+import os as _os
+_EXTRACT_WINDOW = int(_os.environ.get("BUBBLE_SHIELD_EXTRACT_WINDOW", "6000"))
+_EXTRACT_OVERLAP = int(_os.environ.get("BUBBLE_SHIELD_EXTRACT_OVERLAP", "400"))
+
 
 _AUCUNE_STRIP_CHARS = " \t\r\n\"'«»«»"
 
@@ -161,9 +169,24 @@ class GemmaClassifier:
         return out
 
     def extract_pii(self, text):
+        """Extract PII spans from ONE window of text (a single Gemma generate).
+
+        #643 (2026-07-15): this used to truncate to `text[:6000]` — so on a ~35k
+        liasse the structured-form verify saw ~17% of the doc. The WINDOWING that
+        fixes that lives CLIENT-SIDE (`bubble_shield_mcp._gemma_extract_call`, which
+        POSTs N short per-window /extract_pii requests and unions the spans), NOT
+        here — mirroring the de-pollution `daemon_classify` pattern. Keeping each
+        daemon request to ONE window keeps it SHORT (~15-30s), so it never trips the
+        daemon's internal per-request back-pressure timeout (REQ_TIMEOUT_EXTRACT=90s;
+        a whole-doc call in ONE request took 121s and was abandoned → HTTP 500).
+
+        So this method no longer truncates AND no longer loops: it processes exactly
+        the window it is handed. `[:_EXTRACT_WINDOW]` is a pure safety clamp (the
+        client already sends ≤ one window; this guards a direct caller from blowing
+        the per-request budget)."""
         from mlx_lm import generate
         resp = generate(self._model, self._tok,
-                        prompt=_EXTRACT_PROMPT.format(text=text[:6000]),
+                        prompt=_EXTRACT_PROMPT.format(text=(text or "")[:_EXTRACT_WINDOW]),
                         max_tokens=512, verbose=False)
         return _parse_extract(resp)
 

@@ -884,6 +884,26 @@ class StructuredFormUnverifiedError(RuntimeError):
     to it. Callers convert this to isError:true with NO body."""
 
 
+# #643 — a structured form so large its windowed Gemma verify would monopolise the
+# single serial worker for many minutes (Gemma can't be parallelized). We fail closed
+# (no leak, doc not certified) but with a DISTINCT signal so the sweep quarantines it
+# (#646 needs-attention) instead of retrying it every sweep forever.
+_GEMMA_VERIFY_MAX_WINDOWS = int(
+    os.environ.get("BUBBLE_SHIELD_GEMMA_VERIFY_MAX_WINDOWS", "12"))  # ~72k chars / ~4-6 min
+_STRUCTURED_FORM_TOO_LARGE_ERROR = (
+    "Bubble Shield a identifié un formulaire structuré TRÈS VOLUMINEUX dont la "
+    "vérification approfondie dépasserait le budget de traitement. Le contenu n'est "
+    "PAS renvoyé ; ce document nécessite une relecture humaine (mis en attente)."
+)
+
+
+class StructuredFormTooLargeError(StructuredFormUnverifiedError):
+    """#643 — a structured form too large to Gemma-verify within budget. Subclass of
+    StructuredFormUnverifiedError so EVERY existing fail-closed handler still catches it
+    (no leak, no body), while the sweep can distinguish it (isinstance) to QUARANTINE the
+    doc (#646) rather than retry it forever."""
+
+
 _GEMMA_PORT = 8724
 
 
@@ -893,24 +913,42 @@ def _structured_form_note() -> str:
             "document. Une relecture humaine reste conseillée avant envoi.]")
 
 
-# #589-F (2026-07-15) — the second-pass /extract_pii timeout. Was a hard 30s,
-# which is MARGINAL on a real multi-page liasse: measured 9.1s / 21.0s / >30s
-# (timeout) for the SAME ~35k-char doc across runs — pure load variance on the
-# single serial MLX worker. A marginal timeout makes certification a COIN FLIP,
-# and a timed-out structured form is retried EVERY sweep forever, burning ~30s of
-# the serial worker per retry without ever completing — strictly worse than
-# letting the call finish once. 120s = 4× the worst measurement. Env-tunable per
-# deployment (a Mac-mini indexer can afford more; an interactive client may want
-# less): BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT.
+# #589-F (2026-07-15) — the second-pass /extract_pii PER-WINDOW timeout budget.
+# Was a hard 30s, MARGINAL on a real liasse (measured 9.1/21.0/>30s for the SAME
+# ~35k doc — load variance on the single serial MLX worker). A marginal timeout
+# makes certification a COIN FLIP; a timed-out form is retried every sweep forever.
+# 120s = 4× the worst single-window measurement.
+#
+# #643 (2026-07-15) — SCALING: extract_pii now WINDOWS the whole doc daemon-side
+# (was a text[:6000] truncation that saw ~17% of a long form). The daemon runs N
+# sequential generates in ONE HTTP call, so a fixed client timeout would time out a
+# multi-window doc — recreating the coin-flip in a new place. So the client timeout
+# SCALES with the window count: base + per-window budget × windows, capped. This
+# matches the real cost (N sequential ~15-30s calls) instead of a fixed guess.
+# Gemma CANNOT be parallelized (measured 2026-07-15: 2 parallel gemma procs → 77.5s
+# + 53.6s vs 13.7s solo; Metal serializes), so the cost is genuinely N-sequential
+# and the timeout must reflect that.
 _GEMMA_EXTRACT_TIMEOUT_S = float(
-    os.environ.get("BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT", "120"))
+    os.environ.get("BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT", "120"))  # per-window budget
+# Must mirror gemma_classifier._EXTRACT_WINDOW / _EXTRACT_OVERLAP (the daemon-side
+# windowing) so the count matches what the daemon will actually do.
+_EXTRACT_WINDOW = int(os.environ.get("BUBBLE_SHIELD_EXTRACT_WINDOW", "6000"))
+_EXTRACT_OVERLAP = int(os.environ.get("BUBBLE_SHIELD_EXTRACT_OVERLAP", "400"))
+def _extract_window_count(text_len: int) -> int:
+    """How many windows `_gemma_extract_call` will POST for `text_len` chars. Mirrors
+    its `range(0, len, WINDOW-OVERLAP)`. Used by the #643 size cap (a form over
+    _GEMMA_VERIFY_MAX_WINDOWS windows is quarantined, not ground for many minutes)."""
+    step = max(1, _EXTRACT_WINDOW - _EXTRACT_OVERLAP)
+    return max(1, (max(1, text_len) + step - 1) // step)
 
 
-def _gemma_extract_call(text: str):
-    """POST text to the local Gemma daemon /extract_pii. Returns the spans list.
-    Raises on any transport/HTTP/parse failure (caller fails closed)."""
+def _gemma_extract_one_window(chunk: str):
+    """POST ONE window to the daemon /extract_pii. Short request (one generate,
+    ~15-30s) so it never trips the daemon's REQ_TIMEOUT_EXTRACT (90s). Raises on
+    transport/HTTP/parse failure so the caller fails closed. The per-request HTTP
+    timeout is the single-window budget (_GEMMA_EXTRACT_TIMEOUT_S)."""
     import urllib.request, json as _json
-    data = _json.dumps({"text": text}).encode("utf-8")
+    data = _json.dumps({"text": chunk}).encode("utf-8")
     req = urllib.request.Request(
         f"http://127.0.0.1:{_GEMMA_PORT}/extract_pii", data=data,
         headers={"Content-Type": "application/json"})
@@ -919,6 +957,40 @@ def _gemma_extract_call(text: str):
     if not payload.get("ok"):
         raise RuntimeError("gemma extract not ok")
     return list(payload.get("spans", []))
+
+
+def _gemma_extract_call(text: str):
+    """#643 — verify the WHOLE doc by CLIENT-SIDE windowing (mirrors the de-pollution
+    `daemon_classify` pattern), NOT a single long daemon request.
+
+    The old body sent the whole text in ONE /extract_pii call; the daemon then either
+    truncated to text[:6000] (blind to 83% of a long form) or — once windowed daemon-
+    side — took 121s in ONE request and tripped the daemon's REQ_TIMEOUT_EXTRACT (90s)
+    → HTTP 500. Fix: split the text into overlapping windows HERE and POST each as a
+    SHORT separate request (~15-30s each, well under 90s), then UNION the spans. Each
+    daemon call stays short; the total scales with doc length across bounded calls
+    (Gemma can't be parallelized — measured — so this is genuinely sequential and
+    correct). Overlap (`_EXTRACT_OVERLAP`) keeps a boundary-straddling value whole in
+    ≥1 window. Spans are value-only → dedup'd union, no offset bookkeeping.
+
+    Fail-closed preserved: a window whose request errors is RE-RAISED (the caller
+    fails closed) — we do NOT silently drop a window, because a dropped window is
+    exactly a hole in the verify. (Contrast the de-pollution path, which fail-toward-
+    MASKS per chunk; here the verify must be complete or fail closed.)"""
+    text = text or ""
+    step = max(1, _EXTRACT_WINDOW - _EXTRACT_OVERLAP)
+    seen = set()
+    spans = []
+    for start in range(0, max(1, len(text)), step):
+        chunk = text[start:start + _EXTRACT_WINDOW]
+        if not chunk.strip():
+            continue
+        for sp in _gemma_extract_one_window(chunk):  # raises → caller fails closed
+            key = (sp.get("type"), sp.get("text"))
+            if key not in seen:
+                seen.add(key)
+                spans.append(sp)
+    return spans
 
 
 def _gemma_second_pass(res, engine) -> str:
@@ -946,6 +1018,14 @@ def _gemma_second_pass(res, engine) -> str:
     spans) must fail closed exactly like empty spans — both mean "nothing was
     verified/masked" on a substantial form.
     """
+    # #643 SIZE-CAP: a genuinely giant form would take N sequential Gemma windows
+    # (Gemma can't be parallelized — measured). Above the cap we do NOT grind it for
+    # many minutes on the single serial worker (that starves the whole backlog);
+    # instead fail closed with the quarantine signal so the sweep marks it
+    # needs-attention (#646) rather than retrying it forever. The doc is NOT
+    # certified (fail-closed, no leak) — it just doesn't monopolise the worker.
+    if _extract_window_count(len(res.anonymized or "")) > _GEMMA_VERIFY_MAX_WINDOWS:
+        raise StructuredFormTooLargeError(_STRUCTURED_FORM_TOO_LARGE_ERROR)
     try:
         spans = _gemma_extract_call(res.anonymized)
     except Exception as e:
