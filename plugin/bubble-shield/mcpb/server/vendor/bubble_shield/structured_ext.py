@@ -304,15 +304,21 @@ def form_lieu_naissance_matches(text: str) -> List[Match]:
 # CNI (carte nationale d'identité): 12-digit string (new) or old 9-char
 # Generic: alphanumeric runs 6–20 chars that look like an ID number
 
-_ID_VALUE = r"(?P<val>[A-Z0-9][A-Z0-9\s]{4,24})"
+# #581 (2026-07-16): the ID value classes used `\s`, which INCLUDES `\n` — so an
+# ID-number pattern crossed a line break and swallowed a SIRET-shaped run + adjacent
+# LIEU_NAISSANCE content onto the next line, producing 8 mis-tags (hurting
+# LIEU_NAISSANCE precision, #577 bench). An ID number never spans a line break —
+# mirror the NOM/`_SP` line-break fix: intra-line whitespace only (space + tab),
+# never a newline. `[^\S\n]`-equivalent inside a char class = literal ` \t`.
+_ID_VALUE = r"(?P<val>[A-Z0-9][A-Z0-9 \t]{4,24})"
 
 _PIECE_LABEL_RE = re.compile(
     r"(?i)"
     r"(?:"
     r"(?:pi[eè]ce\s+d['']\s*identit[eé]|passeport|carte\s+(?:nationale\s+d['']\s*identit[eé]|d['']\s*identit[eé])|CNI|titre\s+de\s+s[eé]jour)"
-    r"[^\S\n]*(?:n[o°]\s*|num[eé]ro\s*)?[:\s]+(?P<val>[A-Z0-9][A-Z0-9\s\-]{4,29})"
+    r"[^\S\n]*(?:n[o°]\s*|num[eé]ro\s*)?[:\s]+(?P<val>[A-Z0-9][A-Z0-9 \t\-]{4,29})"
     r"|"
-    r"n[o°]\s*(?:passeport|CNI|pièce|pi[eè]ce|carte)[^\S\n]*[:\s]+(?P<val2>[A-Z0-9][A-Z0-9\s\-]{4,29})"
+    r"n[o°]\s*(?:passeport|CNI|pièce|pi[eè]ce|carte)[^\S\n]*[:\s]+(?P<val2>[A-Z0-9][A-Z0-9 \t\-]{4,29})"
     r")",
     re.MULTILINE,
 )
@@ -323,7 +329,7 @@ _ID_INLINE_RE = re.compile(
     r"(?i)"
     r"(?:passeport|CNI|pi[eè]ce\s+d['']\s*identit[eé]|carte\s+(?:nationale\s+d['']\s*identit[eé]|d['']\s*identit[eé])|titre\s+de\s+s[eé]jour)"
     r"[^\S\n]*n[o°°]?[^\S\n]*:?[^\S\n]*"
-    r"(?P<val>[A-Z0-9][A-Z0-9\s\-]{4,29})",
+    r"(?P<val>[A-Z0-9][A-Z0-9 \t\-]{4,29})",
     re.MULTILINE,
 )
 

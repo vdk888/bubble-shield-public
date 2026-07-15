@@ -1,5 +1,23 @@
 # Changelog — bubble-shield
 
+## 1.23.35 — 2026-07-16 — FIX #581: ID-value regex no longer crosses a newline (8 mis-tags, hurt LIEU_NAISSANCE precision)
+
+The #577 LIEU_NAISSANCE bench surfaced 8 mis-tags: `structured_ext`'s ID-value char
+classes used `\s` (which INCLUDES `\n`), so a PIECE_IDENTITE/ID-number pattern crossed
+a line break and swallowed a SIRET-shaped run + adjacent LIEU_NAISSANCE content onto the
+next line. An ID number never spans a line break — the same class as the documented
+NOM/`_SP` line-break fix.
+
+- **fix(structured_ext) — intra-line whitespace only in ID value classes.** All 4
+  occurrences of `[A-Z0-9\s...]` → `[A-Z0-9 \t...]` (space + tab, never `\n`). A
+  split-across-a-newline run is no longer captured as one value; a same-line ID still
+  matches fully (no recall regression). 4 tests (`test_581_id_newline.py`) incl. a
+  file-level guard that no ID class uses bare `\s`.
+- Validation note: the regex-level fix is proven by tests; re-running the #572/#577
+  precision bench (needs the ML pack) is the on-demand confirmation step.
+- Also synced the repo-root + mcpb-mirror `structured_ext.py` copies with the vendored
+  one (the SAME dual-copy drift that #646 surfaced — flagged for a hygiene guard).
+
 ## 1.23.34 — 2026-07-15 — FEAT #646: quarantine un-certifiable docs (stop the infinite retry that burns the Gemma worker)
 
 A doc that fails to certify EVERY sweep (an un-extractable INPI/watermarked doc, a
