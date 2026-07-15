@@ -79,10 +79,29 @@ CREATE TABLE IF NOT EXISTS gazetteer (
   UNIQUE(value, entity_type)
 );
 CREATE TABLE IF NOT EXISTS pending (
-  src_path  TEXT PRIMARY KEY,
-  marked_at REAL
+  src_path   TEXT PRIMARY KEY,
+  marked_at  REAL,
+  fail_count INTEGER NOT NULL DEFAULT 0
 );
 """
+
+# #646 — after this many consecutive sweep failures on the SAME source, a doc is
+# QUARANTINED (surfaced as needs-attention) instead of retried every sweep forever
+# (which burns the single serial Gemma worker on a doc that can't complete — e.g. an
+# un-extractable INPI/watermarked doc, or a giant form). Env-tunable.
+import os as _os_q
+QUARANTINE_AFTER_FAILS = int(_os_q.environ.get("BUBBLE_SHIELD_QUARANTINE_AFTER_FAILS", "5"))
+
+
+def _ensure_fail_count_column(conn) -> None:
+    """Backward-compat: an existing pending table (pre-#646) lacks fail_count. Add it
+    additively (defaulted) so old DBs upgrade in place with no data migration. Idempotent."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(pending)")}
+        if "fail_count" not in cols:
+            conn.execute("ALTER TABLE pending ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # best-effort; a missing column just means quarantine never triggers (safe)
 
 def _harden_permissions(p: Path) -> None:
     """Lock the store file to owner-only (0600) and its parent dir to 0700 —
@@ -335,18 +354,33 @@ def stats() -> dict:
         "total_entities": sum(totals.values()),
     }
 
-def mark_pending(src_path: str) -> None:
+def mark_pending(src_path: str, *, failed: bool = False) -> None:
     """Queue a source file for the shadow-index sweep (Task 5's read-miss path
     calls this). A WRITE, so it mirrors put_shadow EXACTLY: connect → write →
     close, with the outer finally re-sealing the working copy back into
-    shield.db.enc (Task 4 encryption at rest). The seal is what puts the pending
-    row inside the encrypted envelope and drops the plaintext working copy."""
+    shield.db.enc (Task 4 encryption at rest).
+
+    #646: `failed=True` (a sweep tried to certify this doc and COULD NOT) INCREMENTS
+    fail_count so a deterministically-uncertifiable doc (un-extractable INPI, giant
+    form) is quarantined after QUARANTINE_AFTER_FAILS instead of retried forever. A
+    plain miss-queue (`failed=False`, the read-miss path) does NOT increment — it's
+    not a failure, just a not-yet-indexed file."""
     conn = connect()
     try:
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO pending (src_path, marked_at) VALUES (?,?)",
-                (src_path, time.time()))
+            _ensure_fail_count_column(conn)
+            if failed:
+                # increment on a real certify-failure; preserve count across re-marks
+                conn.execute(
+                    "INSERT INTO pending (src_path, marked_at, fail_count) VALUES (?,?,1) "
+                    "ON CONFLICT(src_path) DO UPDATE SET marked_at=excluded.marked_at, "
+                    "fail_count=fail_count+1",
+                    (src_path, time.time()))
+            else:
+                conn.execute(
+                    "INSERT INTO pending (src_path, marked_at, fail_count) VALUES (?,?,0) "
+                    "ON CONFLICT(src_path) DO UPDATE SET marked_at=excluded.marked_at",
+                    (src_path, time.time()))
             conn.commit()
         finally:
             conn.close()
@@ -354,12 +388,28 @@ def mark_pending(src_path: str) -> None:
         _seal()  # re-encrypt working copy → shield.db.enc, drop the plaintext
 
 def pending_files() -> list:
-    """All source paths currently queued for the sweep. A READ: mirrors
-    list_indexed — drop the decrypted plaintext working copy afterwards so no
-    unmasked-PII-bearing DB lingers at rest between operations."""
+    """Source paths queued for the sweep, EXCLUDING quarantined ones (#646) — a
+    quarantined doc has failed QUARANTINE_AFTER_FAILS+ times and must NOT be retried
+    (it burns the serial worker). A READ: drop the plaintext working copy afterwards."""
     conn = connect()
     try:
-        return [r[0] for r in conn.execute("SELECT src_path FROM pending")]
+        _ensure_fail_count_column(conn)
+        return [r[0] for r in conn.execute(
+            "SELECT src_path FROM pending WHERE fail_count < ?",
+            (QUARANTINE_AFTER_FAILS,))]
+    finally:
+        conn.close()
+        _drop_working_copy()
+
+def quarantined_files() -> list:
+    """#646 — source paths that have failed to certify QUARANTINE_AFTER_FAILS+ times.
+    These are surfaced to the operator (needs-attention) and NOT re-swept. A READ."""
+    conn = connect()
+    try:
+        _ensure_fail_count_column(conn)
+        return [r[0] for r in conn.execute(
+            "SELECT src_path FROM pending WHERE fail_count >= ?",
+            (QUARANTINE_AFTER_FAILS,))]
     finally:
         conn.close()
         _drop_working_copy()

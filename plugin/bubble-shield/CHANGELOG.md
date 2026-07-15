@@ -1,5 +1,28 @@
 # Changelog — bubble-shield
 
+## 1.23.34 — 2026-07-15 — FEAT #646: quarantine un-certifiable docs (stop the infinite retry that burns the Gemma worker)
+
+A doc that fails to certify EVERY sweep (an un-extractable INPI/watermarked doc, a
+giant form, a persistently-failing verify) was re-tried on every sweep FOREVER —
+burning the single serial Gemma worker (which can't be parallelized) on a doc that can
+never complete. The stuck liasse did exactly this for days before it was fixed. On the
+81k base, a handful of permanently-un-processable docs would permanently steal worker
+time from the backlog.
+
+- **feat(sweep) — quarantine-after-N.** `pending` gains a `fail_count` column (additive
+  schema + a backward-compat `ALTER TABLE ADD COLUMN` for existing DBs — no migration).
+  `mark_pending(failed=True)` (a certify-failure) increments it; a plain read-miss queue
+  (`failed=False`) does NOT (a not-yet-indexed file is not a failure). After
+  `QUARANTINE_AFTER_FAILS` (env, default 5) the doc leaves the pending/retry queue →
+  `quarantined_files()` (surfaced to the operator, needs-attention). `run_sweep` SKIPS
+  quarantined content — no re-fail, no worker burn — and returns a `quarantined` count.
+  The #643 `StructuredFormTooLargeError` (giant forms) feeds this automatically (it's a
+  certify-failure → increments → quarantines). Env `BUBBLE_SHIELD_QUARANTINE_AFTER_FAILS`.
+- 4 tests (`test_646_quarantine.py`) incl. the plain-miss-never-quarantines + backward-
+  compat-old-schema + sweep-skips-quarantined guarantees.
+- (Also synced the repo-root `bubble_shield/` engine copies with the vendored ones — a
+  latent dual-copy drift the change surfaced.)
+
 ## 1.23.33 — 2026-07-15 — FIX #644: host update also refreshes the DAEMON stable dir (was stranding daemon code)
 
 Same 'repo ≠ running code' class as the guard host-refresh (v1.23.28), different

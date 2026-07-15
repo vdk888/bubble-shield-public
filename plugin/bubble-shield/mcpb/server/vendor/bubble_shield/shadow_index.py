@@ -150,8 +150,14 @@ def _index_one_resilient(path: str, *, anonymize_fn) -> str:
         # serves RAW extracted text via the B1 accepted-gap miss path (see
         # bubble_shield_read._read_with_shadow). Aborting the whole sweep on
         # one un-certifiable doc would be worse than that gap.
+        #
+        # #646: mark it as a FAILURE (failed=True) so fail_count increments — a doc
+        # that fails deterministically every sweep (un-extractable INPI, giant form)
+        # is QUARANTINED after QUARANTINE_AFTER_FAILS instead of retried forever
+        # (which burns the single serial Gemma worker on a doc that never completes).
+        # pending_files() excludes quarantined docs; quarantined_files() surfaces them.
         try:
-            shadow_store.mark_pending(str(p))
+            shadow_store.mark_pending(str(p), failed=True)
         except Exception:
             pass
         return "failed"
@@ -229,7 +235,15 @@ def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
     """
     root_p = Path(os.path.expanduser(root)).resolve()
     already = shadow_store.list_indexed()
-    indexed = skipped = deferred = failed = 0
+    # #646: docs that failed to certify QUARANTINE_AFTER_FAILS+ times are SKIPPED —
+    # re-sweeping them just re-fails and burns the serial Gemma worker. Keyed by the
+    # resolved src_path (same normalisation the walk + mark_pending use). Load once.
+    try:
+        quarantined = {str(Path(os.path.expanduser(x)).resolve())
+                       for x in shadow_store.quarantined_files()}
+    except Exception:
+        quarantined = set()
+    indexed = skipped = deferred = failed = quarantined_skipped = 0
     for p in sorted(root_p.rglob("*")):
         try:
             if not p.is_file():
@@ -262,6 +276,12 @@ def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
             if h in already:
                 skipped += 1
                 continue
+            # #646: a quarantined doc (failed N+ times) is NOT re-swept — it can't
+            # certify and would just burn the serial worker again. It stays surfaced
+            # via quarantined_files() for the operator, not retried here.
+            if str(Path(os.path.expanduser(str(p))).resolve()) in quarantined:
+                quarantined_skipped += 1
+                continue
             outcome = _index_one_resilient(str(p), anonymize_fn=anonymize_fn)
             if outcome == "indexed":
                 indexed += 1
@@ -283,4 +303,5 @@ def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
                 pass
             deferred += 1
     return {"indexed": indexed, "skipped": skipped,
-            "deferred": deferred, "failed": failed}
+            "deferred": deferred, "failed": failed,
+            "quarantined": quarantined_skipped}
