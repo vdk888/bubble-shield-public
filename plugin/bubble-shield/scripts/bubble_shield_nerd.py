@@ -51,7 +51,17 @@ DEFAULT_PORT = int(os.environ.get("BUBBLE_SHIELD_NERD_PORT", "8723"))
 # (fail-closed) until a cold ~20-37s re-spawn. A 4h timeout keeps it warm across a
 # normal working session while still freeing RAM overnight. Set
 # BUBBLE_SHIELD_NERD_IDLE=0 (or high) for an "always-warm" client. (#561)
-IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "600"))
+#
+# REGRESSION FIX (2026-07-15, #561-B): the literal had drifted back to 600s while
+# the comment still said 4h — a doc/code mismatch. 600s is CATASTROPHIC with the
+# sweep: the sweep fires every 1200s (StartInterval) but nerd idle-shut at 600s, so
+# nerd is ALWAYS cold when the sweep runs. A doc that needs GLiNER to certify (any
+# structured form — liasse/CERFA) then fail-closes EVERY sweep, stays pending
+# forever, and the sweep re-warms ~4GB every 20 min to retry one file that can
+# never complete (observed live: 29/30 indexed, 1 liasse stuck, 4GB CPU loop).
+# The idle-shutdown MUST outlast the sweep interval so the daemon warmed for sweep
+# N is still alive at N+1. 4h >> 1200s satisfies that with margin.
+IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "14400"))  # 4h (#561/#561-B)
 
 _last_activity = time.time()
 _lock = threading.Lock()

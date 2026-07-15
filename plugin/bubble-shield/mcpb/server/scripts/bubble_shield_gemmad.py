@@ -33,7 +33,13 @@ from __future__ import annotations
 import argparse, json, os, queue, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_GEMMA_IDLE", "600"))
+# 4h idle-shutdown (#561-B, 2026-07-15). Was 600s — SHORTER than the sweep's
+# 1200s interval, so gemmad was always cold when the sweep needed it (a structured
+# form needs the Gemma verify pass; a cold-race fail-closed the doc every sweep,
+# stranding it pending forever and re-warming ~4GB every 20 min for one stuck file).
+# The idle-shutdown must outlast the sweep interval so the daemon stays warm across
+# consecutive sweeps. Set BUBBLE_SHIELD_GEMMA_IDLE=0 for an always-warm client.
+IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_GEMMA_IDLE", "14400"))  # 4h (#561-B)
 DEFAULT_PORT = 8724
 MODEL_ID = "mlx-community/gemma-3n-E4B-it-lm-4bit"
 

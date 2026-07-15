@@ -1,5 +1,26 @@
 # Changelog — bubble-shield
 
+## 1.23.29 — 2026-07-15 — FIX: daemon idle-shutdown must outlast the sweep interval (stuck-doc 4GB loop)
+
+Incident (found live): a client base showed 29/30 docs indexed, stuck at 96% — one
+"liasse fiscale" (a structured tax form) perpetually pending, and the sweep re-warming
+~4GB (GLiNER + Gemma) every 20 min to retry it. Root cause: the NER + Gemma daemons'
+idle-shutdown default had drifted back to **600s** while the sweep's `StartInterval` is
+**1200s**. So the daemon warmed for sweep N always idle-shut-down before sweep N+1 →
+every sweep hit a COLD daemon → the liasse (a structured form REQUIRES GLiNER to certify,
+fail-closed per #589) raised `NERDownError` and was marked `failed` every sweep, stranded
+`pending` forever. Net: a permanent 4GB/CPU loop retrying one doc that could never complete.
+The daemon comment already said "4h default" (#561) — but the literal had regressed to 600s
+(doc/code mismatch).
+
+- **fix(daemons) — idle-shutdown default 600s → 14400s (4h), for BOTH nerd + gemmad.**
+  The idle-shutdown must be strictly greater than the sweep interval so a daemon warmed
+  for one sweep is still alive at the next (no cold-race, no fail-close loop). This also
+  REDUCES churn (no repeated ~4GB cold loads every 20 min). Env overrides
+  (`BUBBLE_SHIELD_NERD_IDLE` / `BUBBLE_SHIELD_GEMMA_IDLE`, `0` = always-warm) still honoured.
+  4 regression tests lock the invariant (`idle_default > sweep_interval`) + pin the exact
+  default so the doc/code mismatch can't silently reappear.
+
 ## 1.23.28 — 2026-07-15 — FIX: host guard-refresh (updates now actually reach the live guard)
 
 Incident: v1.23.27 shipped the guard false-block fix to dev/public/the app
