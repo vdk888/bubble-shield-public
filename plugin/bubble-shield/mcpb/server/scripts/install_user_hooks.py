@@ -205,19 +205,78 @@ def _entry_is_bubble_shield(entry: dict, kind: str) -> bool:
     return False
 
 
+def _guard_armed_in_host_settings() -> bool:
+    """True if the host settings.json ALREADY carries our PreToolUse guard entry.
+
+    This is the opt-in signal for the host refresh: we only refresh STABLE_DIR
+    scripts for a machine that has already chosen to run the guard. A machine
+    that never armed it has no entry → returns False → no refresh → zero
+    footprint. Fail-closed toward NO-refresh: any read/parse error → False (never
+    touch a machine we can't positively confirm opted in)."""
+    try:
+        p = _user_settings_path()
+        if not p.is_file():
+            return False
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+        pre = (data.get("hooks", {}) or {}).get("PreToolUse", []) or []
+        return any(_entry_is_bubble_shield(e, "guard.py") for e in pre)
+    except Exception:
+        return False
+
+
+def _refresh_stable_scripts_if_armed() -> None:
+    """HOST last-mile fix: if the guard is already armed on this host, re-copy the
+    current plugin's hook scripts into STABLE_DIR so a plugin/app UPDATE actually
+    refreshes the live guard the hook runs — closing the gap where a shipped guard
+    fix never reached STABLE_DIR/guard.py (v1.23.27 incident).
+
+    Copy-ONLY: never writes settings.json, never ARMS the guard. Gated on
+    `_guard_armed_in_host_settings()` so a machine that never opted in is left
+    completely untouched (same zero-footprint guarantee as before). Also force-
+    refreshes the vendored engine, because a guard/posttool fix may depend on
+    engine changes and `_install_scripts` otherwise skips vendor once present."""
+    if not _guard_armed_in_host_settings():
+        return
+    _install_scripts()
+    # `_install_scripts` skips vendor/ if already present (it's big + usually
+    # unchanged). But a refresh is exactly when a stale vendored engine should be
+    # updated too, so force it here.
+    try:
+        vendor_src = Path(PLUGIN_ROOT) / "vendor"
+        if vendor_src.is_dir():
+            shutil.copytree(vendor_src, STABLE_DIR / "vendor", dirs_exist_ok=True)
+    except Exception:
+        pass  # best-effort; the script refresh above is the critical part
+
+
 def main() -> None:
     try:
         sys.stdin.read()  # drain event JSON; we don't need it
     except Exception:
         pass
 
-    # COWORK-ONLY GATE — the whole point of this installer is to arm the guard
-    # inside the Cowork VM. On the host Mac (or anywhere we can't positively
-    # confirm Cowork) we must NOT write into the shared user settings.json, or
-    # we spill the guard onto the machine and risk bricking unrelated sessions
-    # and crons. So: if we're not in Cowork, do nothing at all. We do NOT even
-    # copy the scripts to STABLE_DIR — leaving zero footprint on the host.
+    # COWORK-ONLY GATE — arming the guard (writing hook entries into the shared
+    # user settings.json) is Cowork-only. On the host Mac we must NOT write into
+    # settings.json or we'd spill the guard onto a machine that never opted in,
+    # risking unrelated sessions and crons.
+    #
+    # HOST REFRESH (2026-07-15) — but there is a last-mile gap: if the user HAS
+    # already armed the guard on their host (Mac install), a plugin/app UPDATE
+    # refreshes the checkout yet NEVER refreshes the live guard the hook actually
+    # runs (STABLE_DIR/guard.py). So a shipped guard fix silently never reaches
+    # the running hook — the exact failure that stranded v1.23.27 (guard.py at
+    # STABLE_DIR stayed on old flaky code while the checkout was fixed). Fix:
+    # when NOT in Cowork, if the guard is ALREADY armed in the host settings
+    # (user opted in previously), REFRESH the STABLE_DIR scripts from the current
+    # plugin — WITHOUT touching settings.json. This is copy-only (no arming), so
+    # it cannot spill onto a machine that never opted in: no armed entry → no
+    # refresh → zero footprint, exactly as before. It only ever updates code the
+    # user is already running.
     if not _in_cowork_vm():
+        try:
+            _refresh_stable_scripts_if_armed()
+        except Exception:
+            pass  # best-effort: a refresh failure must never break SessionStart
         sys.exit(0)
 
     try:

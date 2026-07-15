@@ -1,5 +1,27 @@
 # Changelog — bubble-shield
 
+## 1.23.28 — 2026-07-15 — FIX: host guard-refresh (updates now actually reach the live guard)
+
+Incident: v1.23.27 shipped the guard false-block fix to dev/public/the app
+checkout — but the guard the hook ACTUALLY runs lives at STABLE_DIR
+(`~/.claude/bubble-shield/guard.py`), and on a host Mac NOTHING refreshed it: the
+SessionStart self-installer only copied scripts into STABLE_DIR when inside the
+Cowork VM (`_in_cowork_vm()` gate). So a client who updated kept running the OLD
+flaky guard from an earlier manual deploy — the fix silently never reached the
+running hook. Every future guard fix had this same last-mile gap.
+
+- **fix(installer) — refresh the live guard on host updates.** On a non-Cowork
+  SessionStart, if the guard is ALREADY armed in the host `settings.json` (the
+  user opted in previously), `install_user_hooks.py` now re-copies the current
+  plugin's hook scripts (+ vendored engine) into STABLE_DIR — so a plugin/app
+  `update` finally propagates guard fixes to the file the hook runs. **Copy-only:
+  it NEVER writes `settings.json` and NEVER arms the guard** — arming stays
+  Cowork-only. Gated on the existing armed-entry, so a machine that never opted
+  in is left completely untouched (same zero-footprint guarantee as before). The
+  arm-detection recognises the v1.23.27 FIX-3 module-import command form (it keeps
+  the `[ -f .../guard.py ]` check). 6 new tests incl. the two zero-footprint
+  guarantees (un-armed host, non-Shield settings.json → no STABLE_DIR created).
+
 ## 1.23.27 — 2026-07-14 — FIX: guard no longer false-blocks under concurrent-hook load
 
 Symptom (Joris, live): the PreToolUse guard intermittently fail-CLOSED with the
