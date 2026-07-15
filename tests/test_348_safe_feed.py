@@ -95,8 +95,11 @@ def test_safe_add_route_typed_confirm_and_audit_value_free(tmp_path, monkeypatch
     assert "value" not in entry
 
 
-def test_safe_add_route_accepts_value_b64_no_raw_dom(tmp_path, monkeypatch):
-    """The vault/review page posts value_b64 so cleartext never enters the DOM."""
+def test_safe_add_route_ignores_value_b64_now_removed(tmp_path, monkeypatch):
+    """#579 (2026-07-16): the reversible-base64 `value_b64` path was REMOVED (a devtools
+    atob() on the DOM field recovered the cleartext — the same reversible-DOM leak #346
+    fixed on /gazetteer/remove). The route was dormant, so posting `value_b64` is now a
+    NO-OP: the value is NOT added (only a raw `value` add path remains)."""
     import base64
     from fastapi.testclient import TestClient
     appmod = _fresh_app(tmp_path, monkeypatch)
@@ -107,7 +110,6 @@ def test_safe_add_route_accepts_value_b64_no_raw_dom(tmp_path, monkeypatch):
     b64 = base64.urlsafe_b64encode("Investissements".encode()).decode()
     r = client.post("/safe/add", data={"value_b64": b64, "confirm": "SUR"},
                     follow_redirects=False)
-    assert r.status_code == 303
-    assert sw.is_safe("Investissements") is True
-    log = (tmp_path / "audit.jsonl").read_text()
-    assert "Investissements" not in log  # no raw value in audit
+    assert r.status_code == 303  # route still responds (redirect)
+    assert sw.is_safe("Investissements") is False, \
+        "value_b64 is no longer decoded/added — the reversible-DOM channel is closed (#579)"

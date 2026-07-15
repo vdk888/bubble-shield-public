@@ -1323,26 +1323,26 @@ async def gazetteer_remove(request: Request, row_id: str = Form("")):
 
 
 @app.post("/safe/add")
-async def safe_add(request: Request, value: str = Form(""), value_b64: str = Form(""),
+async def safe_add(request: Request, value: str = Form(""),
                    confirm: str = Form("")):
     """Mark a wrongly-masked word as NOT PII → add it to the self-improving safe-list
     (#348 Task 4). The vault / review "un-hide as not-PII" action posts here.
 
     Typed-confirm: requires ``confirm=SUR`` (mirrors the Tier-3 forget OUBLIER gate).
-    The caller posts ``value_b64`` (base64 of the raw value) so the cleartext is never
-    in the page DOM (masking constraint); a direct caller may post raw ``value``.
     Audit carries entity-type/counts only — NEVER the raw value.
     FAIL-OPEN: a safe-list write failure must never break the request.
+
+    #579 (2026-07-16): the ``value_b64`` param — base64 of the raw value in a hidden
+    form field — was REMOVED. base64 is an ENCODING, not encryption: a devtools
+    atob() on the DOM field recovers the cleartext (the SAME reversible-DOM leak #346
+    removed from /gazetteer/remove). This route was DORMANT (no template posted the
+    b64 field), so stripping it closes the latent channel with no UI change. If a
+    future UI must hide the value in the DOM, use the one-way row_id/HMAC pattern
+    (`_gazetteer_row_id` / `_gazetteer_value_for_id`), NEVER a reversible re-encoding.
     """
     from fastapi.responses import RedirectResponse
     if confirm != "SUR":
         return RedirectResponse(url="/review?flash=annule", status_code=303)
-    if not value and value_b64:
-        import base64
-        try:
-            value = base64.urlsafe_b64decode(value_b64.encode()).decode()
-        except Exception:
-            value = ""
     if not value.strip():
         return RedirectResponse(url="/review?flash=absent", status_code=303)
     try:
