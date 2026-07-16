@@ -71,6 +71,33 @@ case("unparseable event", "NOT JSON", CFG, "deny")
 case("no config = inert", {"tool_name": "Read", "tool_input": {"file_path": "/anything"}, "cwd": "/tmp"}, None, "allow-noop")
 case("empty protected = inert", {"tool_name": "Read", "tool_input": {"file_path": "/anything"}, "cwd": "/tmp"}, {"protected_folders": []}, "allow-noop")
 
+# --- #553 cd-compound mount-alias bypass (P1, live-leaked on v1.20.3) --------
+# THE TESTING RULE from the card: always drive bash-guard fixes with the
+# `cd <into-target> && <read>` COMPOUND shape (cwd = session ROOT), never only
+# the pre-positioned-cwd shape — v1.20.3 passed review because everyone tested
+# the wrong shape. These four cases pin the v1.20.4 fix forever.
+_S = "/sessions/abc123"
+case("553 cd-compound ../Dropbox",
+     {"tool_name": "Bash",
+      "tool_input": {"command": f'cd {_S}/mnt/outputs && cat "../Dropbox/clients/dossier.pdf"'},
+      "cwd": _S}, CFG, "deny")
+case("553 cd-compound bare Dropbox/",
+     {"tool_name": "Bash",
+      "tool_input": {"command": f'cd {_S}/mnt && cat "Dropbox/clients/dossier.pdf"'},
+      "cwd": _S}, CFG, "deny")
+case("553 direct alias still denied",
+     {"tool_name": "Bash",
+      "tool_input": {"command": f'cat {_S}/mnt/Dropbox/clients/dossier.pdf'},
+      "cwd": _S}, CFG, "deny")
+case("553 pre-positioned cwd still denied",
+     {"tool_name": "Bash",
+      "tool_input": {"command": 'cat "../Dropbox/clients/dossier.pdf"'},
+      "cwd": f"{_S}/mnt/outputs"}, CFG, "deny")
+case("553 infra mount stays usable",
+     {"tool_name": "Bash",
+      "tool_input": {"command": f'ls {_S}/mnt/outputs'},
+      "cwd": _S}, CFG, "allow-noop")
+
 # --- mail-guard: ALLOW raw mail reads but inject anonymise-first context ------
 # (blocking the fetch is a catch-22 — the fetch is the only way to GET the mail
 # text to anonymise; so we allow + steer instead)
