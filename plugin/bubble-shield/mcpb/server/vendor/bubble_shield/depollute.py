@@ -34,12 +34,40 @@ DEPOLLUTE_CHUNK_SIZE: int = 8
 DEPOLLUTE_ALLOWLIST: frozenset[str] = frozenset({"NOM", "POSTE", "ADRESSE"})
 
 
+_COMMON_STATIC: set | None = None
+
+
+def _common_words_static() -> set:
+    """#660 — vendored static fallback for the Rule-A junk lane: every fr/en
+    wordform with zipf >= 4.0 (generated from wordfreq 3.1.1; 12,655 words,
+    99KB). Membership ⇔ "zipf >= ZIPF_JUNK_MIN", so the Rule-A verdict is
+    identical to wordfreq's — without shipping the 54MB wordfreq wheel + its
+    dep chain to client Macs. Missing/corrupt file → empty set (fail-toward-
+    masking: nothing junk-lanes, everything goes to the Gemma judge)."""
+    global _COMMON_STATIC
+    if _COMMON_STATIC is None:
+        try:
+            from pathlib import Path
+            p = Path(__file__).parent / "data" / "common_words_zipf4.txt"
+            _COMMON_STATIC = {w.strip() for w in
+                              p.read_text(encoding="utf-8").splitlines() if w.strip()}
+        except Exception:
+            _COMMON_STATIC = set()
+    return _COMMON_STATIC
+
+
 def _max_zipf(value: str) -> float:
+    v = value.strip().lower()
     try:
         from wordfreq import zipf_frequency
     except Exception:
-        return 0.0  # fail-toward-masking: no wordfreq → treat as rare → uncertain
-    v = value.strip().lower()
+        # #660 — wordfreq is NOT in the prod app venv (verified 2026-07-16); the
+        # old `return 0.0` made the junk lane inert since ship (every entry
+        # burned a ~6s serial Gemma call). Fall back to the vendored static set:
+        # membership means zipf >= ZIPF_JUNK_MIN, so return exactly the
+        # threshold; absence means "rare as far as Rule A cares" → 0.0 →
+        # uncertain → Gemma judges (fail-toward-masking preserved).
+        return ZIPF_JUNK_MIN if v in _common_words_static() else 0.0
     return max(zipf_frequency(v, "fr"), zipf_frequency(v, "en"))
 
 

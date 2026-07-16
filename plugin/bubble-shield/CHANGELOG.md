@@ -1,5 +1,21 @@
 # Changelog — bubble-shield
 
+## 1.23.41 — 2026-07-16 — FIX #660: zipf junk-lane works without wordfreq (vendored static set)
+
+wordfreq was never installed in the prod app venv → depollute's `_max_zipf`
+returned 0.0 → the Rule-A fast lane was inert since ship: EVERY gazetteer entry
+went to the Gemma judge (~6s serial call each), and with Gemma down there was no
+fast lane at all.
+
+- **fix(depollute) — static fallback set.** `bubble_shield/data/common_words_zipf4.txt`
+  (every fr/en wordform with zipf >= 4.0, generated from wordfreq 3.1.1 — 12,655
+  words, 99KB) vendored instead of shipping the 54MB wordfreq wheel + dep chain.
+  Membership ⇔ zipf >= ZIPF_JUNK_MIN, so Rule-A verdicts are identical to
+  wordfreq's. wordfreq still wins when installed; missing/corrupt data file →
+  empty set → everything stays in the Gemma lane (fail-toward-masking).
+  Verified against the REAL prod venv interpreter: triage('conseiller')=='junk'.
+  Word list scanned against the pii-guard denylist: zero collisions. 5 tests.
+
 ## 1.23.40 — 2026-07-16 — FEAT #554: retro re-index of polluted shadows (safe_words growth invalidation)
 
 The self-correction loop (every masked value auto-seeds the gazetteer → de-pollution
