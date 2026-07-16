@@ -1,5 +1,28 @@
 # Changelog — bubble-shield
 
+## 1.24.1 — 2026-07-16 — FIX #599: guard fails-OPEN on non-file MCP tools (Telegram reply no longer blocked by an internal error)
+
+A guard-INTERNAL error (e.g. the NER daemon throwing mid-idle-shutdown) fail-closed
+the catch-all and blocked a legitimate Telegram reply with 'erreur interne du guard'
+— even with the plugin 'disabled' (the hooks run from settings.json independently).
+A Telegram reply reads no protected file, so a guard-internal error there has
+nothing to protect.
+
+- **fix(guard) — `_touches_no_file` carve-out at the catch-all.** When an uncaught
+  internal error hits an mcp__* tool whose input carries NO filesystem-path token,
+  fail-OPEN (allow) instead of fail-CLOSED. The fail-closed invariant is fully
+  preserved for anything that could touch a file: native tools (Read/Edit/Write/
+  Bash/Grep/…), and any MCP tool whose input contains a path (incl. a Telegram
+  message that literally names an absolute path — conservative-correct: over-block
+  rather than risk a leak). Reuses the same `_extract_paths_from_values` the
+  decision path uses, so the "is this file-free" test is identical to the real one.
+  8 tests (`test_guard_599_failopen.py`) via a test-only forced-error trigger.
+
+NOTE: this addresses finding (b) of #599 (the fail-closed-on-non-file-tool bug).
+Finding (a) — making plugin-DISABLE actually remove the settings.json hooks — is a
+separate installer concern tracked on the card; this fix makes the hooks harmless
+on non-file tools regardless of enable-state, which is the user-facing pain.
+
 ## 1.24.0 — 2026-07-16 — FEAT #645: Mac-mini tier — read distribution over Tailscale (minid + client branch)
 
 The mini is the sole indexer of the shared vault; client Macs read masked shadows

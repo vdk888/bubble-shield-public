@@ -1310,6 +1310,34 @@ def _log_guard_error(raw: str, attempt: int, final: bool) -> None:
         pass  # logging must never break the guard
 
 
+def _touches_no_file(raw: str) -> bool:
+    """#599 — True iff this event is a NON-FILE MCP tool call (e.g. a Telegram
+    reply): an mcp__* tool whose input carries NO filesystem-path-shaped value.
+    Such a call cannot be reading a protected folder, so a guard-INTERNAL error
+    on it must NOT fail-closed (that blocks legitimate agent work like a Telegram
+    reply, even with the plugin 'disabled'). Native file tools (Read/Bash/…) and
+    any MCP tool with a path input are NOT covered — those still fail-closed.
+
+    Deliberately conservative: any parse ambiguity → False → the existing
+    fail-closed backstop stands (a leak is worse than a blocked reply)."""
+    try:
+        ev = json.loads(raw) if raw.strip() else {}
+        if not isinstance(ev, dict):
+            return False
+        tn = ev.get("tool_name", "")
+        if not isinstance(tn, str) or not tn.startswith("mcp__"):
+            return False
+        ti = ev.get("tool_input", {})
+        if not isinstance(ti, dict):
+            return False
+        cwd = ev.get("cwd", "") if isinstance(ev.get("cwd", ""), str) else ""
+        # Reuse the SAME path-extraction the decision path uses: if it finds any
+        # candidate path, this tool touches a file → not eligible for fail-open.
+        return not _extract_paths_from_values(ti, cwd)
+    except Exception:
+        return False
+
+
 def main() -> None:
     raw = sys.stdin.read()
     for attempt in range(1, _MAX_RETRIES + 1):
@@ -1332,13 +1360,23 @@ def main() -> None:
             # FIX 1: log the real traceback before failing closed, so we finally SEE
             # what "erreur interne" actually is instead of guessing.
             _log_guard_error(raw, attempt, final=True)
-            # ANY uncaught exception in the decision path must fail CLOSED. Without
-            # this backstop, an unhandled error → Python exits code 1 with NO deny
-            # JSON → per Claude Code hook semantics (only exit 2 or an explicit deny-
-            # JSON blocks; exit 1 is non-blocking) the tool RUNS, leaking raw PII.
-            # This backstop enforces the guard's "anything goes wrong → we DENY"
-            # invariant; the explicit deny paths in _main give better messages, this
-            # only catches what they miss (tool_input a list, cwd an int — reproduced).
+            # #599 — a guard-INTERNAL error on a NON-FILE MCP tool (a Telegram
+            # reply, etc.) must fail-OPEN, not closed: there is no protected-file
+            # read to block, so fail-closing only blocks legitimate agent work
+            # (the observed 'erreur interne' blocking a Telegram reply, even with
+            # the plugin 'disabled'). The fail-closed invariant is preserved for
+            # everything that COULD touch a file (native tools + path-bearing MCP
+            # tools); this narrow carve-out is provably file-free.
+            if _touches_no_file(raw):
+                _allow()  # exit 0, no JSON → tool runs; nothing to protect here
+                return
+            # ANY OTHER uncaught exception in the decision path must fail CLOSED.
+            # Without this backstop, an unhandled error → Python exits code 1 with
+            # NO deny JSON → per Claude Code hook semantics (only exit 2 or an
+            # explicit deny-JSON blocks; exit 1 is non-blocking) the tool RUNS,
+            # leaking raw PII. This enforces the "anything goes wrong → DENY"
+            # invariant; explicit deny paths in _main give better messages, this
+            # only catches what they miss (tool_input a list, cwd an int).
             _deny("🔒 Bubble Shield — erreur interne du guard, accès bloqué par sécurité.")
             return
 
@@ -1353,6 +1391,14 @@ def _main(raw: str) -> None:
     if not isinstance(event, dict):
         _deny("🔒 Bubble Shield guard: évènement hook mal formé. Accès bloqué par sécurité.")
         return
+
+    # TEST-ONLY (#599): a controlled way to exercise the catch-all fail-open/
+    # fail-closed branch deterministically for ANY tool_name — the input-
+    # robustness coercion (v1.20.4) otherwise gracefully handles malformed
+    # shapes, so there is no other reliable trigger. Gated behind an env var
+    # that production never sets; raising here lands in main()'s except.
+    if os.environ.get("BUBBLE_SHIELD_TEST_FORCE_ERROR") == "1":
+        raise RuntimeError("forced internal error (test)")
 
     tool_name = event.get("tool_name", "")
 
