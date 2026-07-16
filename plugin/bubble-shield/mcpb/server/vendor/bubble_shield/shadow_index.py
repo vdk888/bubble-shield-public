@@ -50,17 +50,58 @@ def release_lock() -> None:
             pass
 
 
-def index_one(path: str, *, anonymize_fn) -> str:
+def index_one(path: str, *, anonymize_fn, value_hashes_fn=None) -> str:
     p = Path(os.path.expanduser(path)).resolve()
     h = shadow_store.content_hash(p)
     clean = anonymize_fn(str(p))
     st = p.stat()
-    shadow_store.put_shadow(h, clean, src_path=str(p), size=st.st_size, mtime=st.st_mtime)
+    # #554 retro re-index — record WHICH values this shadow masked (hashes only,
+    # never raw values) so a later safe_words judgment can invalidate exactly the
+    # shadows that masked the junk word. Best-effort: a resolver failure must
+    # never block indexing (the shadow just won't be retro-invalidatable).
+    vhs = None
+    if value_hashes_fn is not None:
+        try:
+            vhs = value_hashes_fn(clean)
+        except Exception:
+            vhs = None
+    shadow_store.put_shadow(h, clean, src_path=str(p), size=st.st_size,
+                            mtime=st.st_mtime, value_hashes=vhs)
     try:
         shadow_store.clear_pending(str(p))
     except Exception:
         pass
     return h
+
+
+def vault_value_hashes_fn(vault_path: str):
+    """#554 — build a value_hashes_fn for index_one/run_sweep: resolve the mask
+    tokens present in a clean shadow back to their values via the session vault
+    file, and return their canonical hashes (shadow_store.value_hash). Values
+    never leave this function — only hashes. A missing/corrupt vault → []."""
+    import json as _json
+    from bubble_shield.vault import TOKEN_RE
+
+    def _fn(clean_text: str):
+        try:
+            to_value = _json.loads(
+                Path(os.path.expanduser(vault_path)).read_text(encoding="utf-8")
+            ).get("to_value", {})
+        except Exception:
+            return []
+        out = []
+        seen = set()
+        for m in TOKEN_RE.finditer(clean_text):
+            val = to_value.get(m.group(0))
+            if not val:
+                continue
+            vh = shadow_store.value_hash(val)
+            if vh not in seen:
+                seen.add(vh)
+                out.append(vh)
+        return out
+
+    return _fn
 
 
 # ---- dataless / online-only file resilience (Task 13b) ---------------------
@@ -99,7 +140,7 @@ def _try_materialize(p: Path) -> bool:
     return False
 
 
-def _index_one_resilient(path: str, *, anonymize_fn) -> str:
+def _index_one_resilient(path: str, *, anonymize_fn, value_hashes_fn=None) -> str:
     """index_one wrapped so one problem file DEFERS/FAILS instead of aborting.
 
     Returns one of:
@@ -131,7 +172,7 @@ def _index_one_resilient(path: str, *, anonymize_fn) -> str:
             pass
         return "deferred"
     try:
-        index_one(str(p), anonymize_fn=anonymize_fn)
+        index_one(str(p), anonymize_fn=anonymize_fn, value_hashes_fn=value_hashes_fn)
         return "indexed"
     except OSError:
         # Bytes vanished mid-index (Dropbox evicted it again) or an extraction
@@ -198,7 +239,8 @@ def _is_ignorable(p: Path) -> bool:
     return False
 
 
-def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
+def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None,
+              value_hashes_fn=None) -> dict:
     """Resumable folder walk: index new/changed files, skip already-indexed ones.
 
     Walks `root` recursively. For each file, if its content_hash is already in
@@ -282,7 +324,8 @@ def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None) -> dict:
             if str(Path(os.path.expanduser(str(p))).resolve()) in quarantined:
                 quarantined_skipped += 1
                 continue
-            outcome = _index_one_resilient(str(p), anonymize_fn=anonymize_fn)
+            outcome = _index_one_resilient(str(p), anonymize_fn=anonymize_fn,
+                                           value_hashes_fn=value_hashes_fn)
             if outcome == "indexed":
                 indexed += 1
                 if on_progress is not None:

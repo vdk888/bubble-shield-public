@@ -504,7 +504,13 @@ def main(argv=None) -> int:
             # tokens (distinct per type) — no PII, no result-object plumbing needed.
             result = shadow_index.run_sweep(
                 root, anonymize_fn=_audit_wrapped(bubble_shield_mcp._anonymise_file),
-                on_progress=_prog)
+                on_progress=_prog,
+                # #554 retro re-index — record masked-value hashes per shadow so a
+                # later safe_words judgment (de-pollution un-mask) can mark exactly
+                # the polluted shadows stale for re-index. Tokens in the cloaked
+                # text resolve via the sweep's session vault; hashes only.
+                value_hashes_fn=shadow_index.vault_value_hashes_fn(
+                    str(bubble_shield_mcp._vault_path())))
             for k in totals:
                 totals[k] += result.get(k, 0)
         # deferred = dataless/online-only (Dropbox not yet hydrated, retried next

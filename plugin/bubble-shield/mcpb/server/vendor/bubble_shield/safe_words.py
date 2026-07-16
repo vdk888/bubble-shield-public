@@ -55,6 +55,15 @@ def add_safe(value: str) -> None:
     w = load_safe()
     w.add(str(value).strip().lower())
     _save(w)
+    # #554 retro re-index — a word judged safe may sit masked in shadows written
+    # BEFORE this judgment. Flag those shadows stale so the next sweep re-indexes
+    # them (they keep being SERVED meanwhile — over-masked is the safe direction).
+    # Fail-open: the safe-list write above must never be broken by the store.
+    try:
+        from bubble_shield import shadow_store
+        shadow_store.mark_stale_by_value_hash(shadow_store.value_hash(value))
+    except Exception:
+        pass
 
 
 def remove_safe(value: str) -> bool:

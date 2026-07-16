@@ -1,5 +1,30 @@
 # Changelog — bubble-shield
 
+## 1.23.40 — 2026-07-16 — FEAT #554: retro re-index of polluted shadows (safe_words growth invalidation)
+
+The self-correction loop (every masked value auto-seeds the gazetteer → de-pollution
+judges it → junk lands in sticky safe_words) cleans FUTURE docs, but a shadow written
+BEFORE a junk word's judgment kept that word masked forever. On the 81k backfill that
+means early-swept docs stay polluted ("conseiller" as ⟦NOM⟧) permanently.
+
+- **feat(shadow_store) — per-shadow masked-value hash map.** `put_shadow` records
+  `value_hashes` (sha256 strip+lower of each masked value — hashes only, never raw
+  values) in a new `shadow_values` table. Additive schema migration (`stale` column,
+  `_ensure_stale_column`) — old DBs upgrade in place.
+- **feat(safe_words) — invalidation hook.** `add_safe(w)` (fed by de-pollution
+  un-masks and reviewer un-hides) marks every shadow whose value-set contains
+  hash(w) STALE. Fail-open: a store error never breaks the safe-list write.
+- **Safety property: stale shadows are SERVED, never deleted.** Reads keep
+  returning the over-masked shadow (safe direction); `list_indexed()` excludes
+  stale hashes so the next sweep re-indexes those exact files — with the junk word
+  now safe-listed, the fresh shadow comes out clean. Third sweep skips again.
+- **feat(sweep) — token→value resolver.** `vault_value_hashes_fn` resolves the
+  cloaked text's ⟦…⟧ tokens via the session vault and hands only hashes to the
+  store. Resolver failure = shadow just isn't retro-invalidatable (never blocks
+  indexing).
+- 11 tests (`test_554_retro_reindex.py`) incl. the full end-to-end loop
+  (index-polluted → judge → stale → re-sweep → clean, then no re-index churn).
+
 ## 1.23.39 — 2026-07-16 — FIX #659: Gemma passes no longer nest mask tokens (token-aware replace)
 
 Found live during the #554 flow verification: the Gemma additive/second passes run

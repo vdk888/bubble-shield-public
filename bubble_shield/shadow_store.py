@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS pending (
   marked_at  REAL,
   fail_count INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS shadow_values (
+  content_hash TEXT NOT NULL,
+  value_hash   TEXT NOT NULL,
+  UNIQUE(content_hash, value_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_values_vh ON shadow_values(value_hash);
 """
 
 # #646 — after this many consecutive sweep failures on the SAME source, a doc is
@@ -102,6 +108,18 @@ def _ensure_fail_count_column(conn) -> None:
             conn.execute("ALTER TABLE pending ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass  # best-effort; a missing column just means quarantine never triggers (safe)
+
+
+def _ensure_stale_column(conn) -> None:
+    """Backward-compat (#554 retro re-index): an existing shadows table lacks the
+    `stale` flag. Add it additively (default 0 = fresh) so old DBs upgrade in place.
+    Idempotent."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(shadows)")}
+        if "stale" not in cols:
+            conn.execute("ALTER TABLE shadows ADD COLUMN stale INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # best-effort; missing column just means retro re-index never triggers (safe)
 
 def _harden_permissions(p: Path) -> None:
     """Lock the store file to owner-only (0600) and its parent dir to 0700 —
@@ -255,20 +273,38 @@ def connect() -> sqlite3.Connection:
         _warn_plaintext_fallback()
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA)
+    _ensure_fail_count_column(conn)
+    _ensure_stale_column(conn)
     conn.commit()
     _harden_permissions(p)
     return conn
 
+
+def value_hash(value: str) -> str:
+    """#554 retro re-index — canonical hash of a masked value (strip+lower,
+    matching safe_words' case-insensitive semantics). Only these hashes are
+    stored in shadow_values — never the values themselves."""
+    return hashlib.sha256(str(value).strip().lower().encode("utf-8")).hexdigest()
+
+
 def put_shadow(content_hash: str, clean_text: str, *, src_path: str = "",
-               size: int = 0, mtime: float = 0.0) -> None:
+               size: int = 0, mtime: float = 0.0, value_hashes=None) -> None:
     conn = connect()
     try:
         try:
             conn.execute(
                 "INSERT OR REPLACE INTO shadows "
-                "(content_hash, src_path, clean_text, size, mtime, indexed_at) "
-                "VALUES (?,?,?,?,?,?)",
+                "(content_hash, src_path, clean_text, size, mtime, indexed_at, stale) "
+                "VALUES (?,?,?,?,?,?,0)",
                 (content_hash, src_path, clean_text, size, mtime, time.time()))
+            # #554 — refresh the masked-value hash map for this shadow (a re-index
+            # replaces the old set; stale flag reset by the INSERT above).
+            conn.execute("DELETE FROM shadow_values WHERE content_hash=?",
+                         (content_hash,))
+            for vh in (value_hashes or []):
+                conn.execute(
+                    "INSERT OR IGNORE INTO shadow_values (content_hash, value_hash) "
+                    "VALUES (?,?)", (content_hash, vh))
             conn.commit()
         finally:
             conn.close()
@@ -300,12 +336,36 @@ def content_hash(path) -> str:
     return h.hexdigest()
 
 def list_indexed() -> set:
+    """Hashes the sweep may SKIP. #554: stale shadows are excluded — the sweep
+    re-indexes their files on its next pass. Reads (get_shadow) intentionally
+    keep serving stale shadows meanwhile: over-masked-but-served is the safe
+    direction (deleting would turn the next read into a raw-serving MISS)."""
     conn = connect()
     try:
-        return {r[0] for r in conn.execute("SELECT content_hash FROM shadows")}
+        return {r[0] for r in conn.execute(
+            "SELECT content_hash FROM shadows WHERE stale=0")}
     finally:
         conn.close()
         _drop_working_copy()
+
+
+def mark_stale_by_value_hash(vh: str) -> int:
+    """#554 retro re-index — flag every shadow whose masked-value set contains
+    `vh` as stale (its junk word was just judged safe). Returns the number of
+    shadows flagged. The shadow row is NEVER deleted (see list_indexed)."""
+    conn = connect()
+    try:
+        try:
+            cur = conn.execute(
+                "UPDATE shadows SET stale=1 WHERE stale=0 AND content_hash IN "
+                "(SELECT content_hash FROM shadow_values WHERE value_hash=?)",
+                (vh,))
+            conn.commit()
+            return cur.rowcount or 0
+        finally:
+            conn.close()
+    finally:
+        _seal()
 
 
 # Mask-token shape ⟦TYPE_id⟧ — mirrors vault.TOKEN_RE. Used to derive per-type
