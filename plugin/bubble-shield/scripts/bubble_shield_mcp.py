@@ -993,6 +993,43 @@ def _gemma_extract_call(text: str):
     return spans
 
 
+def _replace_outside_tokens(text: str, val: str, token) -> tuple[str, int]:
+    """#659 — replace `val` ONLY in segments outside existing ⟦…⟧ mask tokens.
+    Returns (new_text, replacements_applied).
+
+    `token` may be a str, or a zero-arg callable invoked lazily on the FIRST
+    real replacement (so a no-op span never allocates a vault token).
+
+    Why: the Gemma passes run over ALREADY-MASKED text. Live gemmad extracts
+    the innards of existing tokens ("NOM_0002") as PII spans; a blind
+    str.replace then rewrites INSIDE the token — ⟦NOM_0002⟧ → ⟦⟦NOM_0004⟧⟧ —
+    nesting tokens and breaking restore reversibility. Splitting on TOKEN_RE
+    and replacing only in the non-token segments makes a token-innard span a
+    natural no-op while a genuine in-clear value is still masked.
+    """
+    from bubble_shield.vault import TOKEN_RE
+    tok: str | None = token if isinstance(token, str) else None
+    out_parts: list[str] = []
+    n = 0
+    last = 0
+
+    def _sub(seg: str) -> str:
+        nonlocal n, tok
+        if val and val in seg:
+            if tok is None:
+                tok = token()          # lazy vault allocation, first hit only
+            n += seg.count(val)
+            seg = seg.replace(val, tok)
+        return seg
+
+    for m in TOKEN_RE.finditer(text):
+        out_parts.append(_sub(text[last:m.start()]))
+        out_parts.append(m.group(0))       # the existing token, untouched
+        last = m.end()
+    out_parts.append(_sub(text[last:]))
+    return "".join(out_parts), n
+
+
 def _gemma_second_pass(res, engine) -> str:
     """#589-B — on a structured form, use Gemma to find PII the fast pass missed and mask
     it into the SAME vault. Fail-closed on ANY failure (never return the fast-pass body).
@@ -1038,9 +1075,14 @@ def _gemma_second_pass(res, engine) -> str:
     for sp in spans:
         val, typ = sp.get("text", ""), sp.get("type", "MOT")
         if val and val in out:
-            token = engine.vault.token_for(val, typ)
-            out = out.replace(val, token)
-            applied = True
+            # #659: token-aware replace — a span that only occurs INSIDE an
+            # existing ⟦…⟧ token (Gemma extracting token innards from masked
+            # text) is a no-op, does NOT count as applied, and allocates no
+            # vault token (the factory only runs on a real replacement).
+            out, n = _replace_outside_tokens(
+                out, val, lambda v=val, t=typ: engine.vault.token_for(v, t))
+            if n:
+                applied = True
     if applied:
         out += _structured_form_note()
         return out
@@ -1099,8 +1141,11 @@ def _gemma_additive_pass(res, engine) -> str:
         for sp in spans:
             val, typ = sp.get("text", ""), sp.get("type", "MOT")
             if val and val in out:
-                token = engine.vault.token_for(val, typ)
-                out = out.replace(val, token)
+                # #659: token-aware replace — Gemma extracting the innards of an
+                # existing token from masked text must not nest tokens. Lazy
+                # factory: no vault allocation unless a real replacement happens.
+                out, _n = _replace_outside_tokens(
+                    out, val, lambda v=val, t=typ: engine.vault.token_for(v, t))
     except Exception:
         # FAIL-OPEN: Gemma unreachable/malformed on prose -> return the GLiNER+regex
         # floor (res.anonymized), never refuse. This is the whole point of the additive

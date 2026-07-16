@@ -1,5 +1,22 @@
 # Changelog — bubble-shield
 
+## 1.23.39 — 2026-07-16 — FIX #659: Gemma passes no longer nest mask tokens (token-aware replace)
+
+Found live during the #554 flow verification: the Gemma additive/second passes run
+over ALREADY-MASKED text, and live gemmad extracts the innards of existing tokens
+("NOM_0002") as PII spans. The blind `str.replace` then rewrote INSIDE the token —
+⟦NOM_0002⟧ → ⟦⟦NOM_0004⟧⟧ (nested) — breaking restore reversibility and polluting
+the vault with junk entries.
+
+- **fix(mcp) — `_replace_outside_tokens`.** Both Gemma passes now split on TOKEN_RE
+  and replace only in segments OUTSIDE existing ⟦…⟧ tokens. A span whose only
+  occurrence is inside a token is a natural no-op: it does not count as "applied"
+  (second-pass fail-closed semantics preserved — a form where Gemma returns only
+  token-innards still fails closed when the fast pass found nothing), and the lazy
+  token factory allocates NO vault entry for it. Genuine in-clear misses are still
+  masked. 7 tests (`test_659_no_nested_tokens.py`, includes the live gemmad poison
+  shape), 29 existing 589b regressions green, live re-run of the repro clean.
+
 ## 1.23.38 — 2026-07-16 — FIX #582: GLiNER bare "city" retags to ADRESSE (not LIEU_NAISSANCE)
 
 GLiNER classified bare city mentions with no birth context ("basé à Nice", "le dossier
