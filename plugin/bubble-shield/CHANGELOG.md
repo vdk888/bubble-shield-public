@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.23.37 — 2026-07-16 — FIX #400: tripwire SECU false positive (add NIR mod-97 checksum)
+
+The UserPromptSubmit tripwire's SECU pattern fired on a benign 13-15-digit run (a Google
+error-screen number in an OCR'd image Jade pasted) → nudged the user about 'données
+client brutes (numéro de sécurité sociale)' that weren't there — hostile UX on an
+innocent message.
+
+- **fix(tripwire) — gate the SECU nudge on the NIR mod-97 control-key check.** Added
+  `_secu_valid` (the DGFiP algorithm: key == 97 - body13 % 97) and require it before
+  flagging — mirroring the IBAN path, which already validates. An unvalidatable run (no
+  2-digit key, or a failing checksum) no longer nudges. A checksum-valid NIR still does.
+  Precision-first (a nudge, not a fail-closed gate): fail toward NOT nudging on an
+  unvalidatable number. 5 tests (`test_400_tripwire_secu_checksum.py`), SYNTHETIC NIRs
+  only (valid key constructed arithmetically, never a real number).
+
 ## 1.23.36 — 2026-07-16 — FEAT #574: strip the 2D-DOC barcode block by default (covert PII channel)
 
 French tax notices carry a machine-decodable ANSSI 2D-DOC barcode that encodes identity

@@ -69,6 +69,28 @@ RE_SECU = re.compile(r"\b[12][ ]?\d{2}[ ]?\d{2}[ ]?\d{2}[ ]?\d{3}[ ]?\d{3}(?:[ ]
 RE_PHONE = re.compile(r"(?:\+33|0)\s?[1-9](?:[ .]?\d{2}){4}\b")
 
 
+def _secu_valid(raw: str) -> bool:
+    """NIR (FR social-security) mod-97 control-key check — only count a NIR whose
+    2-digit key validates, to keep precision high. #400: an UNVALIDATED SECU pattern
+    false-fired on a benign 13-15-digit run (a Google error-screen number in an OCR'd
+    image), nudging the user about 'données client brutes' that weren't there.
+
+    The NIR is 13 digits (body) + a 2-digit control key = 97 - (body % 97) (the DGFiP
+    algorithm; corse départements 2A/2B substitute letters but the numeric form is what
+    a text pattern sees). If the trailing 2 digits aren't present (the regex makes the
+    key optional), we CANNOT validate → treat as NOT a confirmed NIR (fail toward NOT
+    nudging on an unvalidatable number — the tripwire is a precision-first nudge, not a
+    fail-closed gate)."""
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 15:
+        return False  # need the full 13-digit body + 2-digit key to validate
+    body, key = digits[:13], digits[13:]
+    try:
+        return (97 - (int(body) % 97)) == int(key)
+    except ValueError:
+        return False
+
+
 def _iban_valid(raw: str) -> bool:
     """mod-97 IBAN check — only count a *valid* IBAN to keep precision high."""
     s = re.sub(r"\s", "", raw).upper()
@@ -124,8 +146,12 @@ def _find_pii(text: str) -> list[str]:
             break
     if RE_EMAIL.search(text):
         found.append("email")
-    if RE_SECU.search(text):
-        found.append("numéro de sécurité sociale")
+    for m in RE_SECU.finditer(text):
+        # #400: only nudge on a NIR whose mod-97 control key VALIDATES — a bare
+        # 13-15-digit run (OCR of a benign number) must not false-fire.
+        if _secu_valid(m.group(0)):
+            found.append("numéro de sécurité sociale")
+            break
     if RE_PHONE.search(text):
         found.append("téléphone")
     return found
