@@ -30,6 +30,16 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN = REPO / "plugin" / "bubble-shield"
 MCPB_SERVER = PLUGIN / "mcpb" / "server"
 
+# #649 — the engine package `bubble_shield/` exists in THREE copies that must stay
+# byte-identical: the repo-ROOT source-of-truth, the plugin VENDOR, and the mcpb-
+# bundle VENDOR. An edit to the vendored copy alone leaves the root stale (this bit
+# 3× in the 2026-07-15 night: #646, #581, #574 — tests passed alone but FAILED
+# cross-file because a prior test imported the stale ROOT copy). This 3-way guard
+# catches any two-of-three divergence at test time, before it ships or breaks a test.
+ROOT_ENGINE = REPO / "bubble_shield"
+PLUGIN_ENGINE = PLUGIN / "vendor" / "bubble_shield"
+MCPB_ENGINE = MCPB_SERVER / "vendor" / "bubble_shield"
+
 # Mirrored directory pairs: (label, plugin-side dir, mcpb-bundle-side dir).
 # Per RELEASING.md, the bundle is an rsync copy of these two source trees
 # (excluding test files, __pycache__/.pyc, and deployment_allowlist.json —
@@ -153,4 +163,48 @@ def test_no_plugin_file_missing_from_bundle():
         f".mcpb is missing code the bundled server needs: {orphans}. Re-sync per "
         "RELEASING.md (rsync scripts/ + vendor/ → mcpb/server/, re-pack), OR if the "
         "file is legitimately plugin-only, add it to PLUGIN_ONLY_EXCLUDES with a reason."
+    )
+
+
+def _engine_3way():
+    """#649 — every .py in the engine package must be byte-identical across all THREE
+    copies (repo-root, plugin vendor, mcpb-bundle vendor). Returns a list of
+    (filename, problem) for any file that is missing from a copy or differs.
+    Union of filenames across the three so a file present in only some copies is
+    flagged, not silently skipped."""
+    problems = []
+    names = set()
+    for d in (ROOT_ENGINE, PLUGIN_ENGINE, MCPB_ENGINE):
+        if d.is_dir():
+            names |= {f.name for f in d.glob("*.py")}
+    for name in sorted(names):
+        paths = {
+            "root": ROOT_ENGINE / name,
+            "plugin-vendor": PLUGIN_ENGINE / name,
+            "mcpb-vendor": MCPB_ENGINE / name,
+        }
+        present = {k: p for k, p in paths.items() if p.is_file()}
+        if len(present) != 3:
+            missing = [k for k in paths if k not in present]
+            problems.append((name, f"missing from: {missing}"))
+            continue
+        blobs = {k: p.read_bytes() for k, p in present.items()}
+        ref = blobs["root"]
+        drifted = [k for k, b in blobs.items() if b != ref]
+        if drifted:
+            problems.append((name, f"differs from root in: {drifted}"))
+    return problems
+
+
+def test_engine_three_copies_byte_identical():
+    """#649 — the engine package's THREE copies (repo-root / plugin-vendor /
+    mcpb-vendor) must be byte-identical. Catches the exact drift that bit 3× on
+    2026-07-15 (#646/#581/#574): editing the vendored copy but not the repo-root.
+    On drift: re-sync all three (root ↔ plugin/vendor ↔ mcpb/server/vendor) + re-pack."""
+    problems = _engine_3way()
+    assert not problems, (
+        "ENGINE COPY DRIFT — the 3 copies of bubble_shield/ are not byte-identical "
+        "(repo-root / plugin vendor / mcpb-bundle vendor). This ships stale/divergent "
+        "engine code AND causes order-dependent test failures (a stale root copy gets "
+        f"imported first). Re-sync all three: {problems}"
     )

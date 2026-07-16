@@ -19,6 +19,15 @@ rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
 ```
 
 Never vendor `deployment_allowlist.json` (firm identity) — only the `.example`.
+
+**Verify the re-vendor took (#649):** the engine `bubble_shield/` lives in THREE copies
+— repo-root, `plugin/…/vendor/`, and `mcpb/server/vendor/` — that MUST be byte-identical.
+An edit to one that misses the others ships stale code AND causes order-dependent test
+failures (a stale root copy imported first). `test_mirror_copies_identical.py::test_engine_three_copies_byte_identical`
+enforces it — run it after any engine change:
+```bash
+python3 -m pytest tests/test_mirror_copies_identical.py -q
+```
 `.docx` uses stdlib (no python-docx); pypdf is pure-python and already vendored.
 
 ## The MCP server ships as an MCPB (NOT a stdio `.mcp.json`)
@@ -68,6 +77,33 @@ download into a separate runtime venv.
    (semver: patch = fix, minor = feature, major = breaking)
 2. Add a `CHANGELOG.md` entry for the new version.
 3. Run the tests: `python3 scripts/test_guard.py && python3 scripts/test_guard_marker.py && python3 scripts/test_tripwire.py` and `claude plugin validate .` from the repo root.
+3a. **Dependency-drift gate (packaging integrity) — MUST pass.** Run the static
+    dependency doctor to catch any hidden install prerequisite BEFORE it reaches a
+    client Mac (the "client was missing Python / a dep wasn't packaged, debug on the
+    spot" class):
+    ```bash
+    # from the repo root. Stock /usr/bin/python3 (3.9) is fine — the doctor is
+    # pure-stdlib and must NOT need the provisioned 3.12.
+    python3 plugin/bubble-shield/scripts/bubble_shield_doctor.py --check
+    ```
+    Exit 0 = the packaged dependency surface matches the committed baseline
+    (`plugin/bubble-shield/DEPENDENCY-MANIFEST.json`). **Exit 1 = release-blocking
+    drift** — it prints exactly what changed, e.g.:
+      - a `constraints.txt` pin with **no matching vendored wheel** → the offline
+        app-venv install would fail on a client with no PyPI;
+      - the **Gemma `MODEL_ID` diverged** across the 3 scripts that hardcode it;
+      - a **new assumed-preexisting binary** (a new client prerequisite) or a new
+        fetched-not-bundled artifact / changed download pin.
+    If the change is **intentional** (you deliberately added a dep / bumped a pin /
+    re-staged wheels), review it, then refresh the baseline and commit it alongside
+    the release:
+    ```bash
+    python3 plugin/bubble-shield/scripts/bubble_shield_doctor.py --write-baseline
+    ```
+    Do NOT `--write-baseline` blindly to silence the gate — the whole point is that a
+    human reviews the delta first. (Static only: this gate does NOT cover the
+    Full-Disk-Access/TCC prompt — that needs a real-Mac/VM smoke test, tracked
+    separately.)
 3b. **Regenerate the dated #572 recall/precision report** (the RGPD art. 32(1)(d)
     effectiveness-evidence artifact — see `bench/docs/572-recall-benchmark-corpus-design.md`).
     This is an **on-demand run, not a scheduled/CI job** — the daemon-up half needs the
