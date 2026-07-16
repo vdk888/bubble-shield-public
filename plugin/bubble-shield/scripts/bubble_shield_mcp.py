@@ -1460,6 +1460,77 @@ def _anonymise_file(path: str) -> str:
     return _anonymise_text(text, filename_basename=p.name)
 
 
+def _mini_config() -> dict:
+    """#645 mini tier — client-side config. Reads mini_url / mini_token /
+    protected_folders from the SAME bubble-shield.json chain the guard resolves.
+    Empty dict = no mini configured = single-Mac behavior (zero change)."""
+    try:
+        for loc in (
+            os.environ.get("BUBBLE_SHIELD_GUARD_CONFIG"),
+            os.path.join(os.environ.get("CLAUDE_PROJECT_DIR", ""), ".bubble-shield.json"),
+            os.path.expanduser("~/.config/bubble_shield/bubble-shield.json"),
+            os.path.expanduser("~/.bubble-shield.json"),
+        ):
+            if not loc or not os.path.isfile(loc):
+                continue
+            with open(loc, encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            url = str(cfg.get("mini_url", "")).rstrip("/")
+            if not url:
+                return {}
+            return {"mini_url": url,
+                    "mini_token": str(cfg.get("mini_token", "")),
+                    "protected_roots": [os.path.expanduser(p) for p in
+                                        (cfg.get("protected_folders") or [])]}
+    except Exception:
+        pass
+    return {}
+
+
+def _mini_get_shadow(cfg: dict, content_hash: str):
+    """GET the mini's shadow for `content_hash`. Returns the masked text, None
+    on MISS, or raises on transport/HTTP error (caller falls through to raw —
+    the Joris-decided degraded mode). Short timeout: a read must never hang."""
+    import urllib.request
+    req = urllib.request.Request(f"{cfg['mini_url']}/shadow/{content_hash}")
+    req.add_header("Authorization", "Bearer " + cfg.get("mini_token", ""))
+    import urllib.error
+    try:
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return json.loads(r.read().decode("utf-8")).get("clean_text")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None          # MISS — a real answer, not an error
+        raise
+
+
+def _mini_fire_index_request(cfg: dict, content_hash: str, path: Path) -> None:
+    """Fire-and-forget: tell the mini to index this doc (the cross-machine
+    mark_pending — #645's second bug). Sends hash + protected-root-relative
+    path ONLY (never content). Best-effort: any failure is swallowed — the
+    read must never block or break on this."""
+    try:
+        rel = None
+        for root in cfg.get("protected_roots", []):
+            try:
+                rel = str(path.resolve().relative_to(Path(root).resolve()))
+                break
+            except ValueError:
+                continue
+        if rel is None:
+            return               # not under a shared root → nothing to tell the mini
+        import urllib.request
+        req = urllib.request.Request(
+            f"{cfg['mini_url']}/index_request",
+            data=json.dumps({"content_hash": content_hash, "rel_path": rel}).encode(),
+            method="POST")
+        req.add_header("Authorization", "Bearer " + cfg.get("mini_token", ""))
+        req.add_header("Content-Type", "application/json")
+        urllib.request.urlopen(req, timeout=1).close()
+    except Exception:
+        pass
+
+
 def _read_with_shadow(path: str) -> str:
     """Fast read path for bubble_shield_read — hash → serve, ZERO models.
 
@@ -1506,6 +1577,28 @@ def _read_with_shadow(path: str) -> str:
         except Exception:
             pass  # net is additive; a gazetteer failure must never break the read
         return cached
+    # #645 MINI TIER — local miss: ask the mini (2s timeout) before falling back.
+    # Degraded mode is Joris-decided (2026-07-16): mini down / MISS / any error →
+    # the client keeps working and serves raw (accepted leak). Never blocks.
+    _cfg = _mini_config()
+    if _cfg:
+        try:
+            remote = _mini_get_shadow(_cfg, h)
+            if remote is not None:
+                # cache the remote HIT locally: repeat reads are free and survive
+                # a later mini outage. (Design choice C — client-side cache.)
+                try:
+                    st = p.stat()
+                    shadow_store.put_shadow(h, remote, src_path=str(p),
+                                            size=st.st_size, mtime=st.st_mtime)
+                except Exception:
+                    pass
+                return remote
+            # remote MISS — the mini doesn't know this doc yet: tell it to index
+            # (the cross-machine mark_pending), then serve raw below.
+            _mini_fire_index_request(_cfg, h, p)
+        except Exception:
+            pass   # mini unreachable → fall through to raw (accepted, logged below)
     # MISS — B1 accepted gap: serve RAW extracted text, no models at read time.
     sys.path.insert(0, str(_scripts_dir()))
     from bubble_shield_extract import extract_file

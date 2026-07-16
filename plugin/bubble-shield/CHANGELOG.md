@@ -1,5 +1,29 @@
 # Changelog — bubble-shield
 
+## 1.24.0 — 2026-07-16 — FEAT #645: Mac-mini tier — read distribution over Tailscale (minid + client branch)
+
+The mini is the sole indexer of the shared vault; client Macs read masked shadows
+over the tailnet instead of running models. Joris-decided degraded mode: the mini
+being down NEVER blocks a client — serve raw (accepted leak) and keep working.
+
+- **feat(minid) — `bubble_shield_minid.py`.** Tailscale-bound HTTP daemon (refuses
+  0.0.0.0): GET /health (open), GET /shadow/<hash> (Bearer token, serves the masked
+  shadow with the gazetteer net applied server-side), POST /index_request (queues a
+  cross-machine mark_pending; rel_path strictly under --root, traversal → 400).
+  Token auto-generated at ~/.bubble_shield/mini_token (0600). Port-bind singleton.
+  NO endpoint accepts or returns raw document content — documents travel via
+  Dropbox sync only; the tailnet carries masked text + hashes.
+- **feat(read path) — mini branch in `_read_with_shadow`.** Local HIT → serve
+  (mini untouched). Local miss → ask the mini (2s timeout): remote HIT is served +
+  cached locally (repeat reads free, survives outages); remote MISS fires a
+  non-blocking index_request (fixes the card's second bug: the mini now LEARNS
+  about docs it hasn't indexed) then serves raw; mini down/any error → raw,
+  instantly. Activated ONLY by `mini_url` in bubble-shield.json — absent = exact
+  single-Mac behavior, byte-for-byte.
+- 17 tests (daemon matrix + client matrix) + LIVE two-store loopback verify:
+  remote HIT/cache, MISS→index_request landing in the mini's pending, mini-down
+  raw in 0.12s, cache surviving the outage.
+
 ## 1.23.41 — 2026-07-16 — FIX #660: zipf junk-lane works without wordfreq (vendored static set)
 
 wordfreq was never installed in the prod app venv → depollute's `_max_zipf`
