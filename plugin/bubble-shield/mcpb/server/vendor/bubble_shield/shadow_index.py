@@ -239,6 +239,54 @@ def _is_ignorable(p: Path) -> bool:
     return False
 
 
+# ---- composite sweep ordering (#626 item 3, "heavy-LAST v1") ---------------
+# A cold backfill can be 81,000 docs. Walking ALPHABETICALLY is pathological: a
+# heavy scanned PDF early in the alphabet stalls the single serial worker while
+# recent, light, high-value docs wait weeks behind it. Instead order by:
+#   1. recency BUCKET (mtime): <30d, <1y, <3y, older — recent docs first, because
+#      that is what a client just touched and most wants protected now;
+#   2. cheap-FIRST within a bucket: ascending cost = st_size * ext_factor, so a
+#      folder's small docs clear fast and the heavy scans sink to its tail. Old
+#      heavy docs therefore sink to the global tail.
+# STAT-ONLY, NEVER a byte read: a dataless Dropbox placeholder raises the moment
+# its bytes are touched, but st_size/st_mtime come from metadata and are safe.
+# An unstatable file (the placeholder edge) sinks to the very end (bucket=older,
+# cost=+inf) so the existing per-file defer/error handling deals with it last,
+# instead of crashing the ordering. Path-alphabetical breaks (bucket, cost) ties
+# so runs are reproducible.
+_SCAN_SUFFIXES = frozenset({".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".heic"})
+_SCAN_EXT_FACTOR = 3.0
+# Bucket edges in seconds, ascending. index = count of edges the age exceeds:
+# <30d→0, <1y→1, <3y→2, older→3. Recent buckets sort first.
+_BUCKET_EDGES = (30 * 86400.0, 365 * 86400.0, 3 * 365 * 86400.0)
+
+
+def _sweep_order(paths):
+    """Return `paths` ordered by the composite (recency bucket, cheap-first cost,
+    path) key described above. STAT-ONLY — reads st_size/st_mtime, never bytes.
+    A file whose stat() raises sinks to the very end (bucket=older, cost=+inf) and
+    never aborts the ordering; the walk's existing per-file handling reaches it
+    last. Deterministic: equal (bucket, cost) fall back to path-alphabetical."""
+    import time
+    now = time.time()
+
+    def _key(p):
+        path_str = str(p)
+        try:
+            st = p.stat()
+        except OSError:
+            # Dataless-placeholder edge: no metadata → sink to the global tail,
+            # let the walk's per-file defer/error handling deal with it there.
+            return (len(_BUCKET_EDGES), float("inf"), path_str)
+        age = now - st.st_mtime
+        bucket = sum(1 for edge in _BUCKET_EDGES if age >= edge)
+        ext_factor = _SCAN_EXT_FACTOR if p.suffix.lower() in _SCAN_SUFFIXES else 1.0
+        cost = st.st_size * ext_factor
+        return (bucket, cost, path_str)
+
+    return sorted(paths, key=_key)
+
+
 def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None,
               value_hashes_fn=None) -> dict:
     """Resumable folder walk: index new/changed files, skip already-indexed ones.
@@ -286,7 +334,11 @@ def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None,
     except Exception:
         quarantined = set()
     indexed = skipped = deferred = failed = quarantined_skipped = 0
-    for p in sorted(root_p.rglob("*")):
+    # #626: walk in composite (recency bucket × cheap-first) order instead of
+    # alphabetical, so a cold backfill indexes recent/light/high-value docs first
+    # and heavy old scans sink to the tail. Ordering-only: everything below is
+    # unchanged. _sweep_order is STAT-ONLY and never crashes on a dataless file.
+    for p in _sweep_order(root_p.rglob("*")):
         try:
             if not p.is_file():
                 continue

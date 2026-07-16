@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.24.4 — 2026-07-16 — FEAT #626: composite sweep ordering (recency × cheap-first, heavy-LAST)
+
+A cold 81k-doc backfill walked ALPHABETICALLY: a heavy scanned PDF early in the
+alphabet stalled the single serial worker while recent, light, high-value docs
+waited weeks. The sweep now orders by recency bucket (<30d, <1y, <3y, older) then
+cheap-first within a bucket (st_size × extension factor — scans sink to the tail).
+
+- **feat(shadow_index) — `_sweep_order`.** STAT-ONLY (never reads bytes — dataless
+  Dropbox placeholders stay safe); an unstatable file sinks to the global tail
+  instead of crashing the ordering; path-alphabetical tiebreaker keeps runs
+  deterministic. ORDERING-ONLY: skip/resume, quarantine, deferral, fail-closed,
+  progress callbacks and value-hash threading are behaviorally unchanged.
+  8 tests (bucket/cost/surcharge/tiebreak/unstatable/e2e-counts) + full sweep
+  regression suites green. Built maker≠checker (subagent build, reviewed).
+
 ## 1.24.3 — 2026-07-16 — FEAT #560: relax the sandbox-specific guard gates on a confirmed host
 
 The #553-C gates (opaque eval-of-command-substitution, unresolvable-cd + relative-read)
