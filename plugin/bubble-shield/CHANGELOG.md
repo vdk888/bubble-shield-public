@@ -1,5 +1,26 @@
 # Changelog — bubble-shield
 
+## 1.24.3 — 2026-07-16 — FEAT #560: relax the sandbox-specific guard gates on a confirmed host
+
+The #553-C gates (opaque eval-of-command-substitution, unresolvable-cd + relative-read)
+defend a Cowork-SANDBOX mount-escape threat (/sessions/*/mnt/) that cannot exist on the
+host. On the host they protected nothing (a real protected-folder read is still caught
+by the marker walk-up) and were pure friction — they fail-closed on normal host shell
+(direnv/ssh-agent/brew shellenv hooks, cd "$VAR" && cat rel/file). Strategic basis
+(Joris): Shield's future is host Claude Code, outside Cowork, so host friction hurts the
+primary surface.
+
+- **feat(guard) — `_on_confirmed_host()` + gate the two #553-C sites.** The two gates
+  now skip ONLY on a POSITIVELY-confirmed host (HOME=/Users|/root, no
+  CLAUDE_CODE_IS_COWORK, no CLAUDE_CODE_ENTRYPOINT=local-agent, no sessions dir).
+  INVERTED fail-safe vs the installer: relax only when host is PROVEN; any uncertainty
+  or any Cowork signal -> stay strict (default-deny preserved — a leak from
+  over-relaxing is worse than host friction). The #553-B literal gate stays active on
+  all surfaces (harmless on host). The core marker-DENY, path-extraction, and mail-guard
+  are UNCHANGED on every surface. 9 tests (host relaxes + real read still denies +
+  sandbox/uncertain/any-cowork-signal stay strict); the 5 #553 regression cases still
+  DENY (their tmp HOME is unrecognised -> strict).
+
 ## 1.24.2 — 2026-07-16 — FIX #668: drop GLiNER EMAIL spans with no '@' (word 'e-mail' over-masked)
 
 GLiNER tags the bare word 'e-mail'/'email'/'courriel' with its 'email' label, so

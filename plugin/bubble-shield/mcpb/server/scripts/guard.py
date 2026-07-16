@@ -100,6 +100,47 @@ def _allow(reason: str = "") -> None:
     sys.exit(0)
 
 
+def _on_confirmed_host() -> bool:
+    """#560 — True ONLY when we can POSITIVELY confirm we are on a real host Mac
+    (Claude Code CLI), NOT the Cowork sandbox VM.
+
+    WHY (Joris 2026-07-16): Shield's future is host Claude Code, outside Cowork.
+    The #553-C gates (opaque-eval, unresolvable-cd + relative-read) defend a
+    Cowork-SANDBOX mount-escape threat (`/sessions/*/mnt/`) that cannot exist on
+    the host — there is no sandbox mount to exfil. On the host those gates protect
+    nothing (a real protected read is still caught by the marker walk-up) and are
+    pure friction. So we relax them, but ONLY on a positively-confirmed host.
+
+    FAIL-SAFE (inverted vs the installer's _in_cowork_vm): relax ONLY when we can
+    PROVE host; any uncertainty or any Cowork signal → return False → gates stay
+    strict. A leak from over-relaxing in a real Cowork session is far worse than
+    the host friction, so the default direction is strict.
+
+    Positive-host proof (ALL must hold):
+      - HOME is a real host path (`/Users/…` or `/root`), never `/sessions/…`;
+      - no `CLAUDE_CODE_IS_COWORK=1`;
+      - no `CLAUDE_CODE_ENTRYPOINT=local-agent`;
+      - no `/sessions/` directory on the filesystem (the sandbox layout).
+    Any failure / any error → False (strict).
+    """
+    try:
+        home = os.environ.get("HOME", "")
+        if not home or home.startswith("/sessions/"):
+            return False
+        if not (home.startswith("/Users/") or home == "/root"
+                or home.startswith("/root/")):
+            return False  # unrecognised HOME → can't confirm host → strict
+        if os.environ.get("CLAUDE_CODE_IS_COWORK") == "1":
+            return False
+        if os.environ.get("CLAUDE_CODE_ENTRYPOINT") == "local-agent":
+            return False
+        if os.path.isdir("/sessions"):
+            return False  # the Cowork sandbox layout — not a host
+        return True
+    except Exception:
+        return False  # any error → strict
+
+
 def _load_config() -> dict:
     for loc in CONFIG_LOCATIONS:
         if not loc:
@@ -1552,7 +1593,16 @@ def _main(raw: str) -> None:
         # Runs AFTER the #553-B literal gate and BEFORE the resolvable-cd path logic
         # so the obfuscated shape can never fall through to an ALLOW. See
         # _has_unresolvable_cd / _has_relative_read / _has_opaque_eval.
-        if _has_opaque_eval(command):
+        # #560 — the two #553-C gates below defend a Cowork-SANDBOX mount-escape
+        # threat (`/sessions/*/mnt/`) that cannot exist on the host. On a
+        # POSITIVELY-confirmed host they protect nothing (a real protected read is
+        # still caught by the marker walk-up below) and are pure friction, so we
+        # skip them there. Anywhere else (Cowork OR uncertain) they stay strict —
+        # `_on_confirmed_host()` fails toward strict. The #553-B literal gate above
+        # is left active on all surfaces (harmless on host, needs a token host
+        # commands lack).
+        _relax_553c = _on_confirmed_host()
+        if _has_opaque_eval(command) and not _relax_553c:
             # `eval "$(…)"` — decoded text invisible; can't prove it performs no
             # relative read. Documented judgment call: fail-close on opaque eval.
             _deny(
@@ -1561,7 +1611,8 @@ def _main(raw: str) -> None:
                 "pour le guard et pourrait lire un fichier relatif dans un montage "
                 "protégé, bloqué par sécurité (fail-closed #553-C).]")
             return
-        if _has_unresolvable_cd(command) and _has_relative_read(command):
+        if (_has_unresolvable_cd(command) and _has_relative_read(command)
+                and not _relax_553c):
             _deny(
                 f"{g_message}\n[Bubble Shield guard: `cd` vers une cible non "
                 "résoluble (variable / $(…) / backtick / cd - / glob) suivie d'une "
