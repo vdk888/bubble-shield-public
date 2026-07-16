@@ -441,6 +441,12 @@ def gliner_matches(
         # offsets — the key still holds the original span text, but after
         # _extend_nom_containment the offsets may be wider.
         actual_value = text[s:en] if 0 <= s < en <= len(text) else span
+        # #668: GLiNER tags the bare WORD "e-mail"/"email"/"courriel" as EMAIL.
+        # An EMAIL span with no '@' cannot be an address → drop it (over-masking
+        # a common word, hurts readability). A real address (x@y) keeps its tag.
+        # Zero recall risk: a genuine email always contains '@'.
+        if etype == "EMAIL" and "@" not in actual_value:
+            continue
         out.append(Match(start=s, end=en, entity_type=etype, value=actual_value,
                          score=score, priority=5))  # priority<regex so checksum PII wins
     return out

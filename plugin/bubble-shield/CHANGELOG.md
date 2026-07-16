@@ -1,5 +1,18 @@
 # Changelog — bubble-shield
 
+## 1.24.2 — 2026-07-16 — FIX #668: drop GLiNER EMAIL spans with no '@' (word 'e-mail' over-masked)
+
+GLiNER tags the bare word 'e-mail'/'email'/'courriel' with its 'email' label, so
+the common word was masked as ⟦EMAIL⟧ — readability damage on every mail/doc that
+says 'e-mail'. (Verified NOT the regex, which requires an @; it's the neural label.)
+
+- **fix(gliner_ext) — EMAIL span must contain '@'.** At span emission, a GLiNER
+  EMAIL span whose text has no '@' is dropped: it cannot be an address. Zero recall
+  risk — a genuine email always contains '@'. A real address (x@y.fr) is untouched.
+  1 regression test. Found during #552 mail-recall verification (whose reported
+  name-leak no longer reproduces — recall improved; only the HTML-extraction half
+  of #552 remains open).
+
 ## 1.24.1 — 2026-07-16 — FIX #599: guard fails-OPEN on non-file MCP tools (Telegram reply no longer blocked by an internal error)
 
 A guard-INTERNAL error (e.g. the NER daemon throwing mid-idle-shutdown) fail-closed

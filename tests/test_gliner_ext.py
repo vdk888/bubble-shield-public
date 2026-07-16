@@ -347,3 +347,19 @@ def test_582_bare_city_maps_to_adresse_not_birthplace(monkeypatch):
     by = {(m.entity_type, m.value) for m in matches}
     assert ("ADRESSE", "Nice") in by
     assert ("LIEU_NAISSANCE", "Nice") not in by
+
+
+def test_668_email_span_without_at_is_dropped(monkeypatch):
+    # #668: GLiNER tags the bare WORD "e-mail" as EMAIL. An EMAIL span with no
+    # '@' cannot be an address → drop it (over-masking a common word). A real
+    # address keeps its EMAIL tag.
+    text = "Cet e-mail est destiné à jean@exemple.fr aussi."
+    stub = _StubModel([
+        ("e-mail", "email", 0.8),               # the false positive
+        ("jean@exemple.fr", "email", 0.9),      # a real address
+    ])
+    monkeypatch.setattr(gx, "_load_model", lambda model_id: stub)
+    matches = gx.gliner_matches(text, chunk_size=200, overlap=20)
+    by = {(m.entity_type, m.value) for m in matches}
+    assert ("EMAIL", "e-mail") not in by       # dropped: no '@'
+    assert ("EMAIL", "jean@exemple.fr") in by  # kept: real address
