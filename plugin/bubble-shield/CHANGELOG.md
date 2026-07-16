@@ -1,5 +1,18 @@
 # Changelog — bubble-shield
 
+## 1.23.38 — 2026-07-16 — FIX #582: GLiNER bare "city" retags to ADRESSE (not LIEU_NAISSANCE)
+
+GLiNER classified bare city mentions with no birth context ("basé à Nice", "le dossier
+à Lyon") as LIEU_NAISSANCE, dragging that type's precision to 41.2%. Joris-approved
+policy call (2026-07-16): a bare city is a location mention, not a birthplace.
+
+- **fix(gliner_ext) — the "city" GLiNER label now maps to ADRESSE.** Mask-neutral:
+  both types are `identifying: True, default_cloak: True` in policy.py, so nothing
+  previously masked becomes unmasked — the vault type is just no longer wrong. A
+  genuine "place of birth" prediction keeps LIEU_NAISSANCE (the birth-cue'd label is
+  unchanged, and the regex birthplace matcher was already date-gated). 1 regression
+  test (`test_582_bare_city_maps_to_adresse_not_birthplace`), synthetic only.
+
 ## 1.23.37 — 2026-07-16 — FIX #400: tripwire SECU false positive (add NIR mod-97 checksum)
 
 The UserPromptSubmit tripwire's SECU pattern fired on a benign 13-15-digit run (a Google

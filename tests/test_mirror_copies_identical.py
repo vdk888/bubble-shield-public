@@ -79,7 +79,13 @@ def _discover_missing_from_bundle():
             continue
         for plugin_file in sorted(plugin_dir.glob("*.py")):
             name = plugin_file.name
-            if name.startswith("test_") or name in PLUGIN_ONLY_EXCLUDES:
+            # Match ALL THREE test-glob excludes the RELEASING.md rsync uses
+            # (test_*.py, _test_*.py, *_test.py) — e.g. _test_mock_daemon.py is
+            # plugin-side test scaffolding, never bundled. (Before this fix the
+            # tripwire only knew test_*, and passed only while a stale copy sat
+            # in mcpb/server — the RELEASING.md purge exposed the gap.)
+            if (name.startswith(("test_", "_test_")) or name.endswith("_test.py")
+                    or name in PLUGIN_ONLY_EXCLUDES):
                 continue
             if not (bundle_dir / name).is_file():
                 orphans.append(f"{dir_label}/{name}")

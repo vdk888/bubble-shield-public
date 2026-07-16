@@ -333,3 +333,17 @@ def test_default_compress_dots_is_true():
     """DEFAULT_COMPRESS_DOTS must be True (enabled by default)."""
     assert gx.DEFAULT_COMPRESS_DOTS is True, (
         "DEFAULT_COMPRESS_DOTS should be True; can be overridden via env var")
+
+
+def test_582_bare_city_maps_to_adresse_not_birthplace(monkeypatch):
+    # #582: GLiNER's bare "city" label (e.g. "basé à Nice" with no birth
+    # context) must retag to ADRESSE — a location mention, not a birthplace.
+    # Mask-neutral: both types are identifying+default_cloak in policy.py.
+    # A genuine "place of birth" prediction keeps LIEU_NAISSANCE (tested above).
+    text = "Cabinet basé à Nice, France."
+    stub = _StubModel([("Nice", "city", 0.8)])
+    monkeypatch.setattr(gx, "_load_model", lambda model_id: stub)
+    matches = gx.gliner_matches(text, chunk_size=200, overlap=20)
+    by = {(m.entity_type, m.value) for m in matches}
+    assert ("ADRESSE", "Nice") in by
+    assert ("LIEU_NAISSANCE", "Nice") not in by

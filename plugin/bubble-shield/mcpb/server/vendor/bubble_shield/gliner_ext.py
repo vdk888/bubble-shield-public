@@ -141,7 +141,10 @@ LABEL_TO_TYPE: Dict[str, str] = {
     # Birthplace is identifying (city after a DOB was missed because no
     # label asked for them). Map to a dedicated type so the vault is clear.
     "place of birth": "LIEU_NAISSANCE",
-    "city": "LIEU_NAISSANCE",
+    # #582: a bare city with no birth context ("basé à Nice") is a location
+    # mention, not a birthplace — retag to ADRESSE (mask-neutral: both types
+    # are identifying+default_cloak). Fixes LIEU_NAISSANCE precision (41.2%).
+    "city": "ADRESSE",
     "phone number": "TEL",
     "email": "EMAIL",
     "email address": "EMAIL",

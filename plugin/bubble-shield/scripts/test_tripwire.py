@@ -87,8 +87,12 @@ def main():
     check("email → nudge", is_nudge(r))
     check("email value not echoed", no_value_leak(r, "jean.dupont@example.com"))
 
-    r = run("Son numéro de sécu : 1 84 12 75 116 001 23")
+    # NIR must be checksum-valid since #400 (mod-97 key = 97 - body % 97).
+    # Synthetic body 1841275116001 → key 26. An invalid key must NOT nudge.
+    r = run("Son numéro de sécu : 1 84 12 75 116 001 26")
     check("FR secu number → nudge", is_nudge(r))
+    r = run("Son numéro de sécu : 1 84 12 75 116 001 23")
+    check("FR secu invalid checksum → no nudge", not is_nudge(r))
 
     r = run("Tu peux le rappeler au 06 12 34 56 78 ?")
     check("FR phone → nudge", is_nudge(r))
