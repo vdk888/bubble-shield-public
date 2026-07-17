@@ -138,24 +138,70 @@ def _ocr_pack_python() -> "Path | None":
         return None
 
 
-def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
-    """Try OCR on a scanned PDF using the optional OCR pack.
+def _vision_ocr_binary_path(home: "Path") -> "Path":
+    """The compiled Swift `visionocr` helper location under BUBBLE_SHIELD_HOME."""
+    return home / "visionocr"
 
-    Returns the OCR'd text (prefixed with _OCR_TAG) if successful, None otherwise.
-    Layout-aware: docling preserves label:value structure from KYC/form PDFs.
-    Called only when pypdf finds no text layer. Completely local — no cloud.
 
-    PRIVACY GUARANTEE: HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 are set in
-    the subprocess env, so NO outbound network call is made at runtime.  The
-    layout model MUST already be cached (guaranteed by _ocr_pack_python() which
-    checks the sentinel before returning the venv path)."""
+def _vision_ocr_binary() -> "Path | None":
+    """#626 — return the compiled Apple Vision `visionocr` helper if it's ready,
+    else None. Mirrors _ocr_pack_python(): a `vision_ocr.flag` sentinel (written by
+    the OCR-pack setup after `swiftc` compiled the helper) gates it, so a
+    half-provisioned install falls through to docling instead of erroring."""
+    import os
+    from pathlib import Path
+    home = Path(os.environ.get("BUBBLE_SHIELD_HOME", Path.home() / ".bubble_shield"))
+    if not (home / "vision_ocr.flag").is_file():
+        return None
+    binp = _vision_ocr_binary_path(home)
+    return binp if binp.is_file() and os.access(binp, os.X_OK) else None
+
+
+def _ocr_pdf_via_vision(raw: bytes) -> "str | None":
+    """#626 — OCR a scanned PDF with the native Apple Vision Swift helper.
+
+    Returns the raw recognized text (UNtagged — the caller adds _OCR_TAG) or None
+    on any failure (helper absent, non-zero exit, timeout, empty output). ~1s warm;
+    the FIRST call pays a one-time ~40–90s ANE compile (accepted for batch OCR).
+    On-device, no network. macOS-only — returns None everywhere else via the
+    sentinel gate. render scale=2.0 matches the validated helper config."""
+    binp = _vision_ocr_binary()
+    if binp is None:
+        return None
+    import subprocess
+    import tempfile
+    import os
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+        tf.write(raw)
+        tmp_pdf = tf.name
+    try:
+        r = subprocess.run([str(binp), tmp_pdf, "2.0"],
+                           capture_output=True, text=True, timeout=300)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+        return None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_pdf)
+        except Exception:
+            pass
+
+
+def _ocr_pdf_via_docling(raw: bytes) -> "str | None":
+    """Docling/RapidOCR OCR of a scanned PDF (the proven fallback path).
+
+    Returns _OCR_TAG-prefixed text on success, None otherwise. Layout-aware:
+    preserves label:value structure from KYC/form PDFs. PRIVACY: HF_HUB_OFFLINE=1
+    and TRANSFORMERS_OFFLINE=1 forced in the subprocess — NO runtime HF fetch; the
+    model MUST already be cached (guaranteed by _ocr_pack_python()'s sentinel)."""
     py = _ocr_pack_python()
     if py is None:
         return None
     import subprocess
     import tempfile
     import os
-    # Write raw PDF to a temp file, run docling in the ocr-env, read result
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
         tf.write(raw)
         tmp_pdf = tf.name
@@ -172,9 +218,6 @@ def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
             f"res = conv.convert({tmp_pdf!r});"
             "print(res.document.export_to_markdown(), end='')"
         )
-        # CRITICAL: enforce offline mode — NO huggingface.co calls at runtime.
-        # _ocr_pack_python() already confirmed the sentinel (model cached), so
-        # setting HF_HUB_OFFLINE=1 here is safe and mandatory.
         env = dict(os.environ)
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
@@ -190,6 +233,29 @@ def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
             os.unlink(tmp_pdf)
         except Exception:
             pass
+
+
+def _ocr_pdf_if_pack_present(raw: bytes) -> "str | None":
+    """#626 — Vision-FIRST, docling-RESCUE OCR for a scanned PDF.
+
+    Try the native Apple Vision helper (~1s warm, macOS); on ANY failure fall
+    through to the proven docling/RapidOCR path unchanged. Returns _OCR_TAG-
+    prefixed text on success, None if BOTH fail (fail-closed → the caller raises
+    ExtractionError; a doc we cannot OCR is never treated as clean).
+
+    Docling stays as a per-doc RESCUE (some docs Vision mis-reads, e.g. serif
+    e/c confusion on emails), not a platform fallback — OCR only ever runs on
+    macOS (the mini/host; team clients read the mini's masked shadow, never OCR).
+    Escape hatch: BUBBLE_SHIELD_DISABLE_VISION_OCR=1 forces docling."""
+    import os
+    if os.environ.get("BUBBLE_SHIELD_DISABLE_VISION_OCR") != "1":
+        try:
+            vtext = _ocr_pdf_via_vision(raw)
+        except Exception:
+            vtext = None
+        if vtext:
+            return _OCR_TAG + " " + vtext
+    return _ocr_pdf_via_docling(raw)
 
 
 def _ocr_image_if_pack_present(raw: bytes, suffix: str) -> "str | None":

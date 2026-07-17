@@ -1,5 +1,29 @@
 # Changelog — bubble-shield
 
+## 1.24.5 — 2026-07-17 — FEAT #626: Apple Vision OCR (Vision-first, docling-rescue) — ~145x faster scanned-doc OCR
+
+Scanned-PDF OCR was docling/RapidOCR at ~220s/doc — the dominant cost of the 81k
+backfill. Native Apple Vision does the same in ~1s warm (validated: 6/6 runs
+0.73-1.19s, CER 0.28 < RapidOCR 0.35, PII survival 9/9), on-device, free.
+
+- **feat(extract) — Vision-FIRST, docling-RESCUE.** `_ocr_pdf_if_pack_present`
+  tries the native Vision helper first; on ANY failure (absent/error/empty) it
+  falls through to the EXISTING docling/RapidOCR path, unchanged. Both fail ->
+  None (fail-closed preserved: an un-OCR'd doc is never certified clean). Same
+  `[OCR]` tag. Escape hatch: `BUBBLE_SHIELD_DISABLE_VISION_OCR=1` forces docling.
+  docling stays as a per-doc rescue (some docs Vision mis-reads, e.g. serif e/c on
+  emails), NOT a platform fallback — OCR only ever runs on macOS (the mini/host;
+  team clients read the mini's masked shadow, never OCR).
+- **ZERO client toolchain dependency.** The plugin SHIPS a pre-compiled UNIVERSAL
+  (arm64+x86_64) `visionocr` binary. Its only runtime deps are macOS system
+  frameworks + the Swift runtime (in base macOS since 2019) -> runs on any modern
+  Mac with NO Xcode / Command Line Tools / swiftc. Setup copies + smoke-tests the
+  shipped binary before enabling; swiftc-compile from source is kept only as a
+  last-ditch fallback. Proven on a bare-Mac simulation (swiftc stripped from PATH).
+- 7 tests (Vision-win / empty->docling / error->docling / both-fail->None /
+  disable-hatch / binary-resolution) + live real-helper verify (3/3 IBANs verbatim,
+  ~1s warm) + OCR/extract regressions green + doctor clean (binary tracked).
+
 ## 1.24.4 — 2026-07-16 — FEAT #626: composite sweep ordering (recency × cheap-first, heavy-LAST)
 
 A cold 81k-doc backfill walked ALPHABETICALLY: a heavy scanned PDF early in the

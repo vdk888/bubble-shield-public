@@ -381,6 +381,64 @@ def verify(py: Path) -> bool:
     return False
 
 
+_VISION_FLAG = BUBBLE_SHIELD_HOME / "vision_ocr.flag"
+_VISION_BIN = BUBBLE_SHIELD_HOME / "visionocr"
+
+
+def _ensure_vision_ocr() -> None:
+    """#626 — make the native Apple Vision OCR helper (`visionocr`) available.
+
+    NO client-side toolchain dependency: the plugin SHIPS a pre-compiled UNIVERSAL
+    (arm64+x86_64) `visionocr` binary. Its only runtime deps are macOS system
+    frameworks (Vision/CoreGraphics/Foundation) + the Swift runtime, which ships in
+    base macOS since 10.14.4 (2019) — so it runs on any modern Mac with NO Xcode /
+    Command Line Tools / swiftc needed. We just copy the shipped binary into
+    BUBBLE_SHIELD_HOME and set the sentinel.
+
+    BEST-EFFORT + fail-soft: on non-macOS, a missing/incompatible shipped binary,
+    or a copy error, we do NOT write the sentinel → the extract path falls through
+    to docling/RapidOCR. As a last-ditch fallback (shipped binary absent AND swiftc
+    present) we compile from source. Never raises, never blocks OCR-pack setup.
+    """
+    import platform
+    import shutil
+    import subprocess
+    try:
+        if platform.system() != "Darwin":
+            return
+        BUBBLE_SHIELD_HOME.mkdir(parents=True, exist_ok=True)
+        shipped = Path(__file__).resolve().parent / "vision" / "visionocr"
+        # PREFERRED: use the shipped pre-compiled universal binary (zero toolchain).
+        if shipped.is_file():
+            shutil.copy2(shipped, _VISION_BIN)
+            _VISION_BIN.chmod(0o755)
+            # smoke: it must actually run on this Mac (arch/OS sanity) before we
+            # flip the sentinel — else docling stays the path.
+            r = subprocess.run([str(_VISION_BIN)], capture_output=True,
+                               text=True, timeout=30)
+            # exit 2 = its own "usage" (ran fine, no arg) → binary is runnable here
+            if r.returncode in (0, 2):
+                _VISION_FLAG.write_text("ready")
+                log("  ✓ Vision OCR helper installed (shipped prebuilt, native ~1s/doc; "
+                    "docling stays as rescue)")
+                return
+            log("  (Vision OCR: shipped binary did not run here — trying swiftc)")
+        # LAST-DITCH: compile from source only if swiftc happens to be present.
+        swiftc = shutil.which("swiftc")
+        src = Path(__file__).resolve().parent / "vision" / "VisionOCR.swift"
+        if swiftc and src.is_file():
+            r = subprocess.run([swiftc, "-O", str(src), "-o", str(_VISION_BIN)],
+                               capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and _VISION_BIN.is_file():
+                _VISION_BIN.chmod(0o755)
+                _VISION_FLAG.write_text("ready")
+                log("  ✓ Vision OCR helper compiled from source (docling stays as rescue)")
+                return
+        log("  (Vision OCR: unavailable — using docling)")
+    except Exception as e:
+        log(f"  (Vision OCR: setup skipped — using docling: {type(e).__name__})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check-only", action="store_true",
@@ -414,6 +472,7 @@ def main() -> int:
         ensure_models_cached(py)   # downloads layout + TableFormer; sets sentinel only after BOTH
         write_manifest(py)
         ok = verify(py)            # runs WITH HF_HUB_OFFLINE=1 to prove offline
+        _ensure_vision_ocr()       # #626 compile the native Apple Vision helper (best-effort)
     except subprocess.CalledProcessError as e:
         log(f"✗ a setup step failed: {e}")
         return 1
