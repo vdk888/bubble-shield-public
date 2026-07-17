@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.24.7 — 2026-07-17 — FIX: sweep only warms the daemons when there is new work (stop holding ~4GB idle)
+
+The 20-min sweep warmed the NER + Gemma daemons UNCONDITIONALLY, then often found
+0 new docs and exited — but the ~4GB Gemma model was now loaded and sat warm for the
+10-min idle window, so the NEXT sweep re-warmed it before it could shut down. Net: on
+an idle machine with a fully-indexed folder, 4GB was held forever.
+
+- **feat(shadow_index) — `has_unindexed_work(roots)`.** A cheap short-circuit walk
+  that returns True at the FIRST un-indexed doc (no model, mirrors run_sweep's
+  skip/ignorable/quarantine logic). The sweep now warms ONLY when it finds work;
+  a no-op sweep logs 'no new docs -- skipping daemon warm' and leaves Gemma cold.
+  When there IS work, warm-first still gives a scanned liasse a live pipeline.
+  6 tests. Pairs with v1.24.6 (10-min idle): together the model now actually frees
+  its RAM on an idle, fully-indexed machine instead of being re-warmed every 20 min.
+
 ## 1.24.6 — 2026-07-17 — FIX: gemmad idle-shutdown 4h -> 10 min (free ~4GB when idle)
 
 The Gemma daemon held its ~4GB model warm in unified/GPU memory for 4h after the

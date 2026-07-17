@@ -469,15 +469,24 @@ def main(argv=None) -> int:
         print("sweep already running -- skip")
         return 0
     try:
-        # WARM THE DAEMONS FIRST (the sweep owns its dependencies). The NER +
-        # Gemma daemons idle-shutdown after 10 min; the sweep runs every 20 min —
-        # so left alone the daemons are ALWAYS dead when the sweep needs them, and
-        # any file needing the model (a scanned liasse fiscale) fail-closes on
-        # EVERY sweep and never indexes. Here the sweep spawns + warms them and
-        # waits (bounded) before processing, so a hard file gets a live pipeline.
-        # Best-effort: warming failures are non-fatal — those files just stay
-        # pending and retry next sweep, exactly as before this fix.
-        _warm_daemons()
+        # WARM THE DAEMONS — but ONLY IF THERE IS NEW WORK. The NER + Gemma
+        # daemons idle-shutdown after 10 min; the sweep runs every 20 min — so if
+        # the sweep warmed UNCONDITIONALLY, a fully-indexed folder would re-load
+        # the ~4GB Gemma model every 20 min and it would never idle long enough to
+        # shut down (holding 4GB forever on an idle machine). `has_unindexed_work`
+        # is a cheap short-circuit walk (stops at the first un-indexed doc, no
+        # model) — we warm only when it finds work. When there IS work, warming
+        # first still gives a scanned liasse a live pipeline instead of fail-
+        # closing every run. Best-effort: warming failures stay non-fatal.
+        try:
+            _work = shadow_index.has_unindexed_work(roots)
+        except Exception:
+            _work = True  # can't tell → warm as before (safe)
+        if _work:
+            _warm_daemons()
+        else:
+            print("sweep -- no new docs to index; skipping daemon warm "
+                  "(gemma stays cold, ~4GB freed)")
 
         # SNAPSHOT AT START — write the coverage snapshot BEFORE indexing, so the
         # marked folder appears in the dashboard IMMEDIATELY (at 0%/pending)

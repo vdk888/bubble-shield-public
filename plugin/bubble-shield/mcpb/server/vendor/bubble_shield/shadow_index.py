@@ -287,6 +287,55 @@ def _sweep_order(paths):
     return sorted(paths, key=_key)
 
 
+def has_unindexed_work(roots, exts=None) -> bool:
+    """Cheap probe: is ANY file under `roots` not yet indexed (or quarantined)?
+
+    Walks the roots and returns True at the FIRST un-indexed doc found (short-
+    circuit — does not hash the whole tree once it finds work). Mirrors run_sweep's
+    skip logic: content_hash already in list_indexed() → skip; ignorable/ext-
+    filtered → skip; quarantined → skip. A file whose bytes can't be read (dataless
+    placeholder) counts as work (it needs a later sweep). Returns False only when
+    every readable doc is already indexed.
+
+    Used by the sweep to AVOID warming the ~4GB Gemma model when there is nothing
+    new to index — otherwise the 20-min sweep re-warms it before the 10-min idle
+    shutdown can free it, holding 4GB forever on an idle, fully-indexed folder."""
+    try:
+        already = shadow_store.list_indexed()
+    except Exception:
+        return True  # can't tell → assume work (safe: warm + sweep as before)
+    try:
+        quarantined = {str(Path(os.path.expanduser(x)).resolve())
+                       for x in shadow_store.quarantined_files()}
+    except Exception:
+        quarantined = set()
+    for root in roots:
+        try:
+            root_p = Path(os.path.expanduser(root)).resolve()
+        except Exception:
+            continue
+        if not root_p.is_dir():
+            continue
+        for p in root_p.rglob("*"):
+            try:
+                if not p.is_file() or _is_ignorable(p):
+                    continue
+                if exts and p.suffix.lower() not in exts:
+                    continue
+                if str(Path(os.path.expanduser(str(p))).resolve()) in quarantined:
+                    continue
+                try:
+                    h = shadow_store.content_hash(p)
+                except OSError:
+                    return True  # dataless/unreadable → needs a sweep = work
+                if h not in already:
+                    return True  # first un-indexed doc → work exists, stop here
+            except Exception:
+                # a weird file shouldn't mask real work; treat as work to be safe
+                return True
+    return False
+
+
 def run_sweep(root: str, *, anonymize_fn, exts=None, on_progress=None,
               value_hashes_fn=None) -> dict:
     """Resumable folder walk: index new/changed files, skip already-indexed ones.
