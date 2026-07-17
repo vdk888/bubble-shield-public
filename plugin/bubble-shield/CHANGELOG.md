@@ -1,5 +1,20 @@
 # Changelog — bubble-shield
 
+## 1.24.6 — 2026-07-17 — FIX: gemmad idle-shutdown 4h -> 10 min (free ~4GB when idle)
+
+The Gemma daemon held its ~4GB model warm in unified/GPU memory for 4h after the
+last call (the #561-B default). That is over-conservative: a cold re-warm mid-sweep
+only bites during an ACTIVE backfill, where the daemon is never idle 10 min anyway
+(docs flow continuously). So 600s stays warm through a real sweep AND frees RAM on a
+daily-driver Mac used occasionally.
+
+- **fix(gemmad + setup_ml) — idle-shutdown default 14400s -> 600s (10 min).** Set in
+  both the launchd plist template (setup_ml) and the code default (gemmad). Re-warm
+  is ~15s. On the indexer/mini during an 81k backfill the daemon stays warm
+  throughout the sweep and releases the ~4GB only once the backfill truly stops — so
+  600s is correct on BOTH a personal Mac and the dedicated indexer. Override per
+  machine via BUBBLE_SHIELD_GEMMA_IDLE (=0 for always-warm).
+
 ## 1.24.5 — 2026-07-17 — FEAT #626: Apple Vision OCR (Vision-first, docling-rescue) — ~145x faster scanned-doc OCR
 
 Scanned-PDF OCR was docling/RapidOCR at ~220s/doc — the dominant cost of the 81k

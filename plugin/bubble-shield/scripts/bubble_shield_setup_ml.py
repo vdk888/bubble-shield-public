@@ -835,6 +835,7 @@ def install_gemma_launchagent(py: Path) -> None:
   <dict>
     <key>BUBBLE_SHIELD_HOME</key><string>{BUBBLE_SHIELD_HOME}</string>
     <key>HF_HUB_OFFLINE</key><string>1</string>
+    <key>BUBBLE_SHIELD_GEMMA_IDLE</key><string>600</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
@@ -844,6 +845,13 @@ def install_gemma_launchagent(py: Path) -> None:
 </dict>
 </plist>
 """
+    # BUBBLE_SHIELD_GEMMA_IDLE=600 (10 min): free the ~4GB Gemma model when the
+    # daemon has been idle 10 min — right for a daily-driver Mac (Shield used
+    # occasionally). Re-warm is ~15s. On the mini during an 81k backfill the
+    # daemon is never idle 10 min (docs flow continuously), so it stays warm
+    # throughout the sweep and only releases RAM once the backfill truly stops —
+    # so 600s is correct on BOTH the personal Mac and the indexer. (The 4h code
+    # default was over-conservative; an operator can still override via this env.)
     GEMMA_LAUNCH_PLIST.parent.mkdir(parents=True, exist_ok=True)
     GEMMA_LAUNCH_PLIST.write_text(plist, encoding="utf-8")
     # reload (unload-then-load) so a re-run picks up changes; ignore unload errors
