@@ -737,7 +737,10 @@ def install_launchagent(py: Path) -> None:
     <string>--no-warm</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>BUBBLE_SHIELD_HOME</key><string>{BUBBLE_SHIELD_HOME}</string></dict>
+  <dict>
+    <key>BUBBLE_SHIELD_HOME</key><string>{BUBBLE_SHIELD_HOME}</string>
+    <key>BUBBLE_SHIELD_NERD_IDLE</key><string>600</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>
@@ -746,6 +749,13 @@ def install_launchagent(py: Path) -> None:
 </dict>
 </plist>
 """
+    # BUBBLE_SHIELD_NERD_IDLE=600 (10 min): free the NER model when idle, matching
+    # gemmad (v1.24.6). The idle-exit is code 0 so launchd's KeepAlive
+    # (SuccessfulExit:false) does NOT restart it — that's intentional: the daemon
+    # SHOULD stay down when idle to free RAM. It re-spawns on the next read (via the
+    # hook / _try_spawn_daemon) and the sweep warms it only when there's new work
+    # (v1.24.7). The ~20-37s cold re-warm is the accepted cost of freeing RAM on a
+    # daily-driver Mac; an always-warm client sets BUBBLE_SHIELD_NERD_IDLE=0. (#561)
     LAUNCH_PLIST.parent.mkdir(parents=True, exist_ok=True)
     LAUNCH_PLIST.write_text(plist, encoding="utf-8")
     # reload (unload-then-load) so a re-run picks up changes; ignore unload errors

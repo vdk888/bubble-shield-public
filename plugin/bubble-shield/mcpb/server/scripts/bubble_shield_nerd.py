@@ -61,7 +61,7 @@ DEFAULT_PORT = int(os.environ.get("BUBBLE_SHIELD_NERD_PORT", "8723"))
 # never complete (observed live: 29/30 indexed, 1 liasse stuck, 4GB CPU loop).
 # The idle-shutdown MUST outlast the sweep interval so the daemon warmed for sweep
 # N is still alive at N+1. 4h >> 1200s satisfies that with margin.
-IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "14400"))  # 4h (#561/#561-B)
+IDLE_SECS = int(os.environ.get("BUBBLE_SHIELD_NERD_IDLE", "600"))  # 10 min (#561; aligned to gemmad v1.24.6)
 
 _last_activity = time.time()
 _lock = threading.Lock()

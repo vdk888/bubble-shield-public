@@ -1,5 +1,16 @@
 # Changelog — bubble-shield
 
+## 1.24.8 — 2026-07-21 — FIX #561: NER daemon idle-shutdown 4h -> 10 min (align to gemmad)
+
+The NER (GLiNER) daemon idled at 4h, holding its model RAM long after use. Aligned to
+the gemmad 10-min default (v1.24.6): free the NER model when idle 10 min. Set in both
+the code default and the launchd plist env. The idle-exit stays code 0 (KeepAlive does
+not restart it) BY DESIGN — the daemon should stay down when idle to free RAM; it
+re-spawns on the next read (hook / _try_spawn_daemon), and the sweep warms it only when
+there is new work (v1.24.7). Always-warm clients set BUBBLE_SHIELD_NERD_IDLE=0.
+Resolves the #561 'daemon holds RAM' concern; the intermittent-refusal symptom was
+already covered by the re-spawn path + singleton-bind (no stampede).
+
 ## 1.24.7 — 2026-07-17 — FIX: sweep only warms the daemons when there is new work (stop holding ~4GB idle)
 
 The 20-min sweep warmed the NER + Gemma daemons UNCONDITIONALLY, then often found
