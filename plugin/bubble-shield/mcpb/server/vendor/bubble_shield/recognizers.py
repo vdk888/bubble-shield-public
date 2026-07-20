@@ -306,6 +306,19 @@ RECOGNIZERS: List[Recognizer] = [
     Recognizer("POSTE",
                re.compile(rf"\b{_ROLE}{_QUAL}{_COMP}", re.I), 40,
                score_if_unvalidated=0.65),
+    # #678 — URL floor. URL masking was GLiNER-only (best-effort); a name in a URL
+    # slug (LinkedIn /in/prenom-nom) leaks if the neural NER misses the link. This
+    # conservative regex GUARANTEES the common shapes: an explicit scheme
+    # (http/https/ftp), a www. prefix, or a bare host with a real TLD followed by a
+    # /path (so a name-slug is captured). Deliberately narrow — a bare domain with
+    # NO path (e.g. "exemple.fr" mid-sentence) is NOT matched, to avoid firing on
+    # every dotted token. Priority 42 < EMAIL(100)/domains, so an email stays EMAIL.
+    Recognizer("URL",
+               re.compile(
+                   r"\b(?:(?:https?|ftp)://|www\.)[^\s<>\"'`]+"          # scheme or www.
+                   r"|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}/[^\s<>\"'`]+",      # host + /path
+                   re.I),
+               42, score_if_unvalidated=0.8),
 ]
 
 

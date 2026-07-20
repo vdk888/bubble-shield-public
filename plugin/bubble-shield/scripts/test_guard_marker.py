@@ -101,7 +101,14 @@ def main():
     # (regression for the P1 where _norm resolved "clean" against os.getcwd() so
     # the documented anonymized-output escape-hatch silently never matched.)
     with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
+        # #665 — RESOLVE the temp root. On macOS tempfile lives under /var/folders,
+        # a symlink to /private/var/folders. The guard resolves paths (.resolve()
+        # → /private/...) while the test constructed them from the unresolved /var
+        # path, so the relative-allow_paths MATCH depended on whether both sides
+        # canonicalised the symlink identically — an intermittent flake (the Bash
+        # case denied ~1 run in 15). Resolving here makes both sides use the same
+        # /private/... canonical path deterministically.
+        root = Path(td).resolve()
         client = root / "Souscription Rel Client"
         client.mkdir(parents=True)
         clean = client / "clean"; clean.mkdir()

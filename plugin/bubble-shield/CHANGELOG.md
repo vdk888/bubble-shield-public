@@ -1,5 +1,26 @@
 # Changelog — bubble-shield
 
+## 1.24.9 — 2026-07-21 — hygiene batch: URL floor (#678) + release gates (#385/#682) + dogfood scan (#396) + flaky test (#665)
+
+Five small buildables in one release:
+
+- **#678 regex URL floor.** URL masking was GLiNER-only (best-effort); a name in a
+  URL slug leaked if the neural NER missed the link. Added a conservative URL
+  recognizer (scheme / www. / host+path) as a fail-closed floor. 5 tests; no
+  false positives on prose or emails.
+- **#385 skill-description length gate.** Cowork rejects a SKILL.md `description`
+  over 1024 chars but `claude plugin validate` does not. The doctor --check now
+  blocks a release if any skill description exceeds 1024.
+- **#682 version-consistency gate.** A silently-aborted version bump left the
+  fields stale and no-op'd the client update (the v1.24.3 case). The doctor
+  --check now asserts all 3 manifests + the packed .mcpb agree; blocks on mismatch.
+- **#396 dogfood pre-publish scan.** Runs the engine's own regex core over the
+  shipped tree (skipping synthetic tests/bench) and flags plausible-REAL structured
+  PII (checksum-valid IBAN/SIREN/SECU, real-domain email) the grep denylist can't.
+  A REVIEW gate, redacted output. Acceptance: planted real IBAN flagged, synthetic not.
+- **#665 flaky marker test.** Resolved the tempdir /var→/private symlink ambiguity
+  (Path.resolve()); 15/15 deterministic.
+
 ## 1.24.8 — 2026-07-21 — FIX #561: NER daemon idle-shutdown 4h -> 10 min (align to gemmad)
 
 The NER (GLiNER) daemon idled at 4h, holding its model RAM long after use. Aligned to
