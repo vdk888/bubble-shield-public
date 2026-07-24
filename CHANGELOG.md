@@ -1,5 +1,527 @@
 # Changelog — bubble-shield
 
+## 1.24.10 — 2026-07-24
+
+- Ship `bubble_shield_setup_mini.py` to the public repo — installs `minid` (the Mac-mini read-distribution daemon) as a KeepAlive launchd service. Run ONLY on the mini node (opt-in, Option 2): `python3 plugin/bubble-shield/scripts/bubble_shield_setup_mini.py --host <mini-tailscale-ip> --root <protected-vault> [--port 8377]`. Not run by install-app.sh — reader Macs never self-promote to a server.
+
+## 1.24.9 — 2026-07-21 — hygiene batch: URL floor (#678) + release gates (#385/#682) + dogfood scan (#396) + flaky test (#665)
+
+Five small buildables in one release:
+
+- **#678 regex URL floor.** URL masking was GLiNER-only (best-effort); a name in a
+  URL slug leaked if the neural NER missed the link. Added a conservative URL
+  recognizer (scheme / www. / host+path) as a fail-closed floor. 5 tests; no
+  false positives on prose or emails.
+- **#385 skill-description length gate.** Cowork rejects a SKILL.md `description`
+  over 1024 chars but `claude plugin validate` does not. The doctor --check now
+  blocks a release if any skill description exceeds 1024.
+- **#682 version-consistency gate.** A silently-aborted version bump left the
+  fields stale and no-op'd the client update (the v1.24.3 case). The doctor
+  --check now asserts all 3 manifests + the packed .mcpb agree; blocks on mismatch.
+- **#396 dogfood pre-publish scan.** Runs the engine's own regex core over the
+  shipped tree (skipping synthetic tests/bench) and flags plausible-REAL structured
+  PII (checksum-valid IBAN/SIREN/SECU, real-domain email) the grep denylist can't.
+  A REVIEW gate, redacted output. Acceptance: planted real IBAN flagged, synthetic not.
+- **#665 flaky marker test.** Resolved the tempdir /var→/private symlink ambiguity
+  (Path.resolve()); 15/15 deterministic.
+
+## 1.24.8 — 2026-07-21 — FIX #561: NER daemon idle-shutdown 4h -> 10 min (align to gemmad)
+
+The NER (GLiNER) daemon idled at 4h, holding its model RAM long after use. Aligned to
+the gemmad 10-min default (v1.24.6): free the NER model when idle 10 min. Set in both
+the code default and the launchd plist env. The idle-exit stays code 0 (KeepAlive does
+not restart it) BY DESIGN — the daemon should stay down when idle to free RAM; it
+re-spawns on the next read (hook / _try_spawn_daemon), and the sweep warms it only when
+there is new work (v1.24.7). Always-warm clients set BUBBLE_SHIELD_NERD_IDLE=0.
+Resolves the #561 'daemon holds RAM' concern; the intermittent-refusal symptom was
+already covered by the re-spawn path + singleton-bind (no stampede).
+
+## 1.24.7 — 2026-07-17 — FIX: sweep only warms the daemons when there is new work (stop holding ~4GB idle)
+
+The 20-min sweep warmed the NER + Gemma daemons UNCONDITIONALLY, then often found
+0 new docs and exited — but the ~4GB Gemma model was now loaded and sat warm for the
+10-min idle window, so the NEXT sweep re-warmed it before it could shut down. Net: on
+an idle machine with a fully-indexed folder, 4GB was held forever.
+
+- **feat(shadow_index) — `has_unindexed_work(roots)`.** A cheap short-circuit walk
+  that returns True at the FIRST un-indexed doc (no model, mirrors run_sweep's
+  skip/ignorable/quarantine logic). The sweep now warms ONLY when it finds work;
+  a no-op sweep logs 'no new docs -- skipping daemon warm' and leaves Gemma cold.
+  When there IS work, warm-first still gives a scanned liasse a live pipeline.
+  6 tests. Pairs with v1.24.6 (10-min idle): together the model now actually frees
+  its RAM on an idle, fully-indexed machine instead of being re-warmed every 20 min.
+
+## 1.24.6 — 2026-07-17 — FIX: gemmad idle-shutdown 4h -> 10 min (free ~4GB when idle)
+
+The Gemma daemon held its ~4GB model warm in unified/GPU memory for 4h after the
+last call (the #561-B default). That is over-conservative: a cold re-warm mid-sweep
+only bites during an ACTIVE backfill, where the daemon is never idle 10 min anyway
+(docs flow continuously). So 600s stays warm through a real sweep AND frees RAM on a
+daily-driver Mac used occasionally.
+
+- **fix(gemmad + setup_ml) — idle-shutdown default 14400s -> 600s (10 min).** Set in
+  both the launchd plist template (setup_ml) and the code default (gemmad). Re-warm
+  is ~15s. On the indexer/mini during an 81k backfill the daemon stays warm
+  throughout the sweep and releases the ~4GB only once the backfill truly stops — so
+  600s is correct on BOTH a personal Mac and the dedicated indexer. Override per
+  machine via BUBBLE_SHIELD_GEMMA_IDLE (=0 for always-warm).
+
+## 1.24.5 — 2026-07-17 — FEAT #626: Apple Vision OCR (Vision-first, docling-rescue) — ~145x faster scanned-doc OCR
+
+Scanned-PDF OCR was docling/RapidOCR at ~220s/doc — the dominant cost of the 81k
+backfill. Native Apple Vision does the same in ~1s warm (validated: 6/6 runs
+0.73-1.19s, CER 0.28 < RapidOCR 0.35, PII survival 9/9), on-device, free.
+
+- **feat(extract) — Vision-FIRST, docling-RESCUE.** `_ocr_pdf_if_pack_present`
+  tries the native Vision helper first; on ANY failure (absent/error/empty) it
+  falls through to the EXISTING docling/RapidOCR path, unchanged. Both fail ->
+  None (fail-closed preserved: an un-OCR'd doc is never certified clean). Same
+  `[OCR]` tag. Escape hatch: `BUBBLE_SHIELD_DISABLE_VISION_OCR=1` forces docling.
+  docling stays as a per-doc rescue (some docs Vision mis-reads, e.g. serif e/c on
+  emails), NOT a platform fallback — OCR only ever runs on macOS (the mini/host;
+  team clients read the mini's masked shadow, never OCR).
+- **ZERO client toolchain dependency.** The plugin SHIPS a pre-compiled UNIVERSAL
+  (arm64+x86_64) `visionocr` binary. Its only runtime deps are macOS system
+  frameworks + the Swift runtime (in base macOS since 2019) -> runs on any modern
+  Mac with NO Xcode / Command Line Tools / swiftc. Setup copies + smoke-tests the
+  shipped binary before enabling; swiftc-compile from source is kept only as a
+  last-ditch fallback. Proven on a bare-Mac simulation (swiftc stripped from PATH).
+- 7 tests (Vision-win / empty->docling / error->docling / both-fail->None /
+  disable-hatch / binary-resolution) + live real-helper verify (3/3 IBANs verbatim,
+  ~1s warm) + OCR/extract regressions green + doctor clean (binary tracked).
+
+## 1.24.4 — 2026-07-16 — FEAT #626: composite sweep ordering (recency × cheap-first, heavy-LAST)
+
+A cold 81k-doc backfill walked ALPHABETICALLY: a heavy scanned PDF early in the
+alphabet stalled the single serial worker while recent, light, high-value docs
+waited weeks. The sweep now orders by recency bucket (<30d, <1y, <3y, older) then
+cheap-first within a bucket (st_size × extension factor — scans sink to the tail).
+
+- **feat(shadow_index) — `_sweep_order`.** STAT-ONLY (never reads bytes — dataless
+  Dropbox placeholders stay safe); an unstatable file sinks to the global tail
+  instead of crashing the ordering; path-alphabetical tiebreaker keeps runs
+  deterministic. ORDERING-ONLY: skip/resume, quarantine, deferral, fail-closed,
+  progress callbacks and value-hash threading are behaviorally unchanged.
+  8 tests (bucket/cost/surcharge/tiebreak/unstatable/e2e-counts) + full sweep
+  regression suites green. Built maker≠checker (subagent build, reviewed).
+
+## 1.24.3 — 2026-07-16 — FEAT #560: relax the sandbox-specific guard gates on a confirmed host
+
+The #553-C gates (opaque eval-of-command-substitution, unresolvable-cd + relative-read)
+defend a Cowork-SANDBOX mount-escape threat (/sessions/*/mnt/) that cannot exist on the
+host. On the host they protected nothing (a real protected-folder read is still caught
+by the marker walk-up) and were pure friction — they fail-closed on normal host shell
+(direnv/ssh-agent/brew shellenv hooks, cd "$VAR" && cat rel/file). Strategic basis
+(Joris): Shield's future is host Claude Code, outside Cowork, so host friction hurts the
+primary surface.
+
+- **feat(guard) — `_on_confirmed_host()` + gate the two #553-C sites.** The two gates
+  now skip ONLY on a POSITIVELY-confirmed host (HOME=/Users|/root, no
+  CLAUDE_CODE_IS_COWORK, no CLAUDE_CODE_ENTRYPOINT=local-agent, no sessions dir).
+  INVERTED fail-safe vs the installer: relax only when host is PROVEN; any uncertainty
+  or any Cowork signal -> stay strict (default-deny preserved — a leak from
+  over-relaxing is worse than host friction). The #553-B literal gate stays active on
+  all surfaces (harmless on host). The core marker-DENY, path-extraction, and mail-guard
+  are UNCHANGED on every surface. 9 tests (host relaxes + real read still denies +
+  sandbox/uncertain/any-cowork-signal stay strict); the 5 #553 regression cases still
+  DENY (their tmp HOME is unrecognised -> strict).
+
+## 1.24.2 — 2026-07-16 — FIX #668: drop GLiNER EMAIL spans with no '@' (word 'e-mail' over-masked)
+
+GLiNER tags the bare word 'e-mail'/'email'/'courriel' with its 'email' label, so
+the common word was masked as ⟦EMAIL⟧ — readability damage on every mail/doc that
+says 'e-mail'. (Verified NOT the regex, which requires an @; it's the neural label.)
+
+- **fix(gliner_ext) — EMAIL span must contain '@'.** At span emission, a GLiNER
+  EMAIL span whose text has no '@' is dropped: it cannot be an address. Zero recall
+  risk — a genuine email always contains '@'. A real address (x@y.fr) is untouched.
+  1 regression test. Found during #552 mail-recall verification (whose reported
+  name-leak no longer reproduces — recall improved; only the HTML-extraction half
+  of #552 remains open).
+
+## 1.24.1 — 2026-07-16 — FIX #599: guard fails-OPEN on non-file MCP tools (Telegram reply no longer blocked by an internal error)
+
+A guard-INTERNAL error (e.g. the NER daemon throwing mid-idle-shutdown) fail-closed
+the catch-all and blocked a legitimate Telegram reply with 'erreur interne du guard'
+— even with the plugin 'disabled' (the hooks run from settings.json independently).
+A Telegram reply reads no protected file, so a guard-internal error there has
+nothing to protect.
+
+- **fix(guard) — `_touches_no_file` carve-out at the catch-all.** When an uncaught
+  internal error hits an mcp__* tool whose input carries NO filesystem-path token,
+  fail-OPEN (allow) instead of fail-CLOSED. The fail-closed invariant is fully
+  preserved for anything that could touch a file: native tools (Read/Edit/Write/
+  Bash/Grep/…), and any MCP tool whose input contains a path (incl. a Telegram
+  message that literally names an absolute path — conservative-correct: over-block
+  rather than risk a leak). Reuses the same `_extract_paths_from_values` the
+  decision path uses, so the "is this file-free" test is identical to the real one.
+  8 tests (`test_guard_599_failopen.py`) via a test-only forced-error trigger.
+
+NOTE: this addresses finding (b) of #599 (the fail-closed-on-non-file-tool bug).
+Finding (a) — making plugin-DISABLE actually remove the settings.json hooks — is a
+separate installer concern tracked on the card; this fix makes the hooks harmless
+on non-file tools regardless of enable-state, which is the user-facing pain.
+
+## 1.24.0 — 2026-07-16 — FEAT #645: Mac-mini tier — read distribution over Tailscale (minid + client branch)
+
+The mini is the sole indexer of the shared vault; client Macs read masked shadows
+over the tailnet instead of running models. Joris-decided degraded mode: the mini
+being down NEVER blocks a client — serve raw (accepted leak) and keep working.
+
+- **feat(minid) — `bubble_shield_minid.py`.** Tailscale-bound HTTP daemon (refuses
+  0.0.0.0): GET /health (open), GET /shadow/<hash> (Bearer token, serves the masked
+  shadow with the gazetteer net applied server-side), POST /index_request (queues a
+  cross-machine mark_pending; rel_path strictly under --root, traversal → 400).
+  Token auto-generated at ~/.bubble_shield/mini_token (0600). Port-bind singleton.
+  NO endpoint accepts or returns raw document content — documents travel via
+  Dropbox sync only; the tailnet carries masked text + hashes.
+- **feat(read path) — mini branch in `_read_with_shadow`.** Local HIT → serve
+  (mini untouched). Local miss → ask the mini (2s timeout): remote HIT is served +
+  cached locally (repeat reads free, survives outages); remote MISS fires a
+  non-blocking index_request (fixes the card's second bug: the mini now LEARNS
+  about docs it hasn't indexed) then serves raw; mini down/any error → raw,
+  instantly. Activated ONLY by `mini_url` in bubble-shield.json — absent = exact
+  single-Mac behavior, byte-for-byte.
+- 17 tests (daemon matrix + client matrix) + LIVE two-store loopback verify:
+  remote HIT/cache, MISS→index_request landing in the mini's pending, mini-down
+  raw in 0.12s, cache surviving the outage.
+
+## 1.23.41 — 2026-07-16 — FIX #660: zipf junk-lane works without wordfreq (vendored static set)
+
+wordfreq was never installed in the prod app venv → depollute's `_max_zipf`
+returned 0.0 → the Rule-A fast lane was inert since ship: EVERY gazetteer entry
+went to the Gemma judge (~6s serial call each), and with Gemma down there was no
+fast lane at all.
+
+- **fix(depollute) — static fallback set.** `bubble_shield/data/common_words_zipf4.txt`
+  (every fr/en wordform with zipf >= 4.0, generated from wordfreq 3.1.1 — 12,655
+  words, 99KB) vendored instead of shipping the 54MB wordfreq wheel + dep chain.
+  Membership ⇔ zipf >= ZIPF_JUNK_MIN, so Rule-A verdicts are identical to
+  wordfreq's. wordfreq still wins when installed; missing/corrupt data file →
+  empty set → everything stays in the Gemma lane (fail-toward-masking).
+  Verified against the REAL prod venv interpreter: triage('conseiller')=='junk'.
+  Word list scanned against the pii-guard denylist: zero collisions. 5 tests.
+
+## 1.23.40 — 2026-07-16 — FEAT #554: retro re-index of polluted shadows (safe_words growth invalidation)
+
+The self-correction loop (every masked value auto-seeds the gazetteer → de-pollution
+judges it → junk lands in sticky safe_words) cleans FUTURE docs, but a shadow written
+BEFORE a junk word's judgment kept that word masked forever. On the 81k backfill that
+means early-swept docs stay polluted ("conseiller" as ⟦NOM⟧) permanently.
+
+- **feat(shadow_store) — per-shadow masked-value hash map.** `put_shadow` records
+  `value_hashes` (sha256 strip+lower of each masked value — hashes only, never raw
+  values) in a new `shadow_values` table. Additive schema migration (`stale` column,
+  `_ensure_stale_column`) — old DBs upgrade in place.
+- **feat(safe_words) — invalidation hook.** `add_safe(w)` (fed by de-pollution
+  un-masks and reviewer un-hides) marks every shadow whose value-set contains
+  hash(w) STALE. Fail-open: a store error never breaks the safe-list write.
+- **Safety property: stale shadows are SERVED, never deleted.** Reads keep
+  returning the over-masked shadow (safe direction); `list_indexed()` excludes
+  stale hashes so the next sweep re-indexes those exact files — with the junk word
+  now safe-listed, the fresh shadow comes out clean. Third sweep skips again.
+- **feat(sweep) — token→value resolver.** `vault_value_hashes_fn` resolves the
+  cloaked text's ⟦…⟧ tokens via the session vault and hands only hashes to the
+  store. Resolver failure = shadow just isn't retro-invalidatable (never blocks
+  indexing).
+- 11 tests (`test_554_retro_reindex.py`) incl. the full end-to-end loop
+  (index-polluted → judge → stale → re-sweep → clean, then no re-index churn).
+
+## 1.23.39 — 2026-07-16 — FIX #659: Gemma passes no longer nest mask tokens (token-aware replace)
+
+Found live during the #554 flow verification: the Gemma additive/second passes run
+over ALREADY-MASKED text, and live gemmad extracts the innards of existing tokens
+("NOM_0002") as PII spans. The blind `str.replace` then rewrote INSIDE the token —
+⟦NOM_0002⟧ → ⟦⟦NOM_0004⟧⟧ (nested) — breaking restore reversibility and polluting
+the vault with junk entries.
+
+- **fix(mcp) — `_replace_outside_tokens`.** Both Gemma passes now split on TOKEN_RE
+  and replace only in segments OUTSIDE existing ⟦…⟧ tokens. A span whose only
+  occurrence is inside a token is a natural no-op: it does not count as "applied"
+  (second-pass fail-closed semantics preserved — a form where Gemma returns only
+  token-innards still fails closed when the fast pass found nothing), and the lazy
+  token factory allocates NO vault entry for it. Genuine in-clear misses are still
+  masked. 7 tests (`test_659_no_nested_tokens.py`, includes the live gemmad poison
+  shape), 29 existing 589b regressions green, live re-run of the repro clean.
+
+## 1.23.38 — 2026-07-16 — FIX #582: GLiNER bare "city" retags to ADRESSE (not LIEU_NAISSANCE)
+
+GLiNER classified bare city mentions with no birth context ("basé à Nice", "le dossier
+à Lyon") as LIEU_NAISSANCE, dragging that type's precision to 41.2%. Joris-approved
+policy call (2026-07-16): a bare city is a location mention, not a birthplace.
+
+- **fix(gliner_ext) — the "city" GLiNER label now maps to ADRESSE.** Mask-neutral:
+  both types are `identifying: True, default_cloak: True` in policy.py, so nothing
+  previously masked becomes unmasked — the vault type is just no longer wrong. A
+  genuine "place of birth" prediction keeps LIEU_NAISSANCE (the birth-cue'd label is
+  unchanged, and the regex birthplace matcher was already date-gated). 1 regression
+  test (`test_582_bare_city_maps_to_adresse_not_birthplace`), synthetic only.
+
+## 1.23.37 — 2026-07-16 — FIX #400: tripwire SECU false positive (add NIR mod-97 checksum)
+
+The UserPromptSubmit tripwire's SECU pattern fired on a benign 13-15-digit run (a Google
+error-screen number in an OCR'd image Jade pasted) → nudged the user about 'données
+client brutes (numéro de sécurité sociale)' that weren't there — hostile UX on an
+innocent message.
+
+- **fix(tripwire) — gate the SECU nudge on the NIR mod-97 control-key check.** Added
+  `_secu_valid` (the DGFiP algorithm: key == 97 - body13 % 97) and require it before
+  flagging — mirroring the IBAN path, which already validates. An unvalidatable run (no
+  2-digit key, or a failing checksum) no longer nudges. A checksum-valid NIR still does.
+  Precision-first (a nudge, not a fail-closed gate): fail toward NOT nudging on an
+  unvalidatable number. 5 tests (`test_400_tripwire_secu_checksum.py`), SYNTHETIC NIRs
+  only (valid key constructed arithmetically, never a real number).
+
+## 1.23.36 — 2026-07-16 — FEAT #574: strip the 2D-DOC barcode block by default (covert PII channel)
+
+French tax notices carry a machine-decodable ANSSI 2D-DOC barcode that encodes identity
++ amounts — a COVERT PII channel that survives even when the visible text is tokenized
+(the barcode payload is a base32-ish run, not caught by name/IBAN recognizers). Per
+Joris's #547 decision (barcode-first; amounts stay toggleable).
+
+- **feat(extract) — deterministic pre-tokenization 2D-DOC strip, default-on.**
+  `strip_2ddoc_barcodes` replaces a 2D-DOC block (`DC` header + version + CA id + a 40+-char
+  contiguous uppercase-alnum payload) with a single `⟦2DDOC_BARCODE_STRIPPED⟧` marker
+  (so the reader knows a block was removed, not silently dropped). Applied at
+  `extract_text`, the single dispatch every branch (PDF/DOCX/image/text) returns through.
+  The 40+-char CONTIGUOUS payload requirement is what stops normal uppercase prose/headings
+  (which have spaces) from ever matching. Idempotent + best-effort (a strip error returns
+  the original — never loses the doc). AMOUNTS in the visible text are UNTOUCHED (#547).
+  Applied in BOTH extractors: `scripts/bubble_shield_extract.py` AND `webapp/extract.py`
+  (the webapp has its own copy — both surfaces covered so no branch leaks the barcode).
+- 6 tests (`test_574_2ddoc_strip.py`), SYNTHETIC fixtures only (fabricated DC-header + fake
+  payload — never a real barcode), incl. the amounts-untouched + normal-text-not-stripped
+  regression guards.
+
+## 1.23.35 — 2026-07-16 — FIX #581: ID-value regex no longer crosses a newline (8 mis-tags, hurt LIEU_NAISSANCE precision)
+
+The #577 LIEU_NAISSANCE bench surfaced 8 mis-tags: `structured_ext`'s ID-value char
+classes used `\s` (which INCLUDES `\n`), so a PIECE_IDENTITE/ID-number pattern crossed
+a line break and swallowed a SIRET-shaped run + adjacent LIEU_NAISSANCE content onto the
+next line. An ID number never spans a line break — the same class as the documented
+NOM/`_SP` line-break fix.
+
+- **fix(structured_ext) — intra-line whitespace only in ID value classes.** All 4
+  occurrences of `[A-Z0-9\s...]` → `[A-Z0-9 \t...]` (space + tab, never `\n`). A
+  split-across-a-newline run is no longer captured as one value; a same-line ID still
+  matches fully (no recall regression). 4 tests (`test_581_id_newline.py`) incl. a
+  file-level guard that no ID class uses bare `\s`.
+- Validation note: the regex-level fix is proven by tests; re-running the #572/#577
+  precision bench (needs the ML pack) is the on-demand confirmation step.
+- Also synced the repo-root + mcpb-mirror `structured_ext.py` copies with the vendored
+  one (the SAME dual-copy drift that #646 surfaced — flagged for a hygiene guard).
+
+## 1.23.34 — 2026-07-15 — FEAT #646: quarantine un-certifiable docs (stop the infinite retry that burns the Gemma worker)
+
+A doc that fails to certify EVERY sweep (an un-extractable INPI/watermarked doc, a
+giant form, a persistently-failing verify) was re-tried on every sweep FOREVER —
+burning the single serial Gemma worker (which can't be parallelized) on a doc that can
+never complete. The stuck liasse did exactly this for days before it was fixed. On the
+81k base, a handful of permanently-un-processable docs would permanently steal worker
+time from the backlog.
+
+- **feat(sweep) — quarantine-after-N.** `pending` gains a `fail_count` column (additive
+  schema + a backward-compat `ALTER TABLE ADD COLUMN` for existing DBs — no migration).
+  `mark_pending(failed=True)` (a certify-failure) increments it; a plain read-miss queue
+  (`failed=False`) does NOT (a not-yet-indexed file is not a failure). After
+  `QUARANTINE_AFTER_FAILS` (env, default 5) the doc leaves the pending/retry queue →
+  `quarantined_files()` (surfaced to the operator, needs-attention). `run_sweep` SKIPS
+  quarantined content — no re-fail, no worker burn — and returns a `quarantined` count.
+  The #643 `StructuredFormTooLargeError` (giant forms) feeds this automatically (it's a
+  certify-failure → increments → quarantines). Env `BUBBLE_SHIELD_QUARANTINE_AFTER_FAILS`.
+- 4 tests (`test_646_quarantine.py`) incl. the plain-miss-never-quarantines + backward-
+  compat-old-schema + sweep-skips-quarantined guarantees.
+- (Also synced the repo-root `bubble_shield/` engine copies with the vendored ones — a
+  latent dual-copy drift the change surfaced.)
+
+## 1.23.33 — 2026-07-15 — FIX #644: host update also refreshes the DAEMON stable dir (was stranding daemon code)
+
+Same 'repo ≠ running code' class as the guard host-refresh (v1.23.28), different
+location. The launchd nerd/gemmad run from `~/.bubble_shield/daemon/{scripts,vendor}`,
+which `setup_ml` copies out ONCE at ML-pack setup and NEVER refreshes on update.
+Verified live 2026-07-15: the daemon's vendored `engine.py` was 3 days stale while the
+checkout was current — a shipped detection/verify fix (e.g. #643) would silently never
+reach the running daemon.
+
+- **fix(installer) — the armed host-refresh (`_refresh_stable_scripts_if_armed`) now
+  ALSO refreshes the daemon stable dir.** `_refresh_daemon_stable_dir_if_present`
+  re-copies the daemon scripts (nerd/gemmad/gemma_classifier/setup_ml) + the whole
+  vendor tree into `~/.bubble_shield/daemon/`, GATED on that dir already EXISTING (a
+  host without the ML pack is untouched — zero footprint). It copies only when content
+  DIFFERS (cheap content check + an engine.py staleness probe), and only then
+  `launchctl kickstart -k`s the daemons so a long-lived KeepAlive process picks up the
+  new code instead of running stale in-memory for up to its idle window (4h). No churn
+  on an already-current host. Copy-only, best-effort, never raises.
+- Verified live: on this Mac the daemon vendor engine was STALE; running the refresh
+  made it FRESH and detected the change (would kickstart). 4 new tests
+  (`test_644_daemon_refresh.py`) incl. the zero-footprint (no ML pack) + no-churn
+  (unchanged) guarantees.
+
+## 1.23.32 — 2026-07-15 — FIX #643: structured-form Gemma verify covers the WHOLE doc (was blind to 83% of long forms)
+
+The structured-form second pass (#589 — "escalate to Gemma to catch PII the fast
+pass MISSED on a form") truncated to `text[:6000]`. On a real ~35k-char liasse the
+verify saw ~17% of the doc, silently defeating the guarantee on exactly the long-form
+class that dominates a CGP base.
+
+- **fix(verify) — window the WHOLE doc, CLIENT-SIDE.** `_gemma_extract_call` now
+  splits the text into overlapping windows and POSTs each as a SHORT separate
+  `/extract_pii` request (mirroring the de-pollution `daemon_classify` pattern), then
+  unions the spans. `gemma_classifier.extract_pii` processes ONE window per request.
+  WHY client-side: a whole-doc call in ONE request took 121s and tripped the daemon's
+  internal `REQ_TIMEOUT_EXTRACT` (90s) → HTTP 500; N short requests each stay well
+  under it. Gemma can't be parallelized (measured: 2 parallel procs 77.5s+53.6s vs
+  13.7s solo — Metal serializes), so the cost is genuinely N-sequential and correct.
+  Fail-closed preserved: a per-window request error re-raises (the caller fails
+  closed) — a dropped window is a hole in the verify, never silently accepted.
+- **fix(verify) — size cap → quarantine (#646).** A form over
+  `_GEMMA_VERIFY_MAX_WINDOWS` (12 ≈ 72k chars) is NOT ground for many minutes on the
+  single serial worker (that starves the backlog); it raises `StructuredFormTooLargeError`
+  (a SUBCLASS of StructuredFormUnverifiedError so every fail-closed handler still
+  catches it — no leak) so the sweep can quarantine it. Note: a 300-page acte de
+  cession is PROSE (not a fiscal form) → fast-pass only, never hits this path.
+- Verified live on the real 35k liasse: whole-doc verify OK in ~5 min (7 sequential
+  windows), 153 tokens masked (MORE than the truncated version's 149 — it now catches
+  what the first-6000-chars pass missed). 7 new tests (`test_643_windowed_verify.py`).
+- Strategic follow-up (#594): a faster whole-doc detector collapses the 7 sequential
+  windows into 1 — the real speed lever, since parallelism is off the table.
+
+## 1.23.31 — 2026-07-15 — FIX: residual scan consistent with masking + masks what it finds; Gemma verify timeout tunable
+
+Closes the "stuck structured form" incident end-to-end (a real liasse stranded at
+96% / 29-of-30 for days): after the daemon-idle fix (v1.23.29), TWO more independent
+gates were blocking it. Both fixed:
+
+- **fix(engine) #589-E — the residual scan now runs the SAME detector as masking,
+  and MASKS what it finds instead of just crying "leak".** The old scan ran a
+  WEAKER pipeline (bare regex, no GLiNER, no overlap resolution) on the OUTPUT —
+  which masking rearranges (token replacement + the #273 glue-fix change spacing/
+  word boundaries). A mangled-spacing SIREN unmatchable on the INPUT became
+  matchable on the rearranged OUTPUT → reported as residual → 'leak' → the form
+  fail-closed EVERY sweep, forever, for a value its own masker never saw. Now:
+  (1) `_residual_scan` uses `self._detect` (identical pipeline, same sensitivity
+  by construction); (2) a maskable value found on the output is MASKED into the
+  same vault (bounded 3-iter loop) and the output re-scanned — the leak is FIXED,
+  not blocked on and not ignored. Genuinely un-maskable residuals still report →
+  'leak' → fail-closed (tested); the safety net is intact, only the phantom
+  false-blocks are gone.
+- **fix(mcp) #589-F — the structured-form Gemma /extract_pii timeout was a hard,
+  MARGINAL 30s.** Measured on the same real ~35k-char liasse: 9.1s / 21.0s / >30s
+  (timeout) / ~60s across runs — pure load variance on the single serial MLX
+  worker. A marginal timeout makes certification a coin flip, and a timed-out form
+  is retried every sweep forever (30s of worker burned per retry, never completes).
+  Now 120s default (4× worst measurement), env-tunable per deployment via
+  `BUBBLE_SHIELD_GEMMA_EXTRACT_TIMEOUT`.
+- Includes the #589-D fix (verified-clean: a form the fast pass fully masked +
+  Gemma-ran-fine-found-nothing certifies instead of fail-closing) shipped in the
+  same train.
+- Verified on the REAL stuck liasse: certifies in ~64s, 149 entities masked
+  (including the revealed SIREN), zero residual. 5 new tests
+  (`test_residual_masked_not_reported.py`) incl. the un-maskable-residual
+  fail-closed guarantee + timeout env knob.
+
+## 1.23.30 — 2026-07-15 — FIX: guard no longer fail-closes on long inputs (ENAMETOOLONG) — the REAL "erreur interne" cause
+
+The v1.23.27 traceback log (FIX 1) finally caught the actual exception behind the
+recurring "🔒 erreur interne du guard" on long git commits / long Telegram sends:
+```
+OSError: [Errno 63] File name too long
+  at guard.py:170  start = target if target.is_dir() else target.parent
+```
+A tool ARGUMENT that isn't a real path — a long commit body, a long chat message —
+gets extracted as a "path candidate" and handed to `_find_marker_root`, whose first
+line called `target.is_dir()` UNGUARDED. On a string longer than PATH_MAX the OS
+raises ENAMETOOLONG, which escaped to the blanket-except → generic fail-CLOSED.
+This is DETERMINISTIC on length (not the v1.23.27 transient race) — which is exactly
+why every report said "longer inputs trip it more." The retry loop didn't catch it
+because errno 63 isn't transient (retrying a too-long string never helps).
+
+- **fix(guard) — `_find_marker_root` guards the initial `is_dir()` against
+  ENAMETOOLONG.** A string that can't even be `stat`'d is not a real file, so it
+  cannot be inside a protected folder → return `None` (no marker) and let the
+  decision proceed, instead of crashing. Security: a path over PATH_MAX cannot
+  exist on disk, so allowing it can never leak a real protected file — there is no
+  real file it could reference. Real protection is unchanged (a normal-length path
+  inside a marked folder still blocks — tested). 4 regression tests incl. the exact
+  long-commit + long-MCP-message repro + a "real protected path still blocks" guard.
+
+## 1.23.29 — 2026-07-15 — FIX: daemon idle-shutdown must outlast the sweep interval (stuck-doc 4GB loop)
+
+Incident (found live): a client base showed 29/30 docs indexed, stuck at 96% — one
+"liasse fiscale" (a structured tax form) perpetually pending, and the sweep re-warming
+~4GB (GLiNER + Gemma) every 20 min to retry it. Root cause: the NER + Gemma daemons'
+idle-shutdown default had drifted back to **600s** while the sweep's `StartInterval` is
+**1200s**. So the daemon warmed for sweep N always idle-shut-down before sweep N+1 →
+every sweep hit a COLD daemon → the liasse (a structured form REQUIRES GLiNER to certify,
+fail-closed per #589) raised `NERDownError` and was marked `failed` every sweep, stranded
+`pending` forever. Net: a permanent 4GB/CPU loop retrying one doc that could never complete.
+The daemon comment already said "4h default" (#561) — but the literal had regressed to 600s
+(doc/code mismatch).
+
+- **fix(daemons) — idle-shutdown default 600s → 14400s (4h), for BOTH nerd + gemmad.**
+  The idle-shutdown must be strictly greater than the sweep interval so a daemon warmed
+  for one sweep is still alive at the next (no cold-race, no fail-close loop). This also
+  REDUCES churn (no repeated ~4GB cold loads every 20 min). Env overrides
+  (`BUBBLE_SHIELD_NERD_IDLE` / `BUBBLE_SHIELD_GEMMA_IDLE`, `0` = always-warm) still honoured.
+  4 regression tests lock the invariant (`idle_default > sweep_interval`) + pin the exact
+  default so the doc/code mismatch can't silently reappear.
+
+## 1.23.28 — 2026-07-15 — FIX: host guard-refresh (updates now actually reach the live guard)
+
+Incident: v1.23.27 shipped the guard false-block fix to dev/public/the app
+checkout — but the guard the hook ACTUALLY runs lives at STABLE_DIR
+(`~/.claude/bubble-shield/guard.py`), and on a host Mac NOTHING refreshed it: the
+SessionStart self-installer only copied scripts into STABLE_DIR when inside the
+Cowork VM (`_in_cowork_vm()` gate). So a client who updated kept running the OLD
+flaky guard from an earlier manual deploy — the fix silently never reached the
+running hook. Every future guard fix had this same last-mile gap.
+
+- **fix(installer) — refresh the live guard on host updates.** On a non-Cowork
+  SessionStart, if the guard is ALREADY armed in the host `settings.json` (the
+  user opted in previously), `install_user_hooks.py` now re-copies the current
+  plugin's hook scripts (+ vendored engine) into STABLE_DIR — so a plugin/app
+  `update` finally propagates guard fixes to the file the hook runs. **Copy-only:
+  it NEVER writes `settings.json` and NEVER arms the guard** — arming stays
+  Cowork-only. Gated on the existing armed-entry, so a machine that never opted
+  in is left completely untouched (same zero-footprint guarantee as before). The
+  arm-detection recognises the v1.23.27 FIX-3 module-import command form (it keeps
+  the `[ -f .../guard.py ]` check). 6 new tests incl. the two zero-footprint
+  guarantees (un-armed host, non-Shield settings.json → no STABLE_DIR created).
+
+## 1.23.27 — 2026-07-14 — FIX: guard no longer false-blocks under concurrent-hook load
+
+Symptom (Joris, live): the PreToolUse guard intermittently fail-CLOSED with the
+generic "🔒 erreur interne du guard, accès bloqué par sécurité." on legit ops
+(git commit/add, Telegram sends) and CLEARED on identical retry — a false block,
+not a policy hit, escalating as more tools got wired over a session. Root cause:
+the hook fires a fresh `python3` per Read/Edit/Write/Grep/Bash AND per `mcp__*`
+call (Telegram included), so a burst runs several cold-start interpreters that all
+hammer the filesystem (config reads + `.bubble-shield.json` marker walk-ups). Under
+that concurrent I/O pressure a TRANSIENT OSError (EINTR, EMFILE "too many open
+files", or a momentary Dropbox/CloudStorage placeholder miss) raised on an fs call
+that isn't locally wrapped → reached the blanket-except → fail-closed on a decision
+that would have succeeded a millisecond later.
+
+- **fix(guard) — FIX 2: retry the decision on a transient OSError before failing
+  closed.** The guard's decision is a read-only, idempotent computation, so on a
+  transient-I/O OSError (EINTR/EMFILE/ENFILE/EAGAIN, or a bare errno-None OSError
+  like a cloud-placeholder miss) it now re-runs up to 3× with tiny backoff before
+  giving up. A NON-transient error (a real logic bug — TypeError/KeyError) is NOT
+  retried; it still fails closed immediately. The retry can never coerce toward
+  ALLOW — a re-run that lands on a legit block still denies.
+- **fix(guard) — FIX 1: log the real traceback before failing closed.** The
+  blanket-except now appends the exception + a REDACTED event snapshot (tool NAME
+  only — never `tool_input`/command strings, which can carry client paths/PII) to
+  `~/.bubble_shield/guard_errors.log` (1 MB tail-capped, best-effort, never raises).
+  So the next "erreur interne" is diagnosable instead of a guessing game.
+- **perf(guard) — FIX 3: run the guard as an imported MODULE, not `__main__`.**
+  `python3 guard.py` compiles the 88 KB guard from source EVERY fire (a `__main__`
+  module is never byte-cached), which under concurrent bursts is wasted CPU and a
+  larger transient-failure window. The hook now runs `import guard; guard.main()`
+  so the `.pyc` caches and subsequent fires skip the recompile — less pressure, the
+  same behaviour. (Applies on the next install/SessionStart that re-writes the hook
+  command; host `settings.json` guard command is updated on re-install.)
+
 ## 1.23.26 — 2026-07-14 — PERF: de-pollution judges each entry ONCE (not every sweep)
 
 - **perf(de-pollution) — per-sweep pass was re-judging the WHOLE gazetteer:** with

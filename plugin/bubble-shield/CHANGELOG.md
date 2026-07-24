@@ -1,5 +1,9 @@
 # Changelog — bubble-shield
 
+## 1.24.10 — 2026-07-24
+
+- Ship `bubble_shield_setup_mini.py` to the public repo — installs `minid` (the Mac-mini read-distribution daemon) as a KeepAlive launchd service. Run ONLY on the mini node (opt-in, Option 2): `python3 plugin/bubble-shield/scripts/bubble_shield_setup_mini.py --host <mini-tailscale-ip> --root <protected-vault> [--port 8377]`. Not run by install-app.sh — reader Macs never self-promote to a server.
+
 ## 1.24.9 — 2026-07-21 — hygiene batch: URL floor (#678) + release gates (#385/#682) + dogfood scan (#396) + flaky test (#665)
 
 Five small buildables in one release:
