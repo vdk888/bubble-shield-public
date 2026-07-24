@@ -1,5 +1,5 @@
 from __future__ import annotations
-import base64, hashlib, hmac, json, os, sqlite3, time
+import base64, getpass, hashlib, hmac, json, os, sqlite3, subprocess, time
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +15,12 @@ from bubble_shield.vault import Vault
 # encrypted envelope and no plaintext DB survives a write.
 _PASSPHRASE_ENV = "BUBBLE_SHIELD_STORE_PASSPHRASE"
 
+# macOS System-keychain generic-password service holding the same passphrase.
+# Fallback for launchd-started consumers (minid, sweep, MCP server) that run
+# without the env var set (#759): without this they'd read an encrypted store
+# as plaintext-fallback → decrypt failure → silent shadow_count=0.
+_KEYCHAIN_SERVICE = "bubble-shield-store"
+
 
 def _shield_home() -> Path:
     return Path(os.environ.get("BUBBLE_SHIELD_HOME", str(Path.home() / ".bubble_shield")))
@@ -29,9 +35,30 @@ def enc_path() -> Path:
     """At-rest encrypted artifact (vault-format envelope of the SQLite bytes)."""
     return _shield_home() / "shield.db.enc"
 
+def _keychain_passphrase() -> Optional[str]:
+    """Read the store passphrase from the macOS System keychain generic-password
+    (service=_KEYCHAIN_SERVICE, account=current user). FAIL-SAFE: any exception,
+    non-zero exit, missing /usr/bin/security (non-macOS), or empty output returns
+    None so the guard/daemon never crashes on the keychain path."""
+    try:
+        out = subprocess.run(
+            ["/usr/bin/security", "find-generic-password",
+             "-s", _KEYCHAIN_SERVICE, "-a", getpass.getuser(), "-w",
+             "/Library/Keychains/System.keychain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            pw = (out.stdout or "").rstrip("\n")
+            return pw if pw else None
+    except Exception:
+        pass
+    return None
+
 def _passphrase() -> Optional[str]:
     pw = os.environ.get(_PASSPHRASE_ENV)
-    return pw if pw else None
+    if pw:
+        return pw
+    return _keychain_passphrase()
 
 # One-time-per-process latch so plaintext-fallback warns loudly exactly once,
 # not on every connect() (get_shadow/list_indexed/put_shadow all connect()).

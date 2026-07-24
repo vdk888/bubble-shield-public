@@ -1,5 +1,9 @@
 # Changelog — bubble-shield
 
+## 1.24.11 — 2026-07-24
+
+- Fix #759 (P0): `shadow_store._passphrase()` falls back to the macOS System keychain (service `bubble-shield-store`, account = current user) when `BUBBLE_SHIELD_STORE_PASSPHRASE` is unset. launchd-started consumers (minid, sweep, MCP server) run without that env, so with an ENCRYPTED shadow store they previously read it as plaintext-fallback → decrypt failure → silent `shadow_count=0` (total read-tier outage). Now every consumer routes through the one `_passphrase()`, so the fix covers minid + sweep + MCP at once — no per-daemon wrapper. Fail-safe (any error → None → plaintext fallback preserved), pure-stdlib, 3.9-safe. This retires the temporary passphrase-injection wrappers used on the first client mini.
+
 ## 1.24.10 — 2026-07-24
 
 - Ship `bubble_shield_setup_mini.py` to the public repo — installs `minid` (the Mac-mini read-distribution daemon) as a KeepAlive launchd service. Run ONLY on the mini node (opt-in, Option 2): `python3 plugin/bubble-shield/scripts/bubble_shield_setup_mini.py --host <mini-tailscale-ip> --root <protected-vault> [--port 8377]`. Not run by install-app.sh — reader Macs never self-promote to a server.
